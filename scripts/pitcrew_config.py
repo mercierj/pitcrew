@@ -15,6 +15,7 @@ from typing import Any
 FORGES = {"github", "gitlab"}
 TRACKERS = {"linear", "github", "gitlab", "none"}
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 
 class ConfigError(ValueError):
@@ -105,25 +106,11 @@ def write_project(
     if default_file.is_symlink():
         raise ConfigError(f"refusing to overwrite symlink {default_file}")
     destination = project_directory / "config.json"
-    if destination.is_symlink() or destination.exists():
-        raise ConfigError(f"refusing to overwrite {destination}")
-    created_inode: tuple[int, int] | None = None
+    project_fd = os.open(project_directory, DIRECTORY_FLAGS)
     try:
-        with destination.open("x", encoding="utf-8") as config_file:
-            stat = destination.stat(follow_symlinks=False)
-            created_inode = (stat.st_dev, stat.st_ino)
-            config_file.write(serialized)
-    except FileExistsError as error:
-        raise ConfigError(f"refusing to overwrite {destination}") from error
-    except OSError:
-        if created_inode is not None:
-            try:
-                stat = destination.stat(follow_symlinks=False)
-                if (stat.st_dev, stat.st_ino) == created_inode:
-                    destination.unlink()
-            except OSError:
-                pass
-        raise
+        _write_exclusive_config(project_fd, "config.json", serialized)
+    finally:
+        os.close(project_fd)
     temporary: Path | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(prefix=".default-", dir=root)
@@ -144,6 +131,167 @@ def write_project(
     return destination
 
 
+def _write_exclusive_config(parent_fd: int, name: str, serialized: str) -> None:
+    descriptor: int | None = None
+    created_inode: tuple[int, int] | None = None
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        stat = os.fstat(descriptor)
+        created_inode = (stat.st_dev, stat.st_ino)
+        data = serialized.encode("utf-8")
+        while data:
+            written = os.write(descriptor, data)
+            data = data[written:]
+    except FileExistsError as error:
+        raise ConfigError(f"refusing to overwrite {name}") from error
+    except OSError:
+        if created_inode is not None:
+            try:
+                stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if (stat.st_dev, stat.st_ino) == created_inode:
+                    os.unlink(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _open_directory_at(parent_fd: int, name: str, *, create: bool) -> int:
+    try:
+        return os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        return os.open(name, DIRECTORY_FLAGS, dir_fd=parent_fd)
+
+
+def _open_absolute_directory(path: Path, *, create: bool = False) -> int:
+    if not path.is_absolute():
+        raise ConfigError("directory anchor must be an absolute path")
+    descriptor = os.open("/", DIRECTORY_FLAGS)
+    try:
+        for component in path.parts[1:]:
+            next_descriptor = _open_directory_at(descriptor, component, create=create)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except OSError as error:
+        os.close(descriptor)
+        raise ConfigError("directory anchor must not be a symlink or missing") from error
+
+
+def _read_legacy_config(project: str, home: str) -> Mapping[str, Any]:
+    home_fd = _open_absolute_directory(Path(home).expanduser())
+    descriptors = [home_fd]
+    try:
+        try:
+            for name in (".claude", "agent-loop", project):
+                descriptors.append(_open_directory_at(descriptors[-1], name, create=False))
+            config_fd = os.open(
+                "config.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptors[-1]
+            )
+            with os.fdopen(config_fd, "r", encoding="utf-8") as config_file:
+                legacy = json.load(config_file)
+        except OSError as error:
+            raise ConfigError("legacy config path must not be a symlink or missing") from error
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    if not isinstance(legacy, Mapping):
+        raise ConfigError("legacy config must be an object")
+    return legacy
+
+
+def _open_runtime_project(project: str, values: Mapping[str, str]) -> int:
+    codex_home = values.get("CODEX_HOME")
+    if codex_home:
+        base = Path(codex_home).expanduser()
+        base_fd = _open_absolute_directory(base, create=True)
+        try:
+            root_fd = _open_directory_at(base_fd, "pitcrew", create=True)
+        finally:
+            os.close(base_fd)
+    else:
+        home = values.get("HOME")
+        if not home:
+            raise ConfigError("HOME or CODEX_HOME is required")
+        home_fd = _open_absolute_directory(Path(home).expanduser())
+        try:
+            codex_fd = _open_directory_at(home_fd, ".codex", create=True)
+        finally:
+            os.close(home_fd)
+        try:
+            root_fd = _open_directory_at(codex_fd, "pitcrew", create=True)
+        finally:
+            os.close(codex_fd)
+    try:
+        return _open_directory_at(root_fd, project, create=True)
+    finally:
+        os.close(root_fd)
+
+
+def legacy_config_paths(
+    project: str, env: Mapping[str, str] | None = None
+) -> tuple[Path, Path]:
+    if not isinstance(project, str) or not PROJECT_NAME.fullmatch(project):
+        raise ConfigError("project_name must match ^[a-z0-9][a-z0-9_-]*$")
+    values = os.environ if env is None else env
+    home = values.get("HOME")
+    if not home:
+        raise ConfigError("HOME is required for legacy migration")
+    source = Path(home).expanduser() / ".claude" / "agent-loop" / project / "config.json"
+    return source, runtime_root(values) / project / "config.json"
+
+
+def migrate_legacy(project: str, env: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if env is None else env
+    _, destination = legacy_config_paths(project, values)
+    legacy = _read_legacy_config(project, values["HOME"])
+    migrated = dict(legacy)
+    migrated["project_name"] = project
+    migrated["schema_version"] = 1
+    linear = legacy.get("linear", {})
+    migrated["providers"] = {
+        "forge": "github",
+        "tracker": "linear" if isinstance(linear, Mapping) and linear.get("use") else "none",
+    }
+    migrated.setdefault("release", {"autonomy": "off"})
+    safety = migrated.setdefault("safety", {})
+    if not isinstance(safety, Mapping):
+        raise ConfigError("safety must be an object")
+    migrated["safety"] = dict(safety)
+    migrated["safety"].update(
+        {
+            "allow_database_writes": False,
+            "allow_destructive_git": False,
+            "allow_secret_reads": False,
+        }
+    )
+    validate(migrated)
+    serialized = json.dumps(migrated, indent=2) + "\n"
+
+    try:
+        project_fd = _open_runtime_project(project, values)
+    except OSError as error:
+        raise ConfigError("runtime project path must not be a symlink") from error
+    try:
+        _write_exclusive_config(project_fd, "config.json", serialized)
+    finally:
+        os.close(project_fd)
+    return destination
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -152,12 +300,20 @@ def main(argv: list[str] | None = None) -> int:
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--profile", choices=("generic", "getbill"), required=True)
     init_parser.add_argument("--project", required=True)
+    migrate_parser = subparsers.add_parser("migrate")
+    migrate_parser.add_argument("--project", required=True)
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
     if args.command == "validate":
         validate(json.loads(args.config.read_text(encoding="utf-8")))
         print(f"Valid config: {args.config}")
+        return 0
+    if args.command == "migrate":
+        source, destination = legacy_config_paths(args.project)
+        print(f"Migrating legacy config from {source} to {destination}")
+        destination = migrate_legacy(args.project)
+        print(f"Migrated config to {destination}")
         return 0
     destination = write_project(root / "profiles" / f"{args.profile}.json", args.project)
     print(f"Created {destination}")

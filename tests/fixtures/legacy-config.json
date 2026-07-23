@@ -1,0 +1,13 @@
+{
+  "project_name": "getbill",
+  "github": {"reviewer_login": "mercierj", "org": "mercierj"},
+  "linear": {"use": false},
+  "repos": [
+    {
+      "name": "getbill",
+      "path": "/Users/jo/Prog/getbill",
+      "default_branch": "main",
+      "lang": "php"
+    }
+  ]
+}
