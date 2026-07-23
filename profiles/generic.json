@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "project_name": "example",
+  "providers": {"forge": "github", "tracker": "linear"},
+  "repos": [],
+  "release": {"autonomy": "off"},
+  "safety": {
+    "confirm_each_remote_action": [],
+    "allow_database_writes": false,
+    "allow_destructive_git": false,
+    "allow_secret_reads": false
+  }
+}
