@@ -522,8 +522,31 @@ class DashboardServiceTest(unittest.TestCase):
                     with self.assertRaises(DashboardError):
                         service.control(action, skill)
 
-        self.assertEqual(1, len(runner.calls))
-        self.assertIn("status", runner.calls[0][0])
+        self.assertEqual(2, len(runner.calls))
+        self.assertTrue(all("status" in call[0] for call in runner.calls))
+        starter.assert_not_called()
+
+    def test_control_refreshes_cached_scheduler_eligibility_before_action(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        service.snapshot()
+        runner.schedule = [
+            {
+                **entry,
+                "enabled": False,
+                "reason": "disabled after snapshot",
+            }
+            if entry["skill"] == "research-run"
+            else entry
+            for entry in runner.schedule
+        ]
+
+        with mock.patch("scripts.pitcrew_dashboard.subprocess.Popen") as starter:
+            with self.assertRaisesRegex(DashboardError, "disabled role"):
+                service.control("trigger", "research-run")
+
+        self.assertEqual(2, len(runner.calls))
+        self.assertTrue(all("status" in call[0] for call in runner.calls))
         starter.assert_not_called()
 
     def test_control_eligibility_comes_from_scheduler_status(self):
@@ -586,7 +609,7 @@ class DashboardServiceTest(unittest.TestCase):
                 "--skill",
                 "research-run",
             ],
-            runner.calls[1][0],
+            runner.calls[2][0],
         )
         self.assertEqual(
             [
@@ -598,10 +621,21 @@ class DashboardServiceTest(unittest.TestCase):
                 "--skill",
                 "research-run",
             ],
-            runner.calls[2][0],
+            runner.calls[4][0],
         )
         self.assertEqual({"accepted": True}, stopped)
         self.assertEqual({"accepted": True}, restarted)
+        self.assertEqual(
+            ["status", "status", "stop", "status", "install"],
+            [
+                next(
+                    action
+                    for action in ("status", "stop", "install")
+                    if action in args
+                )
+                for args, _ in runner.calls
+            ],
+        )
         for _, kwargs in runner.calls:
             self.assertEqual(
                 {"text": True, "capture_output": True, "check": False},

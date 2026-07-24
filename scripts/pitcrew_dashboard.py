@@ -223,7 +223,7 @@ class DashboardService:
         entry = next(
             (
                 entry
-                for entry in self._schedule_entries()
+                for entry in self._schedule_entries(force_refresh=True)
                 if entry["skill"] == skill
             ),
             None,
