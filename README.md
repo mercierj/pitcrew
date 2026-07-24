@@ -99,6 +99,31 @@ not-yet-configured QA/ops roles. Each installed job performs one bounded pass,
 uses a non-overlapping per-role lock, and returns. Scheduled transcripts are
 discarded; only the latest bounded role summary is retained.
 
+## Local operator dashboard
+
+Start the dashboard manually when you need an operational view:
+
+```bash
+cd /Users/jo/Prog/pitcrew
+./bin/pitcrew-dashboard
+```
+
+Open `http://127.0.0.1:8765`. The server listens only on localhost and runs until
+you shut it down with Ctrl-C. It displays scheduler health, enabled agents,
+activity retained for seven days, and GitLab work. The GitLab panel enters a
+degraded state when GitLab is offline or unavailable, while local status,
+history, and controls continue to work.
+
+For an enabled agent, **Trigger** starts one bounded pass immediately (the
+per-agent lock prevents overlap), **Stop** stops its current pass and unloads its
+schedule, and **Restart** installs or reloads its schedule. Release, prod, and
+preprod controls are explicitly absent: the dashboard cannot deploy or perform
+remote environment actions. The status CLI remains available:
+
+```bash
+python3 bin/pitcrew-schedule.py status --project getbill
+```
+
 ## State and providers
 
 The generic lifecycle is:

@@ -8,6 +8,65 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocsTest(unittest.TestCase):
+    def test_dashboard_operator_contract_is_documented(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        scheduled = (ROOT / "references/SCHEDULED-TASKS.md").read_text(
+            encoding="utf-8"
+        )
+
+        for name, text in (("README.md", readme), ("SCHEDULED-TASKS.md", scheduled)):
+            normalized = text.lower()
+            for expected in (
+                "./bin/pitcrew-dashboard",
+                "http://127.0.0.1:8765",
+                "seven days",
+                "trigger",
+                "stop",
+                "restart",
+                "ctrl-c",
+                "gitlab",
+                "degraded",
+                "local",
+                "release",
+                "prod",
+                "preprod",
+            ):
+                self.assertIn(expected, normalized, name)
+            self.assertRegex(
+                text,
+                r"(?is)(release|prod|preprod).{0,180}"
+                r"(not available|absent|excluded|no controls)",
+                name,
+            )
+
+        for field in (
+            "project",
+            "skill",
+            "started_at",
+            "finished_at",
+            "duration_ms",
+            "outcome",
+            "exit_code",
+            "summary",
+        ):
+            self.assertIn(f"`{field}`", scheduled)
+
+        self.assertIn("0600", scheduled)
+        self.assertIn("lock", scheduled)
+        self.assertIn("retention", scheduled)
+        self.assertRegex(
+            scheduled,
+            r"(?is)no eligible item.{0,120}(healthy|success)",
+        )
+        self.assertRegex(
+            scheduled,
+            r"(?is)(missing configuration|configuration.{0,40}missing)"
+            r".{0,160}(warning|warn)",
+        )
+        self.assertRegex(
+            scheduled,
+            r"(?is)(authentication|auth).{0,160}(warning|warn)",
+        )
     def test_primary_docs_are_codex_native(self):
         paths = [
             "README.md",
