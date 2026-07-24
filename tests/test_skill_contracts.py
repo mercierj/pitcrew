@@ -170,6 +170,74 @@ class ReferenceContractTest(unittest.TestCase):
             "Never fall back",
         )
 
+    def test_secondary_roles_are_provider_neutral_and_getbill_safe(self):
+        secondary = (
+            "research-run",
+            "qa-run",
+            "coverage-run",
+            "dev-verify-run",
+        )
+        for name in secondary:
+            relative_path = f"skills/{name}/SKILL.md"
+            self.assert_markers(
+                relative_path,
+                "### GetBill preflight",
+                "`AGENTS.md`",
+            )
+            text = (ROOT / relative_path).read_text(encoding="utf-8")
+            for forbidden in (
+                "CLAUDE.md",
+                "gh api",
+                "gh pr",
+                "glab mr",
+                "mcp__linear",
+                "Linear API",
+                "git checkout -- .",
+            ):
+                with self.subTest(skill=name, forbidden=forbidden):
+                    self.assertNotIn(forbidden, text)
+            self.assertNotRegex(text, r"\bPRs?\b", name)
+            if name == "dev-verify-run":
+                self.assertNotIn("source the dev `.env`", text)
+                self.assertIn(
+                    "Never read, display, or source a secret file",
+                    text,
+                )
+            if name == "research-run":
+                self.assertIn(
+                    "never create a worktree merely because the configured checkout is dirty",
+                    text,
+                )
+                self.assertIn(
+                    "exclude modified or untracked",
+                    text,
+                )
+                self.assertIn(
+                    "files from findings",
+                    text,
+                )
+
+        for name in ("research-run", "qa-run"):
+            self.assert_markers(
+                f"skills/{name}/SKILL.md",
+                "No tracker dependency",
+                "findings ledger",
+            )
+
+        for name in ("coverage-run", "dev-verify-run"):
+            self.assert_markers(
+                f"skills/{name}/SKILL.md",
+                "### Provider dispatch — fail closed",
+                "providers.forge",
+                "references/providers/github-linear.md",
+                "pull-request",
+                "references/providers/gitlab.md",
+                "merge-request",
+                "abstract capabilities, not shell commands",
+                "Never fall back",
+                "provider, workspace, owner, project, repository, or environment",
+            )
+
     def test_getbill_profile_contract(self):
         self.assert_markers(
             "references/profiles/getbill.md",
