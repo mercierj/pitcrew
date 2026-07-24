@@ -247,6 +247,26 @@ class ScheduleTest(unittest.TestCase):
                 calls.read_text(encoding="utf-8").splitlines(),
             )
 
+    def test_stop_requires_skill_without_invoking_launchctl(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"touch {calls}\n",
+            )
+
+            result = self.run_scheduler(
+                "stop",
+                "--project",
+                "getbill",
+                env=env,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("--skill", result.stderr)
+            self.assertFalse(calls.exists())
+
     def test_unknown_or_disabled_skill_exits_two_without_launchctl(self):
         for command in ("install", "status", "stop"):
             for skill in ("missing-run", "qa-run"):
