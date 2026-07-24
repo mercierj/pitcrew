@@ -248,51 +248,112 @@ class ScheduleTest(unittest.TestCase):
             )
 
     def test_unknown_or_disabled_skill_exits_two_without_launchctl(self):
-        for skill in ("missing-run", "qa-run"):
-            with self.subTest(skill=skill), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp).resolve()
-                calls = root / "calls"
-                env = self.fake_launchctl_env(
-                    root,
-                    f"touch {calls}\n",
-                )
+        for command in ("install", "status", "stop"):
+            for skill in ("missing-run", "qa-run"):
+                with (
+                    self.subTest(command=command, skill=skill),
+                    tempfile.TemporaryDirectory() as temp,
+                ):
+                    root = Path(temp).resolve()
+                    calls = root / "calls"
+                    env = self.fake_launchctl_env(
+                        root,
+                        f"touch {calls}\n",
+                    )
+                    args = [
+                        command,
+                        "--project",
+                        "getbill",
+                        "--skill",
+                        skill,
+                    ]
+                    if command == "install":
+                        args.extend(["--output-dir", str(root / "LaunchAgents")])
 
-                result = self.run_scheduler(
-                    "status",
-                    "--project",
-                    "getbill",
-                    "--skill",
-                    skill,
-                    env=env,
-                )
+                    result = self.run_scheduler(*args, env=env)
 
-                self.assertEqual(2, result.returncode)
-                self.assertIn("skill", result.stderr.lower())
-                self.assertFalse(calls.exists())
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("skill", result.stderr.lower())
+                    self.assertFalse(calls.exists())
 
-    def test_stop_propagates_launchctl_failure_with_scrubbed_limited_stderr(self):
+    def test_status_without_skill_returns_all_schedule_entries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
+            calls = root / "calls"
             env = self.fake_launchctl_env(
                 root,
-                "printf 'permission denied TOKEN=supersecret\\n%s' "
-                "\"$(printf 'x%.0s' {1..1000})\" >&2\n"
-                "exit 41\n",
+                f"printf '%s\\n' \"$*\" >> {calls}\n"
+                "printf 'state = waiting\\n'\n",
             )
 
             result = self.run_scheduler(
-                "stop",
+                "status",
                 "--project",
                 "getbill",
-                "--skill",
-                "research-run",
                 env=env,
             )
 
-            self.assertEqual(41, result.returncode)
-            self.assertIn("permission denied", result.stderr)
-            self.assertNotIn("supersecret", result.stderr)
-            self.assertLessEqual(len(result.stderr), 600)
+            self.assertEqual(0, result.returncode, result.stderr)
+            status = json.loads(result.stdout)
+            self.assertEqual(13, len(status))
+            self.assertEqual(
+                {entry["skill"] for entry in status},
+                {
+                    "research-run",
+                    "manager-run",
+                    "implementer-run",
+                    "reviewer-run",
+                    "validator-run",
+                    "investigate-run",
+                    "stale-sweep",
+                    "qa-run",
+                    "coverage-run",
+                    "dev-verify-run",
+                    "ops-run",
+                    "unblock",
+                    "releaser-run",
+                },
+            )
+            self.assertEqual(13, len(calls.read_text(encoding="utf-8").splitlines()))
+
+    def test_launchctl_failure_scrubs_credential_formats_and_limits_stderr(self):
+        cases = (
+            ("token=equals-token", "equals-token"),
+            ("authorization=equals-authorization", "equals-authorization"),
+            ("password=equals-password", "equals-password"),
+            ("secret=equals-secret", "equals-secret"),
+            ("token: colon-token", "colon-token"),
+            ("Authorization: Bearer header-authorization", "header-authorization"),
+            ("password: colon-password", "colon-password"),
+            ("secret: colon-secret", "colon-secret"),
+            ('"token":"json-token"', "json-token"),
+            ('"authorization": "json-authorization"', "json-authorization"),
+            ('"password":"json-password"', "json-password"),
+            ('"secret": "json-secret"', "json-secret"),
+        )
+        for message, credential in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                env = self.fake_launchctl_env(
+                    root,
+                    f"printf '%s\\n%s' '{message}' "
+                    "\"$(printf 'x%.0s' {1..1000})\" >&2\n"
+                    "exit 41\n",
+                )
+
+                result = self.run_scheduler(
+                    "stop",
+                    "--project",
+                    "getbill",
+                    "--skill",
+                    "research-run",
+                    env=env,
+                )
+
+                self.assertEqual(41, result.returncode)
+                self.assertIn("[REDACTED]", result.stderr)
+                self.assertNotIn(credential, result.stderr)
+                self.assertLessEqual(len(result.stderr), 501)
 
 
 if __name__ == "__main__":

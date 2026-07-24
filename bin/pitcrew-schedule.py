@@ -146,8 +146,11 @@ def scrubbed_error(message: str, fallback: str) -> str:
     if not message.strip():
         return fallback
     scrubbed = re.sub(
-        r"(?i)\b(token|secret|password|key|authorization|credential)(\s*=\s*)\S+",
-        r"\1\2[REDACTED]",
+        (
+            r'(?i)("?\b(?:token|authorization|password|secret|key|credential)\b"?\s*'
+            r'(?:=|:)\s*)(?:Bearer\s+)?(?:"[^"]*"|\'[^\']*\'|[^\s,}]+)'
+        ),
+        r"\1[REDACTED]",
         message,
     )
     scrubbed = " ".join(scrubbed.split())
