@@ -31,6 +31,8 @@ ACTIONABLE_NOOP_PATTERNS = tuple(
         r"\bmissing\s+"
         r"(?:configuration|config|file|reference|dependency|credential|"
         r"[\w.-]+\.[a-z0-9_-]+)\b",
+        r"\bconfigured\s+(?:tracker|forge|provider)\s+"
+        r"(?:not\s+available|unavailable|unauthenticated|unauth['’]d)\b",
         r"\bprovider(?:\s+(?:check|authentication))?\s+"
         r"(?:(?:is|was)\s+)?(?:unavailable|failed)\b",
         r"\bauthentication\s+(?:(?:is|was)\s+)?"
