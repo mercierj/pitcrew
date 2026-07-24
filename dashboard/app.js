@@ -50,6 +50,7 @@ const lifecycleLabels = {
 
 let refreshPromise = null;
 let lastGitLabRefresh = 0;
+const pendingSkills = new Set();
 
 async function fetchJson(path, options = {}) {
   const response = await fetch(path, {
@@ -114,16 +115,25 @@ function renderOverview(snapshot) {
 function createActionButton(action, skill, label) {
   const button = document.createElement("button");
   button.type = "button";
+  button.dataset.skill = skill;
   button.className = action === "trigger" ? "button button-primary" : "button button-quiet";
   button.textContent = label;
-  button.addEventListener("click", () => control(action, skill, button));
+  button.disabled = pendingSkills.has(skill);
+  button.addEventListener("click", () => control(action, skill));
   return button;
+}
+
+function syncSkillButtons(skill) {
+  elements.agentGrid.querySelectorAll("button[data-skill]").forEach((button) => {
+    if (button.dataset.skill === skill) {
+      button.disabled = pendingSkills.has(skill);
+    }
+  });
 }
 
 function renderAgents(snapshot) {
   const agents = Array.isArray(snapshot?.agents) ? snapshot.agents : [];
   elements.agentGrid.replaceChildren();
-  elements.agentGrid.setAttribute("aria-busy", "false");
 
   if (agents.length === 0) {
     const empty = document.createElement("p");
@@ -306,14 +316,18 @@ function renderGitLab(work) {
   });
 }
 
-async function control(action, skill, button) {
+async function control(action, skill) {
+  if (pendingSkills.has(skill)) {
+    return;
+  }
   if (!ACTIONS.has(action) || typeof skill !== "string" || !skill) {
     return;
   }
   if (action === "stop" && !window.confirm(`Arrêter ${skill} et son passage courant ?`)) {
     return;
   }
-  button.disabled = true;
+  pendingSkills.add(skill);
+  syncSkillButtons(skill);
   setText(elements.operationalStatus, `Action ${action} en cours pour ${skill}.`);
   try {
     await fetchJson("/api/actions", {
@@ -329,7 +343,8 @@ async function control(action, skill, button) {
   } catch {
     setText(elements.operationalStatus, `Impossible d’exécuter l’action pour ${skill}.`);
   } finally {
-    button.disabled = false;
+    pendingSkills.delete(skill);
+    syncSkillButtons(skill);
   }
 }
 
@@ -350,6 +365,7 @@ async function refresh({ manual = false } = {}) {
     return refreshPromise;
   }
   refreshPromise = (async () => {
+    elements.agentGrid.setAttribute("aria-busy", "true");
     elements.refreshButton.disabled = true;
     setText(elements.refreshState, "Actualisation en cours…");
     try {
@@ -379,6 +395,7 @@ async function refresh({ manual = false } = {}) {
       setText(elements.refreshState, "Actualisation impossible");
       setText(elements.operationalStatus, "Échec de l’actualisation du tableau de bord.");
     } finally {
+      elements.agentGrid.setAttribute("aria-busy", "false");
       elements.refreshButton.disabled = false;
     }
   })();

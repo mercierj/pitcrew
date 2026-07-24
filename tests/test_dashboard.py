@@ -1191,6 +1191,53 @@ class DashboardAssetContractTest(unittest.TestCase):
                 rf"(?:async\s+)?function\s+{function_name}\b",
             )
 
+    def test_javascript_serializes_controls_per_skill(self):
+        self.assertIn("const pendingSkills = new Set();", self.javascript)
+        self.assertRegex(
+            self.javascript,
+            r"if\s*\(pendingSkills\.has\(skill\)\)\s*{\s*return;\s*}",
+        )
+        self.assertIn("pendingSkills.add(skill);", self.javascript)
+        self.assertIn("pendingSkills.delete(skill);", self.javascript)
+        self.assertIn('button.dataset.skill = skill;', self.javascript)
+        self.assertIn(
+            'querySelectorAll("button[data-skill]")',
+            self.javascript,
+        )
+        self.assertIn(
+            "button.disabled = pendingSkills.has(skill);",
+            self.javascript,
+        )
+        control_source = self.javascript.split(
+            "async function control",
+            1,
+        )[1].split("function historyPath", 1)[0]
+        self.assertLess(
+            control_source.index("pendingSkills.has(skill)"),
+            control_source.index("fetchJson"),
+        )
+        self.assertRegex(
+            control_source,
+            r"finally\s*{[^}]*pendingSkills\.delete\(skill\);",
+        )
+
+    def test_javascript_marks_agent_grid_busy_for_entire_refresh(self):
+        refresh_source = self.javascript.split(
+            "async function refresh",
+            1,
+        )[1]
+        self.assertIn(
+            'elements.agentGrid.setAttribute("aria-busy", "true");',
+            refresh_source,
+        )
+        self.assertRegex(
+            refresh_source,
+            (
+                r"finally\s*{\s*"
+                r'elements\.agentGrid\.setAttribute\("aria-busy", "false"\);'
+            ),
+        )
+
     def test_css_has_accessible_states_responsiveness_and_motion_fallback(self):
         self.assertIn(":focus-visible", self.styles)
         self.assertIn("@media (prefers-reduced-motion: reduce)", self.styles)
