@@ -324,6 +324,8 @@ class ScheduleTest(unittest.TestCase):
             ("secret=equals-secret", "equals-secret"),
             ("token: colon-token", "colon-token"),
             ("Authorization: Bearer header-authorization", "header-authorization"),
+            ("Authorization: Basic basic-secret", "basic-secret"),
+            ("Authorization: Custom custom-secret", "custom-secret"),
             ("password: colon-password", "colon-password"),
             ("secret: colon-secret", "colon-secret"),
             ('"token":"json-token"', "json-token"),
@@ -354,6 +356,10 @@ class ScheduleTest(unittest.TestCase):
                 self.assertIn("[REDACTED]", result.stderr)
                 self.assertNotIn(credential, result.stderr)
                 self.assertLessEqual(len(result.stderr), 501)
+                if message.startswith("Authorization:"):
+                    scheme = message.removeprefix("Authorization:").split()[0]
+                    self.assertIn("Authorization: [REDACTED]", result.stderr)
+                    self.assertNotIn(scheme, result.stderr)
 
 
 if __name__ == "__main__":

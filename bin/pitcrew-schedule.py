@@ -146,12 +146,17 @@ def scrubbed_error(message: str, fallback: str) -> str:
     if not message.strip():
         return fallback
     scrubbed = re.sub(
+        r"(?im)(\bAuthorization\s*:\s*)[^\r\n]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    scrubbed = re.sub(
         (
             r'(?i)("?\b(?:token|authorization|password|secret|key|credential)\b"?\s*'
             r'(?:=|:)\s*)(?:Bearer\s+)?(?:"[^"]*"|\'[^\']*\'|[^\s,}]+)'
         ),
         r"\1[REDACTED]",
-        message,
+        scrubbed,
     )
     scrubbed = " ".join(scrubbed.split())
     return scrubbed[:500]
