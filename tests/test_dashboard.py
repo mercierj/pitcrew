@@ -1,6 +1,7 @@
 import http.client
 import importlib.util
 import json
+import re
 import socket
 import subprocess
 import tempfile
@@ -736,16 +737,15 @@ class DashboardHttpTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.asset_root = Path(self.temp.name).resolve()
-        (self.asset_root / "assets").mkdir()
         (self.asset_root / "index.html").write_text(
             "<html><script>window.token='__PITCREW_SESSION_TOKEN__'</script></html>",
             encoding="utf-8",
         )
-        (self.asset_root / "assets/app.js").write_text(
+        (self.asset_root / "app.js").write_text(
             "window.pitcrew = true;",
             encoding="utf-8",
         )
-        (self.asset_root / "assets/styles.css").write_text(
+        (self.asset_root / "styles.css").write_text(
             "body { color: black; }",
             encoding="utf-8",
         )
@@ -840,7 +840,7 @@ class DashboardHttpTest(unittest.TestCase):
                 self.assertIn(expected, payload)
                 self.assertNotIn(self.token.encode(), payload)
 
-        (self.asset_root / "assets/app.js").unlink()
+        (self.asset_root / "app.js").unlink()
         status, headers, payload = self.request("GET", "/assets/app.js")
         self.assertEqual(404, status)
         self.assertNotIn(self.token.encode(), payload)
@@ -862,7 +862,7 @@ class DashboardHttpTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as outside_temp:
             outside = Path(outside_temp) / "outside.js"
             outside.write_text("window.stolen = true;", encoding="utf-8")
-            app = self.asset_root / "assets/app.js"
+            app = self.asset_root / "app.js"
             app.unlink()
             try:
                 app.symlink_to(outside)
@@ -1115,6 +1115,135 @@ class DashboardHttpTest(unittest.TestCase):
                 self.service,
                 self.token,
             )
+
+
+class DashboardAssetContractTest(unittest.TestCase):
+    def setUp(self):
+        self.dashboard = ROOT / "dashboard"
+        self.html = (self.dashboard / "index.html").read_text(encoding="utf-8")
+        self.javascript = (self.dashboard / "app.js").read_text(encoding="utf-8")
+        self.styles = (self.dashboard / "styles.css").read_text(encoding="utf-8")
+
+    def test_html_is_semantic_accessible_and_has_all_dashboard_regions(self):
+        self.assertRegex(self.html, r"<html[^>]+lang=[\"']fr[\"']")
+        for element in ("header", "main", "section"):
+            self.assertRegex(self.html, rf"<{element}\b")
+        self.assertRegex(
+            self.html,
+            r'id=[\"\']operational-status[\"\'][^>]+aria-live=[\"\']polite[\"\']',
+        )
+        for identifier in (
+            "overview",
+            "agents",
+            "activity",
+            "gitlab-work",
+            "disabled-roles",
+        ):
+            self.assertIn(f'id="{identifier}"', self.html)
+        self.assertEqual(1, self.html.count("__PITCREW_SESSION_TOKEN__"))
+        self.assertIn(
+            '<meta name="pitcrew-session" content="__PITCREW_SESSION_TOKEN__">',
+            self.html,
+        )
+        self.assertIn('<link rel="stylesheet" href="/assets/styles.css">', self.html)
+        self.assertIn(
+            '<script type="module" src="/assets/app.js"></script>',
+            self.html,
+        )
+        self.assertIn('type="button"', self.html)
+
+    def test_sources_are_local_and_use_no_external_assets(self):
+        combined = "\n".join((self.html, self.javascript, self.styles))
+        self.assertIsNone(re.search(r"https?://", combined, re.IGNORECASE))
+        self.assertNotRegex(self.html, r"<(?:img|iframe|object|embed)\b")
+        self.assertNotIn("@font-face", self.styles)
+
+    def test_javascript_polls_safely_and_uses_text_dom_apis(self):
+        self.assertIn("const POLL_INTERVAL_MS = 10_000;", self.javascript)
+        self.assertIn("const GITLAB_REFRESH_MS = 60_000;", self.javascript)
+        self.assertIn(
+            'const ACTIONS = new Set(["trigger", "stop", "restart"]);',
+            self.javascript,
+        )
+        self.assertRegex(
+            self.javascript,
+            r"\.type\s*=\s*[\"']button[\"']",
+        )
+        self.assertIn('"X-Pitcrew-Session"', self.javascript)
+        self.assertIn(
+            "Arrêter ${skill} et son passage courant ?",
+            self.javascript,
+        )
+        self.assertIn(".textContent", self.javascript)
+        self.assertNotIn("innerHTML", self.javascript)
+        self.assertNotIn("insertAdjacentHTML", self.javascript)
+        for function_name in (
+            "fetchJson",
+            "renderOverview",
+            "renderAgents",
+            "renderHistory",
+            "renderGitLab",
+            "control",
+            "refresh",
+        ):
+            self.assertRegex(
+                self.javascript,
+                rf"(?:async\s+)?function\s+{function_name}\b",
+            )
+
+    def test_css_has_accessible_states_responsiveness_and_motion_fallback(self):
+        self.assertIn(":focus-visible", self.styles)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", self.styles)
+        self.assertRegex(self.styles, r"@media\s*\(max-width:\s*\d+px\)")
+        self.assertIn("--warning", self.styles)
+        self.assertIn("--error", self.styles)
+        self.assertIn("text-align: left", self.styles)
+
+
+class DashboardRealAssetsHttpTest(unittest.TestCase):
+    def setUp(self):
+        self.service = FakeDashboardService()
+        self.token = "real-assets-session-token"
+        self.server = SERVER.create_server(
+            "127.0.0.1",
+            0,
+            self.service,
+            self.token,
+        )
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def request(self, path):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+        connection.request(
+            "GET",
+            path,
+            headers={"Host": f"127.0.0.1:{self.port}"},
+        )
+        response = connection.getresponse()
+        payload = response.read()
+        status = response.status
+        connection.close()
+        return status, payload
+
+    def test_real_asset_root_serves_interface_and_replaces_only_index_token(self):
+        status, index = self.request("/")
+        self.assertEqual(200, status)
+        self.assertIn(self.token.encode(), index)
+        self.assertNotIn(b"__PITCREW_SESSION_TOKEN__", index)
+
+        for path in ("/assets/app.js", "/assets/styles.css"):
+            with self.subTest(path=path):
+                status, payload = self.request(path)
+                self.assertEqual(200, status)
+                self.assertTrue(payload)
+                self.assertNotIn(self.token.encode(), payload)
 
 
 if __name__ == "__main__":

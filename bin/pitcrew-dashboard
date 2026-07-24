@@ -30,8 +30,8 @@ MAX_BODY_BYTES = 8192
 READ_TIMEOUT_SECONDS = 5.0
 ASSET_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
-    "/assets/app.js": ("assets/app.js", "text/javascript; charset=utf-8"),
-    "/assets/styles.css": ("assets/styles.css", "text/css; charset=utf-8"),
+    "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 
 

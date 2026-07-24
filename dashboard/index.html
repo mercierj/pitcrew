@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="pitcrew-session" content="__PITCREW_SESSION_TOKEN__">
+  <title>Pitcrew · GetBill</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">Pilotage local</p>
+      <h1>GetBill <span>Pitcrew</span></h1>
+      <p class="header-copy">Surveillez les agents, leurs passages et le travail GitLab depuis cette machine.</p>
+    </div>
+    <div class="refresh-panel">
+      <p id="refresh-state">Connexion au service local…</p>
+      <button id="refresh-button" class="button button-primary" type="button">Actualiser maintenant</button>
+    </div>
+  </header>
+
+  <p id="operational-status" class="sr-only" aria-live="polite">Initialisation du tableau de bord.</p>
+
+  <main>
+    <section id="overview" class="panel overview" aria-labelledby="overview-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Vue d’ensemble</p>
+          <h2 id="overview-title">État opérationnel</h2>
+        </div>
+        <p class="section-note">Mise à jour locale toutes les 10 secondes</p>
+      </div>
+      <div id="global-banner" class="banner banner-neutral">Collecte des premiers signaux…</div>
+      <div id="overview-metrics" class="metric-grid">
+        <article class="metric"><span>Actifs</span><strong id="metric-active">—</strong></article>
+        <article class="metric"><span>Arrêtés</span><strong id="metric-stopped">—</strong></article>
+        <article class="metric"><span>En cours</span><strong id="metric-running">—</strong></article>
+        <article class="metric"><span>Alertes</span><strong id="metric-warning">—</strong></article>
+        <article class="metric"><span>Échecs</span><strong id="metric-failed">—</strong></article>
+      </div>
+    </section>
+
+    <section id="agents" aria-labelledby="agents-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Automatisation</p>
+          <h2 id="agents-title">Agents activés</h2>
+        </div>
+        <p class="section-note">Déclenchement et contrôle agent par agent</p>
+      </div>
+      <div id="agent-grid" class="agent-grid" aria-busy="true"></div>
+
+      <details id="disabled-roles" class="disabled-panel">
+        <summary>Rôles désactivés <span id="disabled-count">0</span></summary>
+        <div id="disabled-list" class="disabled-list"></div>
+      </details>
+    </section>
+
+    <section id="activity" class="panel" aria-labelledby="activity-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Sept derniers jours</p>
+          <h2 id="activity-title">Activité des agents</h2>
+        </div>
+      </div>
+      <form id="history-filters" class="filters">
+        <label for="history-skill">Agent
+          <select id="history-skill" name="skill">
+            <option value="">Tous les agents</option>
+          </select>
+        </label>
+        <label for="history-outcome">Résultat
+          <select id="history-outcome" name="outcome">
+            <option value="">Tous les résultats</option>
+            <option value="success">Succès</option>
+            <option value="noop">Sans action</option>
+            <option value="failed">Échec</option>
+            <option value="interrupted">Interrompu</option>
+          </select>
+        </label>
+        <button class="button" type="submit">Appliquer les filtres</button>
+      </form>
+      <ol id="activity-list" class="activity-list"></ol>
+    </section>
+
+    <section id="gitlab-work" aria-labelledby="gitlab-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Synchronisation distante</p>
+          <h2 id="gitlab-title">Travail GitLab</h2>
+        </div>
+        <p id="gitlab-state" class="section-note">En attente du premier relevé</p>
+      </div>
+      <div id="gitlab-groups" class="work-grid"></div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Pitcrew fonctionne uniquement sur l’interface locale de cette machine.</p>
+  </footer>
+
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>
