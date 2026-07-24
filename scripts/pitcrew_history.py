@@ -46,6 +46,21 @@ ACTIONABLE_NOOP_PATTERNS = tuple(
 )
 
 
+def _decode_summary(summary: object) -> object:
+    try:
+        return json.loads(summary)
+    except json.JSONDecodeError:
+        if not isinstance(summary, str):
+            return summary
+        try:
+            decoded, _ = json.JSONDecoder().raw_decode(summary.lstrip())
+        except json.JSONDecodeError:
+            return summary
+        return decoded
+    except TypeError:
+        return summary
+
+
 def _parse_timestamp(value: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError("timestamp must be a string")
@@ -180,10 +195,7 @@ def classify_record(record: dict | None) -> str:
         return "failed"
 
     summary = record.get("summary", "")
-    try:
-        decoded = json.loads(summary)
-    except (json.JSONDecodeError, TypeError):
-        decoded = summary
+    decoded = _decode_summary(summary)
 
     effective_outcome = record_outcome
     structured_status = decoded.get("status") if isinstance(decoded, dict) else None

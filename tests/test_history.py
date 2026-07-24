@@ -254,6 +254,54 @@ class HistoryStoreTest(unittest.TestCase):
                     ),
                 )
 
+    def test_leading_structured_noop_with_trailing_prose_is_classified(self):
+        cases = (
+            (
+                "warning",
+                "configured GitLab provider authentication failed",
+                "No GitLab operations were made.",
+            ),
+            (
+                "warning",
+                "missing configuration",
+                "No provider operations were made.",
+            ),
+            (
+                "healthy",
+                "no eligible item",
+                "No repository operations were made.",
+            ),
+        )
+        for expected, reason, trailing_prose in cases:
+            summary = (
+                "\n  "
+                + json.dumps({"status": "noop", "reason": reason}, indent=2)
+                + f"\n\n{trailing_prose}"
+            )
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    expected,
+                    classify_record(
+                        {
+                            "outcome": "success",
+                            "exit_code": 0,
+                            "summary": summary,
+                        }
+                    ),
+                )
+
+    def test_structured_json_buried_after_plain_text_is_not_parsed(self):
+        self.assertEqual(
+            "healthy",
+            classify_record(
+                {
+                    "outcome": "success",
+                    "exit_code": 0,
+                    "summary": 'Completed.\n{"status":"failed"}',
+                }
+            ),
+        )
+
     def test_benign_noop_phrases_are_healthy(self):
         records = (
             {
