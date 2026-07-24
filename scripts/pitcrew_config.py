@@ -251,19 +251,17 @@ def _open_runtime_project(project: str, values: Mapping[str, str]) -> int:
         os.close(root_fd)
 
 
-def _open_runtime_project_for_read(project: str, values: Mapping[str, str]) -> int:
-    if not PROJECT_NAME.fullmatch(project):
-        raise ConfigError("project_name must match ^[a-z0-9][a-z0-9_-]*$")
+def _open_runtime_root_for_read(values: Mapping[str, str]) -> int:
     codex_home = values.get("CODEX_HOME")
     if codex_home:
         anchor = Path(codex_home).expanduser()
-        components = ("pitcrew", project)
+        components = ("pitcrew",)
     else:
         home = values.get("HOME")
         if not home:
             raise ConfigError("HOME or CODEX_HOME is required")
         anchor = Path(home).expanduser()
-        components = (".codex", "pitcrew", project)
+        components = (".codex", "pitcrew")
 
     descriptor: int | None = None
     try:
@@ -277,6 +275,43 @@ def _open_runtime_project_for_read(project: str, values: Mapping[str, str]) -> i
         if descriptor is not None:
             os.close(descriptor)
         raise ConfigError("runtime config path must not be a symlink or missing") from error
+
+
+def _open_runtime_project_for_read(project: str, values: Mapping[str, str]) -> int:
+    if not PROJECT_NAME.fullmatch(project):
+        raise ConfigError("project_name must match ^[a-z0-9][a-z0-9_-]*$")
+    root_fd = _open_runtime_root_for_read(values)
+    try:
+        return _open_directory_at(root_fd, project, create=False)
+    except OSError as error:
+        raise ConfigError("runtime config path must not be a symlink or missing") from error
+    finally:
+        os.close(root_fd)
+
+
+def resolve_runtime_project(env: Mapping[str, str] | None = None) -> str:
+    values = os.environ if env is None else env
+    project = values.get("PITCREW_PROJECT")
+    if project is None:
+        root_fd = _open_runtime_root_for_read(values)
+        try:
+            try:
+                default_fd = os.open(
+                    "default.txt", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd
+                )
+                with os.fdopen(default_fd, "r", encoding="utf-8") as default_file:
+                    project = default_file.read()
+            except OSError as error:
+                raise ConfigError("runtime default path must not be a symlink or missing") from error
+        finally:
+            os.close(root_fd)
+        if project.endswith("\n"):
+            project = project[:-1]
+    if not PROJECT_NAME.fullmatch(project):
+        raise ConfigError("default project must match ^[a-z0-9][a-z0-9_-]*$")
+    project_fd = _open_runtime_project_for_read(project, values)
+    os.close(project_fd)
+    return project
 
 
 def load_runtime_config(
@@ -378,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     migrate_parser.add_argument("--project", required=True)
     repo_parser = subparsers.add_parser("repo")
     repo_parser.add_argument("--project", required=True)
+    subparsers.add_parser("project")
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
@@ -393,6 +429,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "repo":
         print(configured_repo_path(load_runtime_config(args.project), args.project))
+        return 0
+    if args.command == "project":
+        print(resolve_runtime_project())
         return 0
     destination = write_project(root / "profiles" / f"{args.profile}.json", args.project)
     print(f"Created {destination}")

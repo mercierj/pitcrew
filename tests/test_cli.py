@@ -100,6 +100,40 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
             self.assertFalse(marker.exists())
 
+    def test_runner_rejects_symlinked_or_malformed_default_project(self):
+        for default_kind in ("symlink", "malformed"):
+            with self.subTest(default_kind=default_kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                runtime = root / "pitcrew"
+                project = runtime / "getbill"
+                project.mkdir(parents=True)
+                (project / "config.json").write_text(
+                    (ROOT / "profiles/getbill.json").read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+                default = runtime / "default.txt"
+                if default_kind == "symlink":
+                    outside = root / "outside-default.txt"
+                    outside.write_text("getbill\n", encoding="utf-8")
+                    default.symlink_to(outside)
+                else:
+                    default.write_text("getbill\ninjected", encoding="utf-8")
+                marker = root / "codex-called"
+                fake_codex = root / "fake-codex"
+                fake_codex.write_text(f"#!/usr/bin/env bash\ntouch {marker}\n", encoding="utf-8")
+                fake_codex.chmod(0o755)
+
+                result = self.run_cli(
+                    "bin/pitcrew-codex.sh",
+                    "research-run",
+                    env={**os.environ, "CODEX_HOME": str(root), "CODEX_BIN": str(fake_codex)},
+                )
+
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pitcrew-config:", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertFalse(marker.exists())
+
     def test_runner_rejects_symlinked_runtime_config_without_calling_codex(self):
         for symlink in ("runtime", "project", "config"):
             with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as temp:

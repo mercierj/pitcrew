@@ -50,20 +50,12 @@ done
 
 CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME or CODEX_HOME is required}/.codex}"
 RUNTIME_ROOT="$CODEX_HOME_DIR/pitcrew"
-if [[ -z "$PROJECT" ]]; then
-  [[ -f "$RUNTIME_ROOT/default.txt" ]] || {
-    echo "pitcrew-codex: default project missing: $RUNTIME_ROOT/default.txt" >&2
-    exit 2
-  }
-  PROJECT="$(tr -d '\r\n' < "$RUNTIME_ROOT/default.txt")"
-fi
-
-[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
-  echo "pitcrew-codex: invalid project: $PROJECT" >&2
-  exit 2
-}
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "$PROJECT" ]]; then
+  PROJECT="$(PITCREW_PROJECT="$PROJECT" python3 "$REPO_ROOT/scripts/pitcrew_config.py" project)"
+else
+  PROJECT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" project)"
+fi
 CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
 REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
 [[ -n "$REPO" && -d "$REPO" ]] || {
