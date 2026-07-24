@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -22,13 +23,21 @@ REQUIRED_STRING_FIELDS = (
     "summary",
 )
 VALID_OUTCOMES = {"success", "noop", "failed", "interrupted"}
-ACTIONABLE_NOOP_KEYWORDS = (
-    "required",
-    "unavailable",
-    "missing",
-    "authentication",
-    "permission",
-    "failed",
+ACTIONABLE_NOOP_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\brequired\s+(?:file|reference|dependency|configuration|config)"
+        r"\s+(?:(?:is|was)\s+)?(?:unavailable|missing|failed)\b",
+        r"\bmissing\s+"
+        r"(?:configuration|config|file|reference|dependency|credential|"
+        r"[\w.-]+\.[a-z0-9_-]+)\b",
+        r"\bprovider(?:\s+(?:check|authentication))?\s+"
+        r"(?:(?:is|was)\s+)?(?:unavailable|failed)\b",
+        r"\bauthentication\s+(?:(?:is|was)\s+)?"
+        r"(?:required|unavailable|failed|invalid|expired|revoked)\b",
+        r"\bpermissions?\s+(?:(?:is|are|was|were)\s+)?"
+        r"(?:denied|required|failed|unavailable)\b",
+    )
 )
 
 
@@ -187,7 +196,7 @@ def classify_record(record: dict | None) -> str:
         reason = decoded.get("reason", "")
     else:
         reason = decoded
-    reason_text = str(reason).lower()
-    if any(keyword in reason_text for keyword in ACTIONABLE_NOOP_KEYWORDS):
+    reason_text = str(reason)
+    if any(pattern.search(reason_text) for pattern in ACTIONABLE_NOOP_PATTERNS):
         return "warning"
     return "healthy"

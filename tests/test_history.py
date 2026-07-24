@@ -212,6 +212,42 @@ class HistoryStoreTest(unittest.TestCase):
                     ),
                 )
 
+    def test_benign_noop_phrases_are_healthy(self):
+        records = (
+            {
+                "outcome": "success",
+                "exit_code": 0,
+                "summary": json.dumps(
+                    {
+                        "status": "noop",
+                        "reason": "no eligible item; no approval required",
+                    }
+                ),
+            },
+            {
+                "outcome": "noop",
+                "exit_code": 0,
+                "summary": json.dumps({"reason": "nothing missing"}),
+            },
+            {
+                "outcome": "success",
+                "exit_code": 0,
+                "summary": json.dumps(
+                    {
+                        "status": "noop",
+                        "reason": (
+                            "provider check completed; "
+                            "no permission changes required"
+                        ),
+                    }
+                ),
+            },
+        )
+
+        for record in records:
+            with self.subTest(summary=record["summary"]):
+                self.assertEqual("healthy", classify_record(record))
+
     def test_nonzero_exit_and_failed_outcome_are_failed(self):
         self.assertEqual(
             "failed",
