@@ -19,23 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEDULER = ROOT / "bin/pitcrew-schedule.py"
 RUNNER = ROOT / "bin/pitcrew-codex.sh"
 LIFECYCLES = ("todo", "processing", "review", "blocked", "done")
-ENABLED_SKILLS = {
-    "research-run",
-    "manager-run",
-    "implementer-run",
-    "reviewer-run",
-    "validator-run",
-    "investigate-run",
-    "stale-sweep",
-}
-DISABLED_SKILLS = {
-    "qa-run",
-    "coverage-run",
-    "dev-verify-run",
-    "ops-run",
-    "unblock",
-    "releaser-run",
-}
 CONTROL_ACTIONS = {"trigger", "stop", "restart"}
 MR_URL = re.compile(r"https?://[^\s<>'\"]+/-/merge_requests/\d+")
 MR_REFERENCE = re.compile(r"(?<![\w!])!(\d+)\b")
@@ -103,6 +86,7 @@ class DashboardService:
         self._gitlab_cache: dict | None = None
         self._gitlab_cached_at: datetime | None = None
         self._last_successful_refresh: str | None = None
+        self._schedule_cache: list[dict] | None = None
 
     def _load_config(self) -> dict:
         try:
@@ -154,25 +138,7 @@ class DashboardService:
             ) from error
 
     def snapshot(self) -> dict:
-        args = [
-            "python3",
-            str(SCHEDULER),
-            "status",
-            "--project",
-            self.project,
-        ]
-        result = self._run(args)
-        if result.returncode:
-            raise DashboardError(
-                _redacted_error(result.stderr, "scheduler status failed")
-            )
-        try:
-            schedule = json.loads(result.stdout)
-        except (json.JSONDecodeError, TypeError) as error:
-            raise DashboardError("scheduler returned invalid status") from error
-        if not isinstance(schedule, list):
-            raise DashboardError("scheduler returned invalid status")
-
+        schedule = self._schedule_entries(force_refresh=True)
         records = self.history(None, None)
         latest_by_skill: dict[str, dict] = {}
         for record in records:
@@ -181,14 +147,12 @@ class DashboardService:
         agents = []
         disabled_roles = []
         for entry in schedule:
-            if not isinstance(entry, dict) or not isinstance(entry.get("skill"), str):
-                raise DashboardError("scheduler returned invalid status")
             skill = entry["skill"]
             latest = latest_by_skill.get(skill)
             loaded = bool(entry.get("loaded"))
             interval = int(entry.get("interval_seconds", 0))
             estimated = None
-            if latest is not None and interval > 0:
+            if loaded and latest is not None and interval > 0:
                 try:
                     estimated = (
                         _timestamp(latest["finished_at"])
@@ -220,6 +184,55 @@ class DashboardService:
             "agents": agents,
             "disabled_roles": disabled_roles,
         }
+
+    def _schedule_entries(self, force_refresh: bool = False) -> list[dict]:
+        if not force_refresh and self._schedule_cache is not None:
+            return self._schedule_cache
+        args = [
+            "python3",
+            str(SCHEDULER),
+            "status",
+            "--project",
+            self.project,
+        ]
+        result = self._run(args)
+        if result.returncode:
+            raise DashboardError(
+                _redacted_error(result.stderr, "scheduler status failed")
+            )
+        try:
+            schedule = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise DashboardError("scheduler returned invalid status") from error
+        if not isinstance(schedule, list):
+            raise DashboardError("scheduler returned invalid status")
+        normalized = []
+        seen = set()
+        for entry in schedule:
+            if not isinstance(entry, dict) or not isinstance(entry.get("skill"), str):
+                raise DashboardError("scheduler returned invalid status")
+            skill = entry["skill"]
+            if skill in seen or not isinstance(entry.get("enabled"), bool):
+                raise DashboardError("scheduler returned invalid status")
+            seen.add(skill)
+            normalized.append(dict(entry))
+        self._schedule_cache = normalized
+        return normalized
+
+    def _enabled_entry(self, skill: str) -> dict:
+        entry = next(
+            (
+                entry
+                for entry in self._schedule_entries()
+                if entry["skill"] == skill
+            ),
+            None,
+        )
+        if entry is None:
+            raise DashboardError(f"unknown role: {skill}")
+        if not entry["enabled"]:
+            raise DashboardError(f"disabled role: {skill}")
+        return entry
 
     def _degraded_gitlab(self, error: str) -> dict:
         return {
@@ -260,6 +273,15 @@ class DashboardService:
             raise DashboardError("GitLab returned invalid JSON")
         return payload
 
+    def _gitlab_collection(self, path: str) -> list[dict]:
+        collected = []
+        for page in range(1, 101):
+            batch = self._gitlab_api(f"{path}&page={page}")
+            collected.extend(batch)
+            if len(batch) < 100:
+                return collected
+        raise DashboardError("GitLab pagination limit exceeded")
+
     def gitlab_work(self, force_refresh: bool = False) -> dict:
         current = self._now()
         if (
@@ -272,10 +294,10 @@ class DashboardService:
 
         encoded = quote(self.gitlab_project, safe="")
         try:
-            issues = self._gitlab_api(
+            issues = self._gitlab_collection(
                 f"projects/{encoded}/issues?scope=all&labels=pitcrew-agent&per_page=100"
             )
-            merge_requests = self._gitlab_api(
+            merge_requests = self._gitlab_collection(
                 f"projects/{encoded}/merge_requests?scope=all&per_page=100"
             )
             groups = {state: [] for state in LIFECYCLES}
@@ -333,7 +355,12 @@ class DashboardService:
                 str(issue.get("description", "")),
             )
         )
-        related = set(MR_URL.findall(issue_text))
+        allowed_urls = set(mr_urls.values())
+        related = {
+            url
+            for url in MR_URL.findall(issue_text)
+            if url in allowed_urls
+        }
         for iid in MR_REFERENCE.findall(issue_text):
             if int(iid) in mr_urls:
                 related.add(mr_urls[int(iid)])
@@ -363,10 +390,7 @@ class DashboardService:
     def control(self, action: str, skill: str) -> dict:
         if action not in CONTROL_ACTIONS:
             raise DashboardError(f"unknown action: {action}")
-        if skill in DISABLED_SKILLS:
-            raise DashboardError(f"disabled role: {skill}")
-        if skill not in ENABLED_SKILLS:
-            raise DashboardError(f"unknown role: {skill}")
+        self._enabled_entry(skill)
 
         if action == "trigger":
             try:

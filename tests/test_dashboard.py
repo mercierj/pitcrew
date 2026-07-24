@@ -162,12 +162,21 @@ def gitlab_merge_requests():
 
 
 class FakeRunner:
-    def __init__(self, *, fail_glab=False, unavailable=False):
+    def __init__(
+        self,
+        *,
+        fail_glab=False,
+        unavailable=False,
+        issue_pages=None,
+        merge_request_pages=None,
+        schedule=None,
+    ):
         self.calls = []
         self.fail_glab = fail_glab
         self.unavailable = unavailable
-        self.issues = gitlab_issues()
-        self.merge_requests = gitlab_merge_requests()
+        self.issue_pages = issue_pages or [gitlab_issues()]
+        self.merge_request_pages = merge_request_pages or [gitlab_merge_requests()]
+        self.schedule = schedule or schedule_status()
 
     def __call__(self, args, **kwargs):
         self.calls.append((list(args), kwargs))
@@ -181,11 +190,13 @@ class FakeRunner:
                     stdout="",
                     stderr='Authorization: Basic auth-secret\n' + "x" * 3000,
                 )
-            payload = (
-                self.merge_requests
+            pages = (
+                self.merge_request_pages
                 if "/merge_requests?" in args[2]
-                else self.issues
+                else self.issue_pages
             )
+            page = int(args[2].rsplit("page=", 1)[1])
+            payload = pages[page - 1] if page <= len(pages) else []
             return subprocess.CompletedProcess(
                 args,
                 0,
@@ -196,7 +207,7 @@ class FakeRunner:
             return subprocess.CompletedProcess(
                 args,
                 0,
-                stdout=json.dumps(schedule_status()),
+                stdout=json.dumps(self.schedule),
                 stderr="",
             )
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
@@ -293,6 +304,7 @@ class DashboardServiceTest(unittest.TestCase):
         )
         self.assertEqual("healthy", roles["manager-run"]["health"])
         self.assertEqual("stopped", roles["implementer-run"]["health"])
+        self.assertIsNone(roles["implementer-run"]["estimated_next_pass"])
         self.assertEqual(
             [
                 "python3",
@@ -321,6 +333,9 @@ class DashboardServiceTest(unittest.TestCase):
 
     def test_gitlab_groups_work_and_extracts_related_merge_requests(self):
         runner = FakeRunner()
+        runner.issue_pages[0][0]["description"] += (
+            " https://attacker.invalid/other/project/-/merge_requests/999"
+        )
 
         work = self.service(runner).gitlab_work(force_refresh=True)
 
@@ -343,13 +358,17 @@ class DashboardServiceTest(unittest.TestCase):
             ],
             todo["related_merge_requests"],
         )
+        self.assertNotIn(
+            "https://attacker.invalid/other/project/-/merge_requests/999",
+            todo["related_merge_requests"],
+        )
         self.assertEqual(2, len(work["merge_requests"]))
         encoded = "getbill1%2Fgetbill"
         self.assertEqual(
             [
                 "glab",
                 "api",
-                f"projects/{encoded}/issues?scope=all&labels=pitcrew-agent&per_page=100",
+                f"projects/{encoded}/issues?scope=all&labels=pitcrew-agent&per_page=100&page=1",
             ],
             runner.calls[0][0],
         )
@@ -357,9 +376,84 @@ class DashboardServiceTest(unittest.TestCase):
             [
                 "glab",
                 "api",
-                f"projects/{encoded}/merge_requests?scope=all&per_page=100",
+                f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
             ],
             runner.calls[1][0],
+        )
+
+    def test_gitlab_collects_all_issue_and_merge_request_pages(self):
+        issues = []
+        for iid in range(1, 102):
+            issue = dict(gitlab_issues()[0])
+            issue.update(
+                {
+                    "iid": iid,
+                    "web_url": f"https://gitlab.com/getbill1/getbill/-/issues/{iid}",
+                    "description": "",
+                    "references": {
+                        "short": f"#{iid}",
+                        "relative": f"#{iid}",
+                        "full": f"getbill1/getbill#{iid}",
+                    },
+                }
+            )
+            issues.append(issue)
+        merge_requests = []
+        for iid in range(1, 102):
+            merge_request = dict(gitlab_merge_requests()[0])
+            merge_request.update(
+                {
+                    "iid": iid,
+                    "web_url": (
+                        "https://gitlab.com/getbill1/getbill/-/merge_requests/"
+                        f"{iid}"
+                    ),
+                    "description": "",
+                    "references": {
+                        "short": f"!{iid}",
+                        "relative": f"!{iid}",
+                        "full": f"getbill1/getbill!{iid}",
+                    },
+                }
+            )
+            merge_requests.append(merge_request)
+        runner = FakeRunner(
+            issue_pages=[issues[:100], issues[100:]],
+            merge_request_pages=[
+                merge_requests[:100],
+                merge_requests[100:],
+            ],
+        )
+
+        work = self.service(runner).gitlab_work(force_refresh=True)
+
+        self.assertEqual(101, len(work["groups"]["todo"]))
+        self.assertEqual(101, len(work["merge_requests"]))
+        encoded = "getbill1%2Fgetbill"
+        self.assertEqual(
+            [
+                [
+                    "glab",
+                    "api",
+                    f"projects/{encoded}/issues?scope=all&labels=pitcrew-agent&per_page=100&page=1",
+                ],
+                [
+                    "glab",
+                    "api",
+                    f"projects/{encoded}/issues?scope=all&labels=pitcrew-agent&per_page=100&page=2",
+                ],
+                [
+                    "glab",
+                    "api",
+                    f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
+                ],
+                [
+                    "glab",
+                    "api",
+                    f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=2",
+                ],
+            ],
+            [call[0] for call in runner.calls],
         )
 
     def test_gitlab_cache_lasts_sixty_seconds_and_force_refresh_bypasses_it(self):
@@ -428,8 +522,35 @@ class DashboardServiceTest(unittest.TestCase):
                     with self.assertRaises(DashboardError):
                         service.control(action, skill)
 
-        self.assertEqual([], runner.calls)
+        self.assertEqual(1, len(runner.calls))
+        self.assertIn("status", runner.calls[0][0])
         starter.assert_not_called()
+
+    def test_control_eligibility_comes_from_scheduler_status(self):
+        dynamic_entry = {
+            "skill": "dynamic-run",
+            "interval_seconds": 60,
+            "enabled": True,
+            "reason": "",
+            "label": "io.getbill.pitcrew.getbill.dynamic-run",
+            "loaded": True,
+            "running": False,
+            "pid": None,
+        }
+        runner = FakeRunner(schedule=[dynamic_entry])
+        service = self.service(runner)
+        process = mock.Mock(pid=1357)
+
+        with mock.patch(
+            "scripts.pitcrew_dashboard.subprocess.Popen",
+            return_value=process,
+        ) as starter:
+            result = service.control("trigger", "dynamic-run")
+
+        self.assertEqual({"accepted": True, "pid": 1357}, result)
+        self.assertEqual(1, len(runner.calls))
+        self.assertIn("status", runner.calls[0][0])
+        self.assertEqual("dynamic-run", starter.call_args.args[0][1])
 
     def test_control_uses_exact_safe_argument_arrays(self):
         runner = FakeRunner()
@@ -465,7 +586,7 @@ class DashboardServiceTest(unittest.TestCase):
                 "--skill",
                 "research-run",
             ],
-            runner.calls[0][0],
+            runner.calls[1][0],
         )
         self.assertEqual(
             [
@@ -477,7 +598,7 @@ class DashboardServiceTest(unittest.TestCase):
                 "--skill",
                 "research-run",
             ],
-            runner.calls[1][0],
+            runner.calls[2][0],
         )
         self.assertEqual({"accepted": True}, stopped)
         self.assertEqual({"accepted": True}, restarted)
