@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Serve the Pitcrew dashboard on an authenticated localhost boundary."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import secrets
+import signal
+import subprocess
+import sys
+import threading
+from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.pitcrew_config import runtime_root
+from scripts.pitcrew_dashboard import DashboardError, DashboardService
+
+
+ASSET_ROOT = ROOT / "dashboard"
+MAX_BODY_BYTES = 8192
+ASSET_ROUTES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/assets/app.js": ("assets/app.js", "text/javascript; charset=utf-8"),
+    "/assets/styles.css": ("assets/styles.css", "text/css; charset=utf-8"),
+}
+
+
+def create_server(
+    host: str,
+    port: int,
+    service: DashboardService,
+    session_token: str,
+) -> ThreadingHTTPServer:
+    if host != "127.0.0.1":
+        raise ValueError("dashboard host must be 127.0.0.1")
+
+    class DashboardHandler(BaseHTTPRequestHandler):
+        def end_headers(self) -> None:
+            self.send_header("Content-Security-Policy", "default-src 'self'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            super().end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+        def send_error(
+            self,
+            code: int,
+            message: str | None = None,
+            explain: str | None = None,
+        ) -> None:
+            self._send_json(code, {"error": "request rejected"})
+
+        def _send(
+            self,
+            status: int,
+            payload: bytes,
+            content_type: str,
+        ) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def _send_json(self, status: int, value: object) -> None:
+            payload = json.dumps(
+                value,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            self._send(status, payload, "application/json; charset=utf-8")
+
+        def _request_allowed(self) -> bool:
+            expected_host = f"127.0.0.1:{self.server.server_port}"
+            if self.headers.get("Host") != expected_host:
+                return False
+            origin = self.headers.get("Origin")
+            return origin is None or origin == f"http://{expected_host}"
+
+        def do_GET(self) -> None:
+            if not self._request_allowed():
+                self._send_json(403, {"error": "request rejected"})
+                return
+            parsed = urlsplit(self.path)
+            if parsed.path == "/api/status":
+                self._service_json(service.snapshot)
+                return
+            if parsed.path == "/api/history":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                skill = query.get("skill", [None])[0]
+                outcome = query.get("outcome", [None])[0]
+                self._service_json(lambda: service.history(skill, outcome))
+                return
+            if parsed.path == "/api/gitlab":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                force_refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
+                self._service_json(
+                    lambda: service.gitlab_work(force_refresh=force_refresh)
+                )
+                return
+            asset = ASSET_ROUTES.get(parsed.path)
+            if asset is None:
+                self._send_json(404, {"error": "not found"})
+                return
+            self._serve_asset(*asset)
+
+        def _service_json(self, operation) -> None:
+            try:
+                self._send_json(200, operation())
+            except DashboardError:
+                self._send_json(500, {"error": "service unavailable"})
+            except Exception:
+                self._send_json(500, {"error": "service unavailable"})
+
+        def _serve_asset(self, relative_path: str, content_type: str) -> None:
+            try:
+                payload = (ASSET_ROOT / relative_path).read_bytes()
+                if relative_path == "index.html":
+                    marker = b"__PITCREW_SESSION_TOKEN__"
+                    if payload.count(marker) != 1:
+                        raise ValueError("invalid session marker")
+                    payload = payload.replace(marker, session_token.encode("utf-8"))
+            except FileNotFoundError:
+                self._send_json(404, {"error": "not found"})
+                return
+            except (OSError, ValueError):
+                self._send_json(500, {"error": "asset unavailable"})
+                return
+            self._send(200, payload, content_type)
+
+        def do_POST(self) -> None:
+            if not self._request_allowed():
+                self._send_json(403, {"error": "request rejected"})
+                return
+            if urlsplit(self.path).path != "/api/actions":
+                self._send_json(404, {"error": "not found"})
+                return
+            supplied_token = self.headers.get("X-Pitcrew-Session")
+            if supplied_token is None or not secrets.compare_digest(
+                supplied_token,
+                session_token,
+            ):
+                self._send_json(403, {"error": "request rejected"})
+                return
+            if self.headers.get_content_type() != "application/json":
+                self._send_json(400, {"error": "invalid request"})
+                return
+            content_length = self.headers.get("Content-Length")
+            try:
+                length = int(content_length) if content_length is not None else -1
+            except ValueError:
+                length = -1
+            if length > MAX_BODY_BYTES:
+                self._send_json(413, {"error": "request too large"})
+                return
+            if length < 0:
+                self._send_json(400, {"error": "invalid request"})
+                return
+            body = self.rfile.read(length)
+            try:
+                request = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"error": "invalid request"})
+                return
+            if (
+                not isinstance(request, dict)
+                or set(request) != {"action", "skill"}
+                or not isinstance(request["action"], str)
+                or not isinstance(request["skill"], str)
+                or not request["action"]
+                or not request["skill"]
+            ):
+                self._send_json(400, {"error": "invalid request"})
+                return
+            try:
+                result = service.control(request["action"], request["skill"])
+            except DashboardError:
+                self._send_json(403, {"error": "action rejected"})
+                return
+            except Exception:
+                self._send_json(500, {"error": "service unavailable"})
+                return
+            self._send_json(202, result)
+
+    return ThreadingHTTPServer((host, port), DashboardHandler)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(description="Serve the Pitcrew dashboard")
+    result.add_argument("--project", default="getbill")
+    result.add_argument("--host", default="127.0.0.1")
+    result.add_argument("--port", type=int, default=8765)
+    return result
+
+
+def main() -> int:
+    arguments = parser().parse_args()
+    if arguments.host != "127.0.0.1":
+        parser().error("--host must be 127.0.0.1")
+    runtime_dir = runtime_root() / arguments.project
+    service = DashboardService(
+        project=arguments.project,
+        runtime_dir=runtime_dir,
+        command_runner=subprocess.run,
+        now=lambda: datetime.now(UTC),
+    )
+    session_token = secrets.token_urlsafe(32)
+    server = create_server(
+        arguments.host,
+        arguments.port,
+        service,
+        session_token,
+    )
+
+    def stop_server(signum: int, frame: object) -> None:
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGINT, stop_server)
+    signal.signal(signal.SIGTERM, stop_server)
+    print(
+        f"Pitcrew dashboard: http://127.0.0.1:{server.server_port}",
+        flush=True,
+    )
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

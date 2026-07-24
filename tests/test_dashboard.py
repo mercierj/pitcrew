@@ -1,8 +1,12 @@
+import http.client
+import importlib.util
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +15,17 @@ from scripts.pitcrew_dashboard import DashboardError, DashboardService
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXED_NOW = datetime(2026, 7, 24, 12, 0, tzinfo=UTC)
+SERVER_PATH = ROOT / "bin/pitcrew-dashboard"
+SERVER_LOADER = SourceFileLoader(
+    "pitcrew_dashboard_server",
+    str(SERVER_PATH),
+)
+SERVER_SPEC = importlib.util.spec_from_loader(
+    SERVER_LOADER.name,
+    SERVER_LOADER,
+)
+SERVER = importlib.util.module_from_spec(SERVER_SPEC)
+SERVER_SPEC.loader.exec_module(SERVER)
 ENABLED_SKILLS = (
     "research-run",
     "manager-run",
@@ -669,6 +684,296 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertIn("Authorization: [REDACTED]", str(raised.exception))
         self.assertNotIn("local-secret", str(raised.exception))
         self.assertLessEqual(len(str(raised.exception)), 2048)
+
+
+class FakeDashboardService:
+    def __init__(self):
+        self.calls = []
+
+    def snapshot(self):
+        self.calls.append(("snapshot",))
+        return {"project": "getbill", "counts": {"enabled": 7, "disabled": 6}}
+
+    def history(self, skill, outcome):
+        self.calls.append(("history", skill, outcome))
+        return [{"skill": skill, "outcome": outcome}]
+
+    def gitlab_work(self, force_refresh=False):
+        self.calls.append(("gitlab", force_refresh))
+        return {"degraded": False, "groups": {}}
+
+    def control(self, action, skill):
+        self.calls.append(("control", action, skill))
+        if skill == "qa-run":
+            raise DashboardError("disabled role: qa-run")
+        return {"accepted": True, "pid": 9876}
+
+
+class DashboardEntryPointTest(unittest.TestCase):
+    def test_executable_imports_project_modules_outside_repository(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(
+                ["python3", str(SERVER_PATH), "--help"],
+                cwd=temp,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("--project", result.stdout)
+
+
+class DashboardHttpTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.asset_root = Path(self.temp.name).resolve()
+        (self.asset_root / "assets").mkdir()
+        (self.asset_root / "index.html").write_text(
+            "<html><script>window.token='__PITCREW_SESSION_TOKEN__'</script></html>",
+            encoding="utf-8",
+        )
+        (self.asset_root / "assets/app.js").write_text(
+            "window.pitcrew = true;",
+            encoding="utf-8",
+        )
+        (self.asset_root / "assets/styles.css").write_text(
+            "body { color: black; }",
+            encoding="utf-8",
+        )
+        self.service = FakeDashboardService()
+        self.token = "local-session-token"
+        self.assets_patch = mock.patch.object(
+            SERVER,
+            "ASSET_ROOT",
+            self.asset_root,
+        )
+        self.assets_patch.start()
+        self.server = SERVER.create_server(
+            "127.0.0.1",
+            0,
+            self.service,
+            self.token,
+        )
+        self.port = self.server.server_address[1]
+        self.host = f"127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.assets_patch.stop()
+        self.temp.cleanup()
+
+    def request(self, method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+        request_headers = {"Host": self.host}
+        if headers:
+            request_headers.update(headers)
+        connection.request(method, path, body=body, headers=request_headers)
+        response = connection.getresponse()
+        payload = response.read()
+        result = (
+            response.status,
+            {key.lower(): value for key, value in response.getheaders()},
+            payload,
+        )
+        connection.close()
+        return result
+
+    def assert_security_headers(self, headers):
+        self.assertEqual("default-src 'self'", headers["content-security-policy"])
+        self.assertEqual("nosniff", headers["x-content-type-options"])
+        self.assertEqual("no-store", headers["cache-control"])
+
+    def test_api_get_routes_return_json_and_forward_filters(self):
+        status, headers, payload = self.request("GET", "/api/status")
+        self.assertEqual(200, status)
+        self.assertEqual("getbill", json.loads(payload)["project"])
+        self.assert_security_headers(headers)
+
+        status, _, payload = self.request(
+            "GET",
+            "/api/history?skill=research-run&outcome=noop",
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("research-run", json.loads(payload)[0]["skill"])
+
+        status, _, payload = self.request("GET", "/api/gitlab?refresh=1")
+        self.assertEqual(200, status)
+        self.assertFalse(json.loads(payload)["degraded"])
+        self.assertEqual(
+            [
+                ("snapshot",),
+                ("history", "research-run", "noop"),
+                ("gitlab", True),
+            ],
+            self.service.calls,
+        )
+        self.assertNotIn(self.token.encode(), payload)
+
+    def test_fixed_assets_replace_only_index_token_and_reject_other_paths(self):
+        status, headers, index = self.request("GET", "/")
+        self.assertEqual(200, status)
+        self.assertIn(self.token.encode(), index)
+        self.assertNotIn(b"__PITCREW_SESSION_TOKEN__", index)
+        self.assert_security_headers(headers)
+
+        for path, expected in (
+            ("/assets/app.js", b"window.pitcrew"),
+            ("/assets/styles.css", b"body"),
+        ):
+            with self.subTest(path=path):
+                status, _, payload = self.request("GET", path)
+                self.assertEqual(200, status)
+                self.assertIn(expected, payload)
+                self.assertNotIn(self.token.encode(), payload)
+
+        (self.asset_root / "assets/app.js").unlink()
+        status, headers, payload = self.request("GET", "/assets/app.js")
+        self.assertEqual(404, status)
+        self.assertNotIn(self.token.encode(), payload)
+        self.assert_security_headers(headers)
+
+        for path in (
+            "/missing",
+            "/../index.html",
+            "/assets/../index.html",
+            "/assets/%2e%2e/index.html",
+        ):
+            with self.subTest(path=path):
+                status, headers, payload = self.request("GET", path)
+                self.assertEqual(404, status)
+                self.assertNotIn(self.token.encode(), payload)
+                self.assert_security_headers(headers)
+
+    def test_post_action_requires_session_and_accepts_valid_request(self):
+        body = json.dumps(
+            {"action": "trigger", "skill": "research-run"}
+        ).encode()
+        status, headers, _ = self.request(
+            "POST",
+            "/api/actions",
+            body,
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(403, status)
+        self.assert_security_headers(headers)
+        self.assertEqual([], self.service.calls)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/actions",
+            body,
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(202, status)
+        self.assertTrue(json.loads(payload)["accepted"])
+        self.assertEqual(
+            [("control", "trigger", "research-run")],
+            self.service.calls,
+        )
+
+    def test_host_and_origin_boundary(self):
+        status, _, _ = self.request("GET", "/api/status")
+        self.assertEqual(200, status)
+        status, _, _ = self.request(
+            "GET",
+            "/api/status",
+            headers={"Origin": f"http://{self.host}"},
+        )
+        self.assertEqual(200, status)
+
+        for headers in (
+            {"Host": ""},
+            {"Host": "localhost:8765"},
+            {"Origin": "https://evil.example"},
+            {"Origin": f"https://{self.host}"},
+        ):
+            with self.subTest(headers=headers):
+                status, response_headers, _ = self.request(
+                    "GET",
+                    "/api/status",
+                    headers=headers,
+                )
+                self.assertEqual(403, status)
+                self.assert_security_headers(response_headers)
+
+    def test_invalid_action_payloads_never_reach_controls(self):
+        valid_headers = {
+            "Content-Type": "application/json",
+            "X-Pitcrew-Session": self.token,
+        }
+        cases = (
+            (b"{", valid_headers, 400),
+            (
+                json.dumps({"action": "trigger"}).encode(),
+                valid_headers,
+                400,
+            ),
+            (
+                json.dumps(
+                    {
+                        "action": "trigger",
+                        "skill": "research-run",
+                        "extra": True,
+                    }
+                ).encode(),
+                valid_headers,
+                400,
+            ),
+            (
+                json.dumps({"action": 1, "skill": "research-run"}).encode(),
+                valid_headers,
+                400,
+            ),
+            (
+                json.dumps({"action": "trigger", "skill": "research-run"}).encode(),
+                {"X-Pitcrew-Session": self.token},
+                400,
+            ),
+            (b"x" * 8193, valid_headers, 413),
+        )
+        for body, headers, expected in cases:
+            with self.subTest(expected=expected, body=body[:20]):
+                status, response_headers, _ = self.request(
+                    "POST",
+                    "/api/actions",
+                    body,
+                    headers,
+                )
+                self.assertEqual(expected, status)
+                self.assert_security_headers(response_headers)
+        self.assertEqual([], self.service.calls)
+
+    def test_dashboard_error_is_safe_and_does_not_expose_session(self):
+        status, headers, payload = self.request(
+            "POST",
+            "/api/actions",
+            json.dumps({"action": "trigger", "skill": "qa-run"}).encode(),
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(403, status)
+        self.assertEqual({"error": "action rejected"}, json.loads(payload))
+        self.assertNotIn(self.token.encode(), payload)
+        self.assert_security_headers(headers)
+
+    def test_create_server_rejects_non_loopback_host(self):
+        with self.assertRaises(ValueError):
+            SERVER.create_server(
+                "0.0.0.0",
+                0,
+                self.service,
+                self.token,
+            )
 
 
 if __name__ == "__main__":
