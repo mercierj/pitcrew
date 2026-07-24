@@ -45,6 +45,19 @@ class HistoryStoreTest(unittest.TestCase):
 
             self.assertEqual(["recent", "boundary"], [record["skill"] for record in records])
 
+    def test_read_persists_retention_pruning_to_disk(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "history.jsonl"
+            store = HistoryStore(path, retention_days=7)
+            store.append(
+                _record("expired", "2026-07-17T12:00:00Z"),
+                now="2026-07-17T12:00:00Z",
+            )
+
+            self.assertEqual([], store.read(now="2026-07-25T12:00:00Z"))
+            self.assertEqual("", path.read_text(encoding="utf-8"))
+            self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
     def test_malformed_and_invalid_jsonl_lines_are_skipped(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "history.jsonl"

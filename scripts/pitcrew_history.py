@@ -142,6 +142,7 @@ class HistoryStore:
         current_time = _parse_timestamp(now) if now is not None else datetime.now(UTC)
         with self._locked():
             records = self._retained(self._read_valid_records(), current_time)
+            self._replace(records)
         if skill is not None:
             records = [record for record in records if record["skill"] == skill]
         if outcome is not None:
