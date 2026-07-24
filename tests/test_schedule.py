@@ -22,6 +22,19 @@ class ScheduleTest(unittest.TestCase):
             check=False,
         )
 
+    def fake_launchctl_env(self, root, script):
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        launchctl = fake_bin / "launchctl"
+        launchctl.write_text("#!/usr/bin/env bash\n" + script, encoding="utf-8")
+        launchctl.chmod(0o755)
+        return {
+            **os.environ,
+            "HOME": str(root),
+            "CODEX_HOME": str(root / ".codex"),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        }
+
     def test_getbill_schedule_enables_core_and_gates_human_or_unconfigured_roles(self):
         result = self.run_scheduler("list", "--project", "getbill", "--json")
         self.assertEqual(0, result.returncode, result.stderr)
@@ -134,6 +147,152 @@ class ScheduleTest(unittest.TestCase):
             self.assertEqual(23, result.returncode)
             self.assertIn("enable failed", result.stderr)
             self.assertNotIn("installed", result.stdout)
+
+    def test_status_for_one_skill_reports_launchd_state_and_pid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"printf '%s\\n' \"$*\" >> {calls}\n"
+                "if [ \"$1\" = 'print' ]; then\n"
+                "  printf 'state = running\\npid = 1234\\nraw launchctl output\\n'\n"
+                "fi\n",
+            )
+
+            result = self.run_scheduler(
+                "status",
+                "--project",
+                "getbill",
+                "--skill",
+                "research-run",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            status = json.loads(result.stdout)
+            self.assertEqual(1, len(status))
+            self.assertEqual("research-run", status[0]["skill"])
+            self.assertEqual("io.getbill.pitcrew.getbill.research-run", status[0]["label"])
+            self.assertEqual(1800, status[0]["interval_seconds"])
+            self.assertTrue(status[0]["enabled"])
+            self.assertEqual("", status[0]["reason"])
+            self.assertTrue(status[0]["loaded"])
+            self.assertTrue(status[0]["running"])
+            self.assertEqual(1234, status[0]["pid"])
+            self.assertNotIn("raw launchctl output", result.stdout)
+            self.assertEqual(
+                ["print gui/%d/io.getbill.pitcrew.getbill.research-run" % os.getuid()],
+                calls.read_text(encoding="utf-8").splitlines(),
+            )
+
+    def test_install_for_one_skill_bootstraps_only_that_launch_agent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / "LaunchAgents"
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"printf '%s\\n' \"$*\" >> {calls}\n",
+            )
+
+            result = self.run_scheduler(
+                "install",
+                "--project",
+                "getbill",
+                "--skill",
+                "research-run",
+                "--output-dir",
+                str(output),
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                ["io.getbill.pitcrew.getbill.research-run.plist"],
+                [path.name for path in output.glob("*.plist")],
+            )
+            commands = calls.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(3, len(commands))
+            self.assertTrue(all("research-run" in command for command in commands))
+            self.assertEqual(
+                1,
+                sum(command.startswith("bootstrap ") for command in commands),
+            )
+
+    def test_stop_boots_out_only_the_selected_launch_agent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"printf '%s\\n' \"$*\" >> {calls}\n",
+            )
+
+            result = self.run_scheduler(
+                "stop",
+                "--project",
+                "getbill",
+                "--skill",
+                "research-run",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                [
+                    "bootout gui/%d/io.getbill.pitcrew.getbill.research-run"
+                    % os.getuid()
+                ],
+                calls.read_text(encoding="utf-8").splitlines(),
+            )
+
+    def test_unknown_or_disabled_skill_exits_two_without_launchctl(self):
+        for skill in ("missing-run", "qa-run"):
+            with self.subTest(skill=skill), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                calls = root / "calls"
+                env = self.fake_launchctl_env(
+                    root,
+                    f"touch {calls}\n",
+                )
+
+                result = self.run_scheduler(
+                    "status",
+                    "--project",
+                    "getbill",
+                    "--skill",
+                    skill,
+                    env=env,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn("skill", result.stderr.lower())
+                self.assertFalse(calls.exists())
+
+    def test_stop_propagates_launchctl_failure_with_scrubbed_limited_stderr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = self.fake_launchctl_env(
+                root,
+                "printf 'permission denied TOKEN=supersecret\\n%s' "
+                "\"$(printf 'x%.0s' {1..1000})\" >&2\n"
+                "exit 41\n",
+            )
+
+            result = self.run_scheduler(
+                "stop",
+                "--project",
+                "getbill",
+                "--skill",
+                "research-run",
+                env=env,
+            )
+
+            self.assertEqual(41, result.returncode)
+            self.assertIn("permission denied", result.stderr)
+            self.assertNotIn("supersecret", result.stderr)
+            self.assertLessEqual(len(result.stderr), 600)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,16 @@ def entries() -> list[dict[str, object]]:
     ]
 
 
+def enabled_entry(skill: str) -> dict[str, object]:
+    for entry in entries():
+        if entry["skill"] != skill:
+            continue
+        if not entry["enabled"]:
+            raise ValueError(f"skill is disabled: {skill}")
+        return entry
+    raise ValueError(f"unknown skill: {skill}")
+
+
 def launchd_label(project: str, skill: str) -> str:
     return f"{LABEL_PREFIX}.{project}.{skill}"
 
@@ -103,9 +113,15 @@ def write_atomic(path: Path, payload: dict) -> None:
             os.unlink(temporary_name)
 
 
-def render(project: str, output_dir: Path, env: dict[str, str]) -> list[Path]:
+def render(
+    project: str,
+    output_dir: Path,
+    env: dict[str, str],
+    skill: str | None = None,
+) -> list[Path]:
     paths = []
-    for entry in entries():
+    selected = [enabled_entry(skill)] if skill else entries()
+    for entry in selected:
         if not entry["enabled"]:
             continue
         logs_dir = log_path(project, str(entry["skill"]), env).parent
@@ -126,46 +142,91 @@ def launchctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str
     )
 
 
-def install(project: str, output_dir: Path, env: dict[str, str]) -> int:
-    paths = render(project, output_dir, env)
+def scrubbed_error(message: str, fallback: str) -> str:
+    if not message.strip():
+        return fallback
+    scrubbed = re.sub(
+        r"(?i)\b(token|secret|password|key|authorization|credential)(\s*=\s*)\S+",
+        r"\1\2[REDACTED]",
+        message,
+    )
+    scrubbed = " ".join(scrubbed.split())
+    return scrubbed[:500]
+
+
+def launchctl_failure(
+    result: subprocess.CompletedProcess[str],
+    fallback: str,
+) -> int:
+    print(scrubbed_error(result.stderr, fallback), file=sys.stderr)
+    return result.returncode
+
+
+def install(
+    project: str,
+    output_dir: Path,
+    env: dict[str, str],
+    skill: str | None = None,
+) -> int:
+    paths = render(project, output_dir, env, skill)
     domain = f"gui/{os.getuid()}"
     for path in paths:
         label = path.stem
         launchctl("bootout", f"{domain}/{label}", check=False)
         result = launchctl("bootstrap", domain, str(path), check=False)
         if result.returncode:
-            print(result.stderr.strip() or f"failed to bootstrap {label}", file=sys.stderr)
-            return result.returncode
+            return launchctl_failure(result, f"failed to bootstrap {label}")
         enabled = launchctl("enable", f"{domain}/{label}", check=False)
         if enabled.returncode:
-            print(enabled.stderr.strip() or f"failed to enable {label}", file=sys.stderr)
-            return enabled.returncode
+            return launchctl_failure(enabled, f"failed to enable {label}")
         print(f"installed {label}")
     return 0
 
 
-def status(project: str) -> int:
+def launchd_state(output: str) -> tuple[bool, int | None]:
+    running = re.search(r"^\s*state\s*=\s*running\s*$", output, re.MULTILINE) is not None
+    pid_match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", output, re.MULTILINE)
+    return running, int(pid_match.group(1)) if pid_match else None
+
+
+def status(project: str, skill: str | None = None) -> int:
     domain = f"gui/{os.getuid()}"
     result = []
-    for entry in entries():
+    selected = [enabled_entry(skill)] if skill else entries()
+    for entry in selected:
         skill = str(entry["skill"])
         label = launchd_label(project, skill)
         inspected = launchctl("print", f"{domain}/{label}", check=False)
+        loaded = inspected.returncode == 0
+        running, pid = launchd_state(inspected.stdout) if loaded else (False, None)
         result.append(
             {
                 **entry,
                 "label": label,
-                "loaded": inspected.returncode == 0,
+                "loaded": loaded,
+                "running": running,
+                "pid": pid,
             }
         )
     print(json.dumps(result, indent=2))
     return 0
 
 
+def stop(project: str, skill: str) -> int:
+    enabled_entry(skill)
+    label = launchd_label(project, skill)
+    target = f"gui/{os.getuid()}/{label}"
+    result = launchctl("bootout", target, check=False)
+    if result.returncode:
+        return launchctl_failure(result, f"failed to stop {label}")
+    print(f"stopped {label}")
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(description="Manage recurring Pitcrew Codex jobs")
     commands = top.add_subparsers(dest="command", required=True)
-    for command in ("list", "render", "install", "status"):
+    for command in ("list", "render", "install", "status", "stop"):
         child = commands.add_parser(command)
         child.add_argument("--project", type=validated_project, default="getbill")
         if command == "list":
@@ -176,6 +237,10 @@ def parser() -> argparse.ArgumentParser:
                 type=Path,
                 default=Path.home() / "Library/LaunchAgents",
             )
+        if command in {"install", "status"}:
+            child.add_argument("--skill")
+        if command == "stop":
+            child.add_argument("--skill", required=True)
     return top
 
 
@@ -194,10 +259,16 @@ def main() -> int:
         for path in render(args.project, args.output_dir.expanduser(), env):
             print(path)
         return 0
-    if args.command == "install":
-        return install(args.project, args.output_dir.expanduser(), env)
-    if args.command == "status":
-        return status(args.project)
+    try:
+        if args.command == "install":
+            return install(args.project, args.output_dir.expanduser(), env, args.skill)
+        if args.command == "status":
+            return status(args.project, args.skill)
+        if args.command == "stop":
+            return stop(args.project, args.skill)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
     return 2
 
 
