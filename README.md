@@ -155,14 +155,6 @@ Run the complete deterministic verification:
 bash tests/run.sh
 ```
 
-Until that entry point is added, the focused checks are:
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-python3 scripts/pitcrew_config.py validate profiles/generic.json
-python3 scripts/pitcrew_config.py validate profiles/getbill.json
-```
-
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License and attribution

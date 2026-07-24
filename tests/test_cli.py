@@ -48,6 +48,32 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("danger-full-access", result.stdout)
             self.assertIn("/Users/jo/Prog/getbill", result.stdout)
 
+    def test_getbill_dry_run_never_requests_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            config_path = root / ".codex/pitcrew/getbill/config.json"
+            config = config_path.read_text(encoding="utf-8")
+            self.assertIn('"autonomy": "off"', config)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "releaser-run",
+                "getbill",
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertNotIn("danger-full-access", result.stdout)
+            self.assertNotIn("deploy", result.stdout.lower().split("prompt=", 1)[0])
+
     def test_runner_rejects_malformed_repository_without_calling_codex(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
