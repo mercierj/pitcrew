@@ -1023,6 +1023,43 @@ class DashboardHttpTest(unittest.TestCase):
         self.assertLess(elapsed, 1)
         self.server = None
 
+    def test_incomplete_headers_time_out_without_blocking_shutdown(self):
+        request = (
+            "GET /api/status HTTP/1.1\r\n"
+            f"Host: {self.host}\r\n"
+            "X-Incomplete: waiting"
+        ).encode()
+        with (
+            mock.patch.object(SERVER, "READ_TIMEOUT_SECONDS", 0.1),
+            socket.create_connection(("127.0.0.1", self.port), timeout=1) as client,
+        ):
+            client.settimeout(0.8)
+            client.sendall(request)
+            started = time.monotonic()
+            try:
+                response = client.recv(4096)
+            except socket.timeout:
+                self.fail("server left incomplete headers waiting")
+            elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.8)
+        if response:
+            self.assertIn(b"HTTP/1.0 408", response)
+            self.assertIn(b"Content-Security-Policy: default-src 'self'", response)
+            self.assertIn(b"X-Content-Type-Options: nosniff", response)
+            self.assertIn(b"Cache-Control: no-store", response)
+            self.assertNotIn(self.token.encode(), response)
+        self.assertEqual([], self.service.calls)
+
+        started = time.monotonic()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        elapsed = time.monotonic() - started
+        self.assertFalse(self.thread.is_alive())
+        self.assertLess(elapsed, 1)
+        self.server = None
+
     def test_dashboard_error_is_safe_and_does_not_expose_session(self):
         status, headers, payload = self.request(
             "POST",

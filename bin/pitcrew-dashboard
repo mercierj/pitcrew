@@ -50,6 +50,10 @@ def create_server(
         raise ValueError("dashboard host must be 127.0.0.1")
 
     class DashboardHandler(BaseHTTPRequestHandler):
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(READ_TIMEOUT_SECONDS)
+
         def end_headers(self) -> None:
             self.send_header("Content-Security-Policy", "default-src 'self'")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -178,7 +182,6 @@ def create_server(
             if length < 0:
                 self._send_json(400, {"error": "invalid request"})
                 return
-            self.connection.settimeout(READ_TIMEOUT_SECONDS)
             try:
                 body = self.rfile.read(length)
             except (socket.timeout, TimeoutError):
