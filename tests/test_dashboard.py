@@ -689,6 +689,7 @@ class DashboardServiceTest(unittest.TestCase):
 class FakeDashboardService:
     def __init__(self):
         self.calls = []
+        self.accepted_controls = []
 
     def snapshot(self):
         self.calls.append(("snapshot",))
@@ -704,8 +705,13 @@ class FakeDashboardService:
 
     def control(self, action, skill):
         self.calls.append(("control", action, skill))
+        if action not in {"trigger", "stop", "restart"}:
+            raise DashboardError(f"unknown action: {action}")
+        if skill not in ENABLED_SKILLS:
+            raise DashboardError(f"unknown role: {skill}")
         if skill == "qa-run":
             raise DashboardError("disabled role: qa-run")
+        self.accepted_controls.append((action, skill))
         return {"accepted": True, "pid": 9876}
 
 
@@ -878,6 +884,10 @@ class DashboardHttpTest(unittest.TestCase):
             [("control", "trigger", "research-run")],
             self.service.calls,
         )
+        self.assertEqual(
+            [("trigger", "research-run")],
+            self.service.accepted_controls,
+        )
 
     def test_host_and_origin_boundary(self):
         status, _, _ = self.request("GET", "/api/status")
@@ -965,6 +975,38 @@ class DashboardHttpTest(unittest.TestCase):
         self.assertEqual({"error": "action rejected"}, json.loads(payload))
         self.assertNotIn(self.token.encode(), payload)
         self.assert_security_headers(headers)
+
+    def test_unknown_action_or_skill_is_safely_rejected_without_acceptance(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Pitcrew-Session": self.token,
+            "Origin": f"http://{self.host}",
+        }
+        for request in (
+            {"action": "delete", "skill": "research-run"},
+            {"action": "trigger", "skill": "unknown-run"},
+        ):
+            with self.subTest(request=request):
+                status, response_headers, payload = self.request(
+                    "POST",
+                    "/api/actions",
+                    json.dumps(request).encode(),
+                    headers,
+                )
+
+                self.assertEqual(403, status)
+                self.assertEqual({"error": "action rejected"}, json.loads(payload))
+                self.assertNotIn(self.token.encode(), payload)
+                self.assert_security_headers(response_headers)
+
+        self.assertEqual(
+            [
+                ("control", "delete", "research-run"),
+                ("control", "trigger", "unknown-run"),
+            ],
+            self.service.calls,
+        )
+        self.assertEqual([], self.service.accepted_controls)
 
     def test_create_server_rejects_non_loopback_host(self):
         with self.assertRaises(ValueError):
