@@ -114,6 +114,7 @@ class HistoryStoreTest(unittest.TestCase):
             "provider unavailable",
             "authentication required",
             "permission denied",
+            "provider check failed",
         )
         for reason in reasons:
             with self.subTest(reason=reason):
