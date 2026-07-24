@@ -23,22 +23,25 @@ REQUIRED_STRING_FIELDS = (
     "summary",
 )
 VALID_OUTCOMES = {"success", "noop", "failed", "interrupted"}
+BENIGN_NOOP_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\s*no eligible item"
+        r"(?:\s*;\s*no approval(?:\s+\w+){0,3}\s+required)?[.!]?\s*",
+        r"\s*no approval(?:\s+\w+){0,3}\s+required[.!]?\s*",
+        r"\s*nothing missing[.!]?\s*",
+        r"\s*(?:provider check completed\s*;\s*)?"
+        r"no permissions?(?:\s+\w+){0,3}\s+required[.!]?\s*",
+    )
+)
 ACTIONABLE_NOOP_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"\brequired\s+(?:file|reference|dependency|configuration|config)"
-        r"\s+(?:(?:is|was)\s+)?(?:unavailable|missing|failed)\b",
-        r"\bmissing\s+"
-        r"(?:configuration|config|file|reference|dependency|credential|"
-        r"[\w.-]+\.[a-z0-9_-]+)\b",
-        r"\bconfigured\s+(?:tracker|forge|provider)\s+"
-        r"(?:not\s+available|unavailable|unauthenticated|unauth['’]d)\b",
-        r"\bprovider(?:\s+(?:check|authentication))?\s+"
-        r"(?:(?:is|was)\s+)?(?:unavailable|failed)\b",
-        r"\bauthentication\s+(?:(?:is|was)\s+)?"
-        r"(?:required|unavailable|failed|invalid|expired|revoked)\b",
+        r"\brequired\b",
+        r"\b(?:unavailable|not\s+available|missing|authentication|failed|"
+        r"unauthenticated|unauth['’]d)\b",
         r"\bpermissions?\s+(?:(?:is|are|was|were)\s+)?"
-        r"(?:denied|required|failed|unavailable)\b",
+        r"(?:denied|required)\b",
     )
 )
 
@@ -199,6 +202,8 @@ def classify_record(record: dict | None) -> str:
     else:
         reason = decoded
     reason_text = str(reason)
+    if any(pattern.fullmatch(reason_text) for pattern in BENIGN_NOOP_PATTERNS):
+        return "healthy"
     if any(pattern.search(reason_text) for pattern in ACTIONABLE_NOOP_PATTERNS):
         return "warning"
     return "healthy"

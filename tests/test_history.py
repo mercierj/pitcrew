@@ -234,6 +234,26 @@ class HistoryStoreTest(unittest.TestCase):
                     ),
                 )
 
+    def test_free_form_configured_provider_failures_are_warnings(self):
+        reasons = (
+            "the required configured tracker operation is unavailable",
+            "configured forge or git capability unavailable",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    "warning",
+                    classify_record(
+                        {
+                            "outcome": "success",
+                            "exit_code": 0,
+                            "summary": json.dumps(
+                                {"status": "noop", "reason": reason}
+                            ),
+                        }
+                    ),
+                )
+
     def test_benign_noop_phrases_are_healthy(self):
         records = (
             {
