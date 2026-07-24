@@ -487,6 +487,34 @@ class DashboardServiceTest(unittest.TestCase):
                 kwargs,
             )
 
+    def test_local_command_oserrors_are_scrubbed_and_bounded(self):
+        raw_error = "Authorization: Basic local-secret\n" + "x" * 3000
+
+        def failing_runner(args, **kwargs):
+            raise OSError(raw_error)
+
+        service = self.service(failing_runner)
+        for operation in (
+            service.snapshot,
+            lambda: service.control("stop", "research-run"),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaises(DashboardError) as raised:
+                    operation()
+                self.assertIn("Authorization: [REDACTED]", str(raised.exception))
+                self.assertNotIn("local-secret", str(raised.exception))
+                self.assertLessEqual(len(str(raised.exception)), 2048)
+
+        with mock.patch(
+            "scripts.pitcrew_dashboard.subprocess.Popen",
+            side_effect=OSError(raw_error),
+        ):
+            with self.assertRaises(DashboardError) as raised:
+                service.control("trigger", "research-run")
+        self.assertIn("Authorization: [REDACTED]", str(raised.exception))
+        self.assertNotIn("local-secret", str(raised.exception))
+        self.assertLessEqual(len(str(raised.exception)), 2048)
+
 
 if __name__ == "__main__":
     unittest.main()

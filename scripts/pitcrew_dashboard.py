@@ -110,7 +110,11 @@ class DashboardService:
                 (self.runtime_dir / "config.json").read_text(encoding="utf-8")
             )
             validate(value)
-        except (OSError, json.JSONDecodeError, ConfigError, TypeError) as error:
+        except OSError as error:
+            raise DashboardError(
+                _redacted_error(str(error), "invalid runtime configuration")
+            ) from error
+        except (json.JSONDecodeError, ConfigError, TypeError) as error:
             raise DashboardError("invalid runtime configuration") from error
         return dict(value)
 
@@ -129,18 +133,25 @@ class DashboardService:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise DashboardError(str(error) or "command unavailable") from error
+            raise DashboardError(
+                _redacted_error(str(error), "command unavailable")
+            ) from error
 
     def history(
         self,
         skill: str | None,
         outcome: str | None,
     ) -> list[dict]:
-        return self.history_store.read(
-            now=self._now().isoformat(),
-            skill=skill,
-            outcome=outcome,
-        )
+        try:
+            return self.history_store.read(
+                now=self._now().isoformat(),
+                skill=skill,
+                outcome=outcome,
+            )
+        except (OSError, ValueError) as error:
+            raise DashboardError(
+                _redacted_error(str(error), "history unavailable")
+            ) from error
 
     def snapshot(self) -> dict:
         args = [
@@ -228,9 +239,13 @@ class DashboardService:
                 check=False,
             )
         except FileNotFoundError as error:
-            raise DashboardError("glab unavailable") from error
+            raise DashboardError(
+                _redacted_error(str(error), "glab unavailable")
+            ) from error
         except (OSError, subprocess.SubprocessError) as error:
-            raise DashboardError("GitLab command failed") from error
+            raise DashboardError(
+                _redacted_error(str(error), "GitLab command failed")
+            ) from error
         if result.returncode:
             raise DashboardError(
                 _redacted_error(result.stderr, "GitLab authentication failed")
@@ -362,7 +377,9 @@ class DashboardService:
                     start_new_session=True,
                 )
             except OSError as error:
-                raise DashboardError("failed to trigger agent") from error
+                raise DashboardError(
+                    _redacted_error(str(error), "failed to trigger agent")
+                ) from error
             return {"accepted": True, "pid": process.pid}
 
         scheduler_action = "stop" if action == "stop" else "install"
