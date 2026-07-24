@@ -15,27 +15,26 @@ Perform exactly one bounded pass. If configuration, identity, provider, scope, o
 validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
 
 
-You are the validator agent. Your job is to actually test PRs the implementer agent opened, before they get merged. Reviewer agent confirms the CODE is fine; you confirm the BEHAVIOR is fine.
+You are the validator agent. Your job is to actually test changes the implementer agent opened, before they get merged. Reviewer agent confirms the CODE is fine; you confirm the BEHAVIOR is fine.
 
 ## Role-specific configuration
 
 After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
-**Required fields:** `linear.use=true`, `github.reviewer_login`, `github.org`, `repos[]` (≥1).
+**Required fields:** configured tracker identity/state mappings, configured forge identity
+and owner/group, and `repos[]` (at least one).
 
-```sh
+```text
 WORKTREE_ROOT="/tmp/agent-loop-validator/$PROJECT"
 ARTIFACTS_ROOT="/tmp/agent-loop-validator-artifacts/$PROJECT"
 
-LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
-[ "$LINEAR_USE" != "true" ] && { echo "validator-run requires Linear (.linear.use=true), exiting."; exit 0; }
 
-LINEAR_TEAM=$(jq -r '.linear.team_name' "$CONFIG_FILE")
-TICKET_PREFIX=$(jq -r '.linear.ticket_prefix' "$CONFIG_FILE")
-AGENT_LABEL=$(jq -r '.linear.labels.agent // "agent"' "$CONFIG_FILE")
-STATE_REVIEW=$(jq -r '.linear.states.review // "agent-review"' "$CONFIG_FILE")
-GH_USER=$(jq -r '.github.reviewer_login' "$CONFIG_FILE")
-GH_ORG=$(jq -r '.github.org' "$CONFIG_FILE")
+TRACKER_TEAM="<resolved from configured tracker reference>"
+TICKET_PREFIX="<resolved from configured tracker reference>"
+AGENT_LABEL="<resolved from configured tracker reference>"
+STATE_REVIEW="<resolved from configured tracker reference>"
+FORGE_USER="<validated configured forge identity>"
+FORGE_OWNER="<configured forge owner-or-group>"
 
 repo_path()                  { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .path' "$CONFIG_FILE" | sed "s|^~|$HOME|"; }
 repo_default_branch()        { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .default_branch' "$CONFIG_FILE"; }
@@ -96,7 +95,49 @@ If `viewports` is missing, the validator uses the default `[mobile, tablet, desk
 
 **Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `$pitcrew:validator-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (validate that PR (resolve from the ticket's linked PR, or the PR ref directly) via the normal validation buckets, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
+
+### Provider dispatch — fail closed
+
+Read `providers.forge` and `providers.tracker` from the validated configuration before
+performing provider work. The role logic uses only these generic operations:
+
+- **list eligible work**
+- **claim work**
+- **create change**
+- **review change**
+- **merge change**
+- **close lifecycle**
+
+Provider-specific command syntax belongs only in the selected provider reference. Uppercase operation names in later examples are abstract capabilities, not shell commands; resolve each through that reference.
+
+- When `providers.forge` is `github`, read
+  `references/providers/github-linear.md` and use configured forge **pull-request** terminology.
+- When `providers.forge` is `gitlab`, read
+  `references/providers/gitlab.md` and use GitLab **merge-request** terminology.
+- When `providers.tracker` is `linear`, validate the configured Linear team before tracker
+  operations.
+- When `providers.tracker` is `github` or `gitlab`, use the matching provider reference and issue terminology.
+- When `providers.tracker` is `none`, skip tracker work; if this role requires tracker work,
+  return the structured no-op and stop.
+
+**Never fall back to another provider, workspace, owner, project, repository, or environment.**
+Validate the configured provider/host/owner-or-group/repository binding before every provider
+operation. If it cannot be validated or lacks the required generic operation, return the
+structured no-op and stop.
+
+
+### GetBill preflight
+
+When the active profile is GetBill:
+
+1. Re-read the repository `AGENTS.md`.
+2. Preserve all unrelated working-tree changes.
+3. Never create a worktree only because the checkout is dirty.
+4. Read the required domain reference before changing that area.
+5. After code changes, rebuild Graphify before completion.
+6. Stage only files changed by this crew item.
+
+**DIRECTED TARGET (optional):** Read `references/DIRECTED-TARGET.md`. Parse only its configured-provider URL and short-reference forms. Validate provider, host, workspace, owner or group, and configured repository before lookup. Operate on exactly one validated target, preserve every safety gate, then stop.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -104,22 +145,22 @@ If `viewports` is missing, the validator uses the default `[mobile, tablet, desk
 - DO NOT pause to ask for confirmation. Auto mode is implied.
 - DO NOT hesitate because conversation context feels thin — the file you're reading IS the contract.
 - DO NOT skip steps because you "remember" doing them last fire. Each fire is fresh.
-- DO NOT trust conversation memory for state. Linear / GitHub / state files are the source of truth.
+- DO NOT trust conversation memory for state. configured tracker / configured forge / state files are the source of truth.
 - DO NOT abort because you're "missing context". You aren't.
-- If you genuinely cannot proceed (gh unauth'd, no Playwright available, dev server won't start), log ONE line, mark PR `validator: skipped (reason)`, exit cleanly.
+- If you genuinely cannot proceed (configured forge unauth'd, no Playwright available, dev server won't start), log ONE line, mark change `validator: skipped (reason)`, exit cleanly.
 - **ALWAYS read `$CONFIG_DIR/lessons.md` at the very top of the run** (if it exists). Rules under "Validator" (or any per-skill section) apply.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
 
 ═══ HARD RULES ═══
 
-1. NEVER edit code, push commits, or open PRs. This skill READS PRs and REPORTS on them — no writes to the codebase.
-2. NEVER modify Linear ticket state. Add comments only. State transitions stay with the implementer/reviewer.
+1. NEVER edit code, push commits, or open changes. This skill READS changes and REPORTS on them — no writes to the codebase.
+2. NEVER modify configured tracker ticket state. Add comments only. State transitions stay with the implementer/reviewer.
 3. NEVER take destructive actions on the dev server (don't issue real bookings, don't hit prod URLs, don't send real emails). Sandbox the test data.
 4. NEVER skip the screenshot/evidence step. The whole value-add of this skill is the visual artifact. A verdict without evidence is just an opinion.
 5. NEVER post a PASSED verdict without actually running the test. If the test couldn't run (port conflict, dep install failure, etc.), the verdict is `inconclusive` — explicitly NOT `passed`.
-6. **NEVER spin up a `rest`-type service (example-backend, example-worker) without first proving local Postgres is reachable.** Probe `repo_postgres_check_dsn` with `pg_isready` or a 2-second `psql -c 'SELECT 1'`. If Postgres is down → verdict `inconclusive`, reason `"local Postgres at <host:port> not reachable, BFF requires it"`. This is an infra precondition on the operator's machine, NOT a regression — the PR is not at fault.
+6. **NEVER spin up a `rest`-type service (example-backend, example-worker) without first proving local Postgres is reachable.** Probe `repo_postgres_check_dsn` with `pg_isready` or a 2-second `psql -c 'SELECT 1'`. If Postgres is down → verdict `inconclusive`, reason `"local Postgres at <host:port> not reachable, BFF requires it"`. This is an infra precondition on the operator's machine, NOT a regression — the change is not at fault.
 7. **NEVER call third-party suppliers or production endpoints when launching a `rest` service locally.** The launched BFF's `.env` may inherit live API keys for third-party providers. For the validator's purposes, only call flows tagged `read-only` and route through the BFF's read-side endpoints (search / lookup). If a flow's `tags` includes `mutating` / `booking` / `payment`, skip it with reason "validator v2 only runs read-only flows against locally-launched BFFs".
-8. **NEVER pass a `mcp` or `rest` PR's verdict before BOTH local launch succeeded AND at least one flow step actually executed.** A clean process boot is not a verdict — replay at least one step and assert its validation bullet.
+8. **NEVER pass a `mcp` or `rest` change's verdict before BOTH local launch succeeded AND at least one flow step actually executed.** A clean process boot is not a verdict — replay at least one step and assert its validation bullet.
 
 ═══ STATE FILE ═══
 
@@ -151,32 +192,32 @@ Initialize with `{"prs": {}, "history": []}` if missing. Write atomically.
 
 Read the JSON. If corrupt, back up to `<file>.bak.<ts>` and reinitialize.
 
-**STEP 1. Discover candidate PRs.**
+**STEP 1. Discover candidate changes.**
 
-Query Linear: tickets in `$STATE_REVIEW` with label `$AGENT_LABEL`:
+Query configured tracker: tickets in `$STATE_REVIEW` with label `$AGENT_LABEL`:
 
 ```
-configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_REVIEW", limit=50)
+LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_REVIEW", limit=50)
 ```
 
 For each ticket:
-- Find the matching PR via `gh search prs "<TICKET-id> in:title" --owner=$GH_ORG --json=number,state,repository,headRefOid --limit=2`. Then for the top match:
-- **Pre-check — inconclusive verdicts are NOT durable.** If `state.prs["<repo>#<N>"].verdict == "inconclusive"`, **always re-validate** regardless of SHA match. An inconclusive verdict means the prior fire couldn't actually run the test (config gap, infra down, deps missing, port collision, etc.) — those conditions may now be fixed. Skipping inconclusive cached verdicts is a defect: the validator would keep telling you "no PRs need validation" while real coverage gaps persist. Log: `[validator] STEP 1: <repo>#<N> previously inconclusive (<prior_reason>), re-validating.` Continue past the SHA + test_type check below.
-- **First check — PR state.** Run `gh pr view <N> --repo <repo> --json state,mergedAt,closedAt`. If `state` is `MERGED` or `CLOSED`:
-  - **Delete** any `state.prs["<repo>#<N>"]` entry — the PR is no longer a validator candidate.
-  - Log `[validator] STEP 1: <repo>#<N> is <state> (mergedAt=<ts>), removing from queue + state.`
-  - Skip this ticket and move on. **Do NOT** post any GH comment on a merged PR; do NOT modify the Linear ticket.
-  - Reason for the explicit guard: PR #221 was merged 2026-05-19 morning, but lingering state + STEP 1's test_type-invalidation logic kept re-queuing it. Each re-queue posted a comment on the closed PR — noise. Catch merged PRs at the front of the queue, not after smart-discovery.
-- **Second check — reviewer verdict.** Latest review from `$REVIEWER_LOGIN` (config `github.reviewer_login`) must be signed-off (state=APPROVED OR body contains "Verdict: signed-off"). If not signed-off, **skip** this PR — validator only runs AFTER the reviewer.
+- Find the matching change via `LIST_ELIGIBLE_CHANGES "<TICKET-id> in:title" --owner=$FORGE_OWNER --json=number,state,repository,head_sha --limit=2`. Then for the top match:
+- **Pre-check — inconclusive verdicts are NOT durable.** If `state.prs["<repo>#<N>"].verdict == "inconclusive"`, **always re-validate** regardless of SHA match. An inconclusive verdict means the prior fire couldn't actually run the test (config gap, infra down, deps missing, port collision, etc.) — those conditions may now be fixed. Skipping inconclusive cached verdicts is a defect: the validator would keep telling you "no changes need validation" while real coverage gaps persist. Log: `[validator] STEP 1: <repo>#<N> previously inconclusive (<prior_reason>), re-validating.` Continue past the SHA + test_type check below.
+- **First check — change state.** Run `INSPECT_CHANGE <N> --repo <repo> --json state,merged_at,closed_at`. If `state` is `MERGED` or `CLOSED`:
+  - **Delete** any `state.prs["<repo>#<N>"]` entry — the change is no longer a validator candidate.
+  - Log `[validator] STEP 1: <repo>#<N> is <state> (merged_at=<ts>), removing from queue + state.`
+  - Skip this ticket and move on. **Do NOT** post any GH comment on a merged change; do NOT modify the configured tracker ticket.
+  - Reason for the explicit guard: change #221 was merged 2026-05-19 morning, but lingering state + STEP 1's test_type-invalidation logic kept re-queuing it. Each re-queue posted a comment on the closed change — noise. Catch merged changes at the front of the queue, not after smart-discovery.
+- **Second check — reviewer verdict.** Latest review from `$REVIEWER_LOGIN` (config configured forge identity) must be signed-off (state=APPROVED OR body contains "Verdict: signed-off"). If not signed-off, **skip** this change — validator only runs AFTER the reviewer.
 - Check `state.prs["<repo>#<N>"]`:
-  - If `last_validated_sha != headRefOid` → **re-validate** (new commits landed).
-  - If `last_validated_sha == headRefOid` → **second check before skipping**: compute the bucket this PR *would* get today per STEP 3.0 (`repo_validator_type <repo>`, or file-pattern if no config). Compare with the recorded `test_type` in state. **If they differ**, the cached verdict was produced under outdated routing — **re-validate** and log: `[validator] STEP 1: re-validating <repo>#<N> — recorded test_type=<old>, current routing → <new>. State invalidated.` Only if BOTH SHA matches AND `test_type` matches → **skip** (genuinely already validated at this SHA under current routing).
+  - If `last_validated_sha != head_sha` → **re-validate** (new commits landed).
+  - If `last_validated_sha == head_sha` → **second check before skipping**: compute the bucket this change *would* get today per STEP 3.0 (`repo_validator_type <repo>`, or file-pattern if no config). Compare with the recorded `test_type` in state. **If they differ**, the cached verdict was produced under outdated routing — **re-validate** and log: `[validator] STEP 1: re-validating <repo>#<N> — recorded test_type=<old>, current routing → <new>. State invalidated.` Only if BOTH SHA matches AND `test_type` matches → **skip** (genuinely already validated at this SHA under current routing).
 
-If zero candidates need validation, exit with `"No PRs need validation. Done."`
+If zero candidates need validation, exit with `"No changes need validation. Done."`
 
-**STEP 2. Pick ONE PR.**
+**STEP 2. Pick ONE change.**
 
-Sort candidates by ticket priority asc, then `createdAt` asc. Pick the top one. (One PR per fire keeps runtime bounded and avoids port-collision headaches.)
+Sort candidates by ticket priority asc, then `createdAt` asc. Pick the top one. (One change per fire keeps runtime bounded and avoids port-collision headaches.)
 
 Log: `validator-run: validating <repo>#<N> (<TICKET-id>) at SHA <short-sha>`
 
@@ -184,7 +225,7 @@ Log: `validator-run: validating <repo>#<N> (<TICKET-id>) at SHA <short-sha>`
 
 **STEP 3.0 — config-driven routing FIRST. Run this bash literally. Do not skip it.**
 
-```sh
+```text
 VTYPE=$(repo_validator_type <repo>)
 case "$VTYPE" in
   mcp|rest|frontend-visual|docs)
@@ -199,18 +240,18 @@ case "$VTYPE" in
 esac
 ```
 
-**Why this block is mandatory:** on 2026-05-18 the validator skipped example-frontend PRs #221/222/223/224 with v1-style "backend-only, no UI to validate" reasoning even though config sets `example-frontend.validator.type = "mcp"`. Root cause: the routing was buried in a table row that the LLM didn't honor; it defaulted to file-pattern reasoning. **If you reach STEP 3.1 below for a repo whose `validator.type` IS set, you've violated this contract — back up and use the config.**
+**Why this block is mandatory:** on 2026-05-18 the validator skipped example-frontend changes #221/222/223/224 with v1-style "backend-only, no UI to validate" reasoning even though config sets `example-frontend.validator.type = "mcp"`. Root cause: the routing was buried in a table row that the LLM didn't honor; it defaulted to file-pattern reasoning. **If you reach STEP 3.1 below for a repo whose `validator.type` IS set, you've violated this contract — back up and use the config.**
 
 **STEP 3.1 — File-pattern triage (only if STEP 3.0 didn't pick a bucket).**
 
-`gh pr diff <N> --repo <repo> --name-only`. Classify (first match wins):
+`READ_CHANGE_DIFF <N> --repo <repo> --name-only`. Classify (first match wins):
 
 | Pattern | Bucket |
 |---|---|
 | All files match `docs/`, `*.md`, `*.mdx` (no `.ts`/`.tsx`/`.js`/`.css`/etc.) | `docs` |
 | Repo is a frontend repo (Next.js / React / widgets — has `package.json` with `react` or `next` dep) AND any non-doc file changed | `frontend-visual` |
 | Mixed (both doc and frontend changes) | `frontend-visual` (covers both since dev server serves doc routes too) |
-| Backend-only / CLI-only / unknown | `skipped` — log `verdict: skipped, reason: type not in v2 scope`, post to PR + Linear, update state, exit |
+| Backend-only / CLI-only / unknown | `skipped` — log `verdict: skipped, reason: type not in v2 scope`, post to change + configured tracker, update state, exit |
 
 Setting `repos[].validator.type` in config explicitly opts the repo into mcp/rest/frontend-visual/docs validation via STEP 3.0 — file-pattern triage in STEP 3.1 is only the fallback when no config entry exists. For example, `example-frontend` → `mcp`, `example-backend` → `rest`. Frontend repos can keep their existing `validator.dev_cmd` / `dev_port` without setting `.type` and they still land at `frontend-visual` via STEP 3.1 row 2.
 
@@ -222,7 +263,7 @@ Otherwise (no architecture/test-flow configured, or configured but repos missing
 
 **Inputs:**
 
-```sh
+```text
 ARCH_REPO=$(jq -r '.validator.architecture_repo // empty' "$CONFIG_FILE")
 TEST_FLOW_REPO=$(jq -r '.validator.test_flow_repo // empty' "$CONFIG_FILE")
 ARCH_PATH=$(repo_path "$ARCH_REPO")
@@ -231,14 +272,14 @@ TEST_FLOW_PATH=$(repo_path "$TEST_FLOW_REPO")
 
 If `ARCH_PATH` and `TEST_FLOW_PATH` are both non-empty and exist on disk, proceed with the smart path:
 
-**Sub-step 3.5a — Map PR diff to capability via the architecture repo.**
+**Sub-step 3.5a — Map change diff to capability via the architecture repo.**
 
 The architecture repo (e.g. `$ARCH_REPO/`) holds living docs of how services connect:
 - `SYSTEM.md` — topology + repo roles
 - `CAPABILITIES.md` — capability-to-code map (e.g. "checkout: web `/checkout` → bff `/api/v1/shop` → connector `/booking`")
 - `AUTH.md`, `UNKNOWNS.md` — auxiliary
 
-Read these. For the PR's changed files, identify the **capability** that's affected. Multiple methods, in order of preference:
+Read these. For the change's changed files, identify the **capability** that's affected. Multiple methods, in order of preference:
 
 1. **Exact path match.** If CAPABILITIES.md mentions one of the changed file paths verbatim (e.g. `app/checkout/_lib/quote-types.ts`), the capability is the section header that file lives under.
 2. **Glob-section match.** If the changed file matches a glob in a capability section (e.g. `app/checkout/**` → "checkout"), use that capability.
@@ -250,13 +291,13 @@ Read these. For the PR's changed files, identify the **capability** that's affec
 The test-flow repo (e.g. `$TEST_FLOW_REPO/`) holds executable smoke flow definitions under `flows/<capability>/<NN>-<name>.md`. Each flow has YAML frontmatter (priority, surfaces, capability) plus surface-specific sections — `## Steps` + `## Validation` for `rest`/`mcp`/`mcp-apps`, OR a structured `web_steps:[]` + `cleanup_steps:[]` block in the frontmatter for `web` (see `$TEST_FLOW_PATH/docs/web-flow-format.md`).
 
 Glob `$TEST_FLOW_PATH/flows/<capability>/*.md`. Filter to flows that:
-- Have `priority: smoke` (skip regression/extended unless the PR is huge).
-- Have at least one surface tag matching the PR's bucket: PR bucket → required surface tag:
+- Have `priority: smoke` (skip regression/extended unless the change is huge).
+- Have at least one surface tag matching the change's bucket: change bucket → required surface tag:
   - `mcp` → `mcp`
   - `rest` → `rest`
   - `frontend-visual` → `web`
 
-Cap to top 3 matching flows by (a) most-specific to the capability (path overlap with PR diff), (b) shortest (faster to run).
+Cap to top 3 matching flows by (a) most-specific to the capability (path overlap with change diff), (b) shortest (faster to run).
 
 If no flows match the capability AND surface combination:
 - `mcp` / `rest` bucket → log `validator: no <surface> flows cover capability=<X>` and mark verdict `inconclusive` with reason "missing flow coverage — author a flow in $TEST_FLOW_REPO first". Do NOT fall back to a non-flow path for MCP/REST — those buckets are flow-only.
@@ -281,21 +322,21 @@ The `fallback_routes` is still computed (basic path) — if the smart path error
 
 **STEP 4. Set up the worktree.**
 
-```sh
+```text
 WORKTREE_DIR="$WORKTREE_ROOT/<repo>-<TICKET-id>"
 if [ ! -d "$WORKTREE_DIR" ]; then
   cd "$(repo_path <repo>)" && git fetch origin
-  git worktree add "$WORKTREE_DIR" <PR-headRefName>
+  git worktree add "$WORKTREE_DIR" <change-source_branch>
 else
   cd "$WORKTREE_DIR"
   git fetch origin --quiet
-  git checkout --quiet <PR-headRefName>
-  git pull --quiet --ff-only origin <PR-headRefName>
+  git checkout --quiet <change-source_branch>
+  git pull --quiet --ff-only origin <change-source_branch>
 fi
 cd "$WORKTREE_DIR"
 ```
 
-If the branch can't be fetched (e.g. PR closed mid-validation), mark skipped and exit.
+If the branch can't be fetched (e.g. change closed mid-validation), mark skipped and exit.
 
 **STEP 5. Install dependencies.**
 
@@ -311,9 +352,9 @@ If the branch can't be fetched (e.g. PR closed mid-validation), mark skipped and
 
 **Path-selection matrix (decide once at the start of STEP 6):**
 
-The PRIMARY routing principle: **STEP 3.5 smart-discovery picks flows from the test-flow library based on PR diff → capability → flows tagged for the matching surface.** The validator self-defines what to test from the library. Operator-configured `route_assertions` is the FALLBACK for routes the library doesn't yet cover, not the design center.
+The PRIMARY routing principle: **STEP 3.5 smart-discovery picks flows from the test-flow library based on change diff → capability → flows tagged for the matching surface.** The validator self-defines what to test from the library. Operator-configured `route_assertions` is the FALLBACK for routes the library doesn't yet cover, not the design center.
 
-| PR bucket (from STEP 3) | Primary path | Fallback path |
+| change bucket (from STEP 3) | Primary path | Fallback path |
 |---|---|---|
 | `mcp` | **SMART PATH (mcp dispatcher)** — discover `surfaces:[mcp]` flows for the capability, replay via JSON-RPC over HTTP to local MCP server (LOCAL-LAUNCH). | None — if no flow matches, verdict is `inconclusive` with reason "no mcp flows cover capability=X, file one in $TEST_FLOW_REPO". |
 | `rest` | **SMART PATH (rest dispatcher)** — discover `surfaces:[rest]` flows, replay via curl over HTTP to local BFF (LOCAL-LAUNCH). | None — same as mcp. |
@@ -332,7 +373,7 @@ For each flow in `test-plan.json`, dispatch based on surface:
 
 **Web surface** — shell out to the test-flow library's runner. First-time setup: ensure `$TEST_FLOW_PATH/node_modules/` exists; if not, run `(cd "$TEST_FLOW_PATH" && npm install)` once (the test-flow `package.json` pins `yaml` + `playwright`). Then:
 
-```sh
+```text
 # Build a PLAN JSON for one flow:
 PLAN=$(jq -n \
   --arg base "$WEB_LOCAL_BASE" \
@@ -370,7 +411,7 @@ Both buckets follow the same shape: precondition check → install deps → laun
 
 Run the bash literally. The echo output is the contract — if it's missing from the run log, the LLM skipped this step and any port/URL/path mentioned later in the run is suspect.
 
-```sh
+```text
 DEV_PORT_NOW=$(repo_dev_port <repo>)
 LOCAL_BASE_NOW=$(repo_local_base_url <repo>)
 LAUNCH_CMD_NOW=$(repo_launch_cmd <repo>)
@@ -404,7 +445,7 @@ echo "  wait_for_url  = $WAIT_URL_NOW"
 
 **Sub-step L3 — Launch (background).**
 
-```sh
+```text
 LAUNCH_LOG="$ARTIFACTS_ROOT/<repo>-<N>-<RUN_ID>/launch.log"
 mkdir -p "$(dirname "$LAUNCH_LOG")"
 LAUNCH_CMD=$(repo_launch_cmd <repo>)
@@ -415,7 +456,7 @@ echo "$LAUNCH_PID" > "$ARTIFACTS_ROOT/<repo>-<N>-<RUN_ID>/launch.pid"
 
 **Sub-step L4 — Wait for ready** (up to 120s for Go, 60s for TS):
 
-```sh
+```text
 WAIT_URL=$(repo_wait_for_ready_url <repo>)
 max=$([ "$(repo_lang <repo>)" = "go" ] && echo 120 || echo 60)
 for i in $(seq 1 $max); do
@@ -430,7 +471,7 @@ If still not ready: kill PID, `inconclusive` with reason `"server didn't reach $
 
 The flow files use `$EXAMPLE_DEV_BFF_BASE_URL` / `$EXAMPLE_DEV_MCP_BASE_URL`. Override them to the launched server BEFORE replaying steps:
 
-```sh
+```text
 LOCAL_BASE=$(repo_local_base_url <repo>)
 VTYPE=$(repo_validator_type <repo>)
 case "$VTYPE" in
@@ -443,7 +484,7 @@ For `mcp` the launched MCP server itself still talks to dev BFF for upstream cal
 
 **Sub-step L6 — Replay the smoke flow(s).**
 
-For each flow selected in STEP 3.5 (capped at 3 for time bounds), pick the surface(s) matching this PR's bucket:
+For each flow selected in STEP 3.5 (capped at 3 for time bounds), pick the surface(s) matching this change's bucket:
 - `rest` bucket → only `rest` surface steps from the flow file
 - `mcp` bucket → only `mcp` surface steps from the flow file (skip `rest` / `cli` / `mcp-apps`)
 
@@ -473,7 +514,7 @@ For each step in the flow's `## Steps` section:
 
 **Sub-step L8 — Cleanup (ALWAYS, even on failure).**
 
-```sh
+```text
 LAUNCH_PID=$(cat "$ARTIFACTS_ROOT/<repo>-<N>-<RUN_ID>/launch.pid" 2>/dev/null)
 [ -n "$LAUNCH_PID" ] && kill "$LAUNCH_PID" 2>/dev/null
 # belt-and-braces: kill any matching process this fire spawned
@@ -511,7 +552,7 @@ MATCH=$(repo_process_match_pattern <repo>)
 
 4. **Pick which routes to test + load their assertions (v2.1 — element-presence).**
 
-   From the PR diff (changed file paths) + the `route_map`, derive a list of routes:
+   From the change diff (changed file paths) + the `route_map`, derive a list of routes:
    - Each changed file matched by a `route_map` glob → add the mapped routes
    - Each `app/**/page.tsx` (or `pages/**/*.tsx`) directly changed → infer the route
    - De-dup. If the list is empty, default to `/` (smoke test the homepage at least).
@@ -614,7 +655,7 @@ MATCH=$(repo_process_match_pattern <repo>)
 
    Important: assertion failure on a SINGLE viewport (e.g. text visible on desktop, missing on mobile) IS a `failed` verdict. If the operator wants viewport-specific assertions (e.g. mobile hamburger vs desktop nav), they can encode it via `selector=` to a viewport-specific element AND set `repos[].validator.viewports` to scope this route's matrix. v2.1 intentionally keeps the assertion grammar viewport-agnostic — push viewport-conditional logic into the selector itself.
 
-   **Artifact bookkeeping:** every (route, viewport) writes `screenshot-<route>__<viewport>.png`. The `playwright-result.json` summarizes every cell with status + assertion outcomes + pageerror count, suitable for direct inclusion in the GitHub PR comment.
+   **Artifact bookkeeping:** every (route, viewport) writes `screenshot-<route>__<viewport>.png`. The `playwright-result.json` summarizes every cell with status + assertion outcomes + pageerror count, suitable for direct inclusion in the configured forge change comment.
 
 ### Type: `docs`
 
@@ -624,7 +665,7 @@ MATCH=$(repo_process_match_pattern <repo>)
    - If repo has only README + scattered `.md` → skip the build, just lint links
 
 2. **Check changed docs:**
-   - For each changed `.md`/`.mdx` file in the PR diff:
+   - For each changed `.md`/`.mdx` file in the change diff:
      - Parse markdown links: `[text](path)` and verify each non-external link resolves (the target file exists, or the URL is reachable)
      - Parse code fences with language tags. For TS/JS code blocks that look like importable examples, just check they parse (syntax-only, no execution).
 
@@ -646,7 +687,7 @@ Write `summary.md`:
 ```markdown
 ## Validator verdict: <PASSED ✓ | FAILED ✗ | INCONCLUSIVE ⏸>
 
-**PR:** <repo>#<N> @ <short-sha>
+**change:** <repo>#<N> @ <short-sha>
 **Test type:** <frontend-visual | docs>
 **Duration:** <N> seconds
 
@@ -661,13 +702,16 @@ Write `summary.md`:
 <list of errors, max 5, with file:line if from pageerror stack>
 ```
 
-**STEP 8. Post the verdict to GitHub + Linear.**
+**STEP 8. Post the verdict to configured forge + configured tracker.**
 
-1. **GitHub PR comment.** Use `gh pr comment <N> --repo <repo> --body-file $ARTIFACTS/summary.md`. Note: screenshots can't be inlined directly via gh CLI in a comment — workaround: upload screenshots to a GitHub Gist (`gh gist create <screenshot.png> --public=false`) then reference the gist URLs in the comment. Or skip inline screenshots and point at the local artifacts dir (the operator runs locally, so they can `open <path>`). For v1, just include the artifact-dir path in the comment — you can open it.
+1. **Forge change comment.** Use the abstract `COMMENT_ON_CHANGE` capability with the
+   validated change and `$ARTIFACTS/summary.md`. If the selected provider reference
+   exposes private artifact publishing, use `PUBLISH_ARTIFACT` and link its returned
+   artifact URLs. Otherwise include only the local artifact directory path.
 
-2. **Linear comment.** Find the ticket via `gh pr view <N> --json body` and parsing `Closes <TICKET-id>` from the body, OR re-derive from PR title prefix. Then:
+2. **configured tracker comment.** Find the ticket via `INSPECT_CHANGE <N> --json body` and parsing `Closes <TICKET-id>` from the body, OR re-derive from change title prefix. Then:
    ```
-   configured tracker save_comment operation(issueId="<TICKET-id>", body="<contents of summary.md>")
+   COMMENT_ON_TRACKER_ITEM(issueId="<TICKET-id>", body="<contents of summary.md>")
    ```
 
 **STEP 9. Update state.**
@@ -675,7 +719,7 @@ Write `summary.md`:
 ```json
 state.prs["<repo>#<N>"] = {
   "last_validated_at": "<now>",
-  "last_validated_sha": "<headRefOid>",
+  "last_validated_sha": "<head_sha>",
   "verdict": "<passed|failed|inconclusive>",
   "test_type": "<frontend-visual|docs|skipped>",
   "evidence_dir": "<ARTIFACTS_DIR>",
@@ -695,7 +739,7 @@ Trim `history` to last 100 entries. Write atomically.
 ═══ FAILURE MODES ═══
 
 - configured tracker down → exit silently, retry next fire.
-- `gh` unauth'd → exit with one-line.
+- `configured forge` unauth'd → exit with one-line.
 - Playwright install fails → verdict = `inconclusive`, post and exit. (Next fire retries.)
 - Port collision (port already in use) → kill existing process if it's a known dev-server pattern, else verdict = `inconclusive` with reason.
 - Dev server fails to start → verdict = `inconclusive`, attach tail of dev.log to comment.
@@ -705,7 +749,7 @@ Trim `history` to last 100 entries. Write atomically.
 
 The implementer's "Pending your `go`" filter (in `implementer-run.md` STEP-A digest) should now check BOTH:
 1. Reviewer signed off (existing check)
-2. Validator passed — read `$STATE_DIR/validator-state.json` for the matching PR; include in "Pending your `go`" only if `verdict == "passed"` AND `last_validated_sha == current PR head SHA`.
+2. Validator passed — read `$STATE_DIR/validator-state.json` for the matching change; include in "Pending your `go`" only if `verdict == "passed"` AND `last_validated_sha == current change head SHA`.
 
 Three buckets in the digest now:
 - **Awaiting validation** — reviewer signed off, validator hasn't run yet OR validator's SHA is stale

@@ -16,7 +16,7 @@ validation fails, return the structured no-op from `references/CODEX-RUNTIME.md`
 
 
 You are the manager agent. This is one pass. You convert a curated **findings source** (an
-audit, a vuln report, a backlog dump) into a paced stream of well-formed Linear tickets the rest
+audit, a vuln report, a backlog dump) into a paced stream of well-formed configured tracker tickets the rest
 of the loop acts on. You **file and prioritize tickets only** — you never write code, never deploy.
 Your whole value is: the right finding, well-described, at the right pace, routed to the right place.
 
@@ -24,18 +24,18 @@ Your whole value is: the right finding, well-described, at the right pace, route
 
 After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
-```sh
+```text
 
-LINEAR_TEAM=$(jq -r '.linear.team_name // "Example"' "$CONFIG_FILE")
-AGENT_BACKLOG_PROJECT_ID=$(jq -r '.linear.agent_backlog_project.id // empty' "$CONFIG_FILE")
-ASSIGNEE_EMAIL=$(jq -r '.linear.assignee_email // empty' "$CONFIG_FILE")
-AGENT_LABEL=$(jq -r '.linear.labels.agent // "agent"' "$CONFIG_FILE")
-INVESTIGATE_LABEL=$(jq -r '.linear.labels.investigate // "investigate"' "$CONFIG_FILE")
-QUICK_WIN_LABEL=$(jq -r '.linear.labels.quick_win // "quick-win"' "$CONFIG_FILE")
-STATE_TODO=$(jq -r '.linear.states.todo // "agent-todo"' "$CONFIG_FILE")
+TRACKER_TEAM="<resolved from configured tracker reference>"
+AGENT_BACKLOG_PROJECT_ID="<resolved from configured tracker reference>"
+ASSIGNEE_EMAIL="<resolved from configured tracker reference>"
+AGENT_LABEL="<resolved from configured tracker reference>"
+INVESTIGATE_LABEL="<resolved from configured tracker reference>"
+QUICK_WIN_LABEL="<resolved from configured tracker reference>"
+STATE_TODO="<resolved from configured tracker reference>"
 SLACK_WEBHOOK_URL=$(jq -r '.slack.manager_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
 
-# manager config — PER-SOURCE BUCKETS. Each source gets its own Linear label = its own bucket,
+# manager config — PER-SOURCE BUCKETS. Each source gets its own configured tracker label = its own bucket,
 # paced to its own depth, so e.g. a 130-item audit backlog can't starve a live qa regression.
 DEFAULT_DEPTH=$(jq -r '.manager.target_queue_depth // 5' "$CONFIG_FILE")     # fallback per-source agent depth
 DEFAULT_WIP=$(jq -r '.manager.investigate_wip // 3' "$CONFIG_FILE")         # fallback per-source investigate WIP
@@ -57,20 +57,51 @@ If `.manager.sources` is empty, exit cleanly: `manager-run: no findings sources 
 
 **Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-- Self-contained, deterministic, fresh each fire. State lives in Linear + the state file + the source file. Re-read every fire.
+
+### Provider dispatch — fail closed
+
+Read `providers.forge` and `providers.tracker` from the validated configuration before
+performing provider work. The role logic uses only these generic operations:
+
+- **list eligible work**
+- **claim work**
+- **create change**
+- **review change**
+- **merge change**
+- **close lifecycle**
+
+Provider-specific command syntax belongs only in the selected provider reference. Uppercase operation names in later examples are abstract capabilities, not shell commands; resolve each through that reference.
+
+- When `providers.forge` is `github`, read
+  `references/providers/github-linear.md` and use configured forge **pull-request** terminology.
+- When `providers.forge` is `gitlab`, read
+  `references/providers/gitlab.md` and use GitLab **merge-request** terminology.
+- When `providers.tracker` is `linear`, validate the configured Linear team before tracker
+  operations.
+- When `providers.tracker` is `github` or `gitlab`, use the matching provider reference and issue terminology.
+- When `providers.tracker` is `none`, skip tracker work; if this role requires tracker work,
+  return the structured no-op and stop.
+
+**Never fall back to another provider, workspace, owner, project, repository, or environment.**
+Validate the configured provider/host/owner-or-group/repository binding before every provider
+operation. If it cannot be validated or lacks the required generic operation, return the
+structured no-op and stop.
+
+
+- Self-contained, deterministic, fresh each fire. State lives in configured tracker + the state file + the source file. Re-read every fire.
 - DO NOT pause for confirmation. Auto mode is implied.
 - **ALWAYS read `$CONFIG_DIR/lessons.md`** (rules under a "Manager" section apply).
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** if present.
 - On a hard failure, log ONE line, exit. Next fire retries.
 
 ═══ HARD RULES (NEVER violate) ═══
-1. **File tickets ONLY.** Never write code, never open a PR, never deploy. You groom the backlog;
+1. **File tickets ONLY.** Never write code, never open a change, never deploy. You groom the backlog;
    the implementer/investigator act on it.
 2. **PACE — never flood.** Maintain a target queue depth per stream (see STEP 3). If a stream is
    already at/over depth, file NOTHING into it this fire. The whole point is a steady drip the
    implementer + you can actually keep up with — not 130 tickets dumped at once.
-3. **DEDUP HARD against existing Linear AND state.** Before filing, (a) check the state file by
-   finding-key, and (b) search Linear for an open ticket already covering this finding (title
+3. **DEDUP HARD against existing configured tracker AND state.** Before filing, (a) check the state file by
+   finding-key, and (b) search configured tracker for an open ticket already covering this finding (title
    keywords + the repo's `svc: <name>` label + file path). A match → record the finding as ticketed (link the
    existing ticket), file nothing. Many audit P0s ALREADY have tickets (e.g. cart IDOR = EX-995).
    Re-filing them is a HARD-RULE violation.
@@ -156,7 +187,7 @@ the same slots, and a live qa regression never waits behind the audit backlog. F
 this source's agent open      = list_issues(team, label=<src_label>, state=$STATE_TODO) | filter carries $AGENT_LABEL      | length
 this source's investigate open = list_issues(team, label=<src_label>, not Done/Canceled) | filter carries $INVESTIGATE_LABEL | length
 ```
-(Linear filters one label per call — query by `<src_label>`, then client-side split by `$AGENT_LABEL`
+(configured tracker filters one label per call — query by `<src_label>`, then client-side split by `$AGENT_LABEL`
 vs `$INVESTIGATE_LABEL` and state.)
 
 - this source's `agent` slots      = `max(0, src_depth - source_agent_open)`.
@@ -175,7 +206,7 @@ For each finding to file (take the top `slots` from each stream's sorted list):
    history `deduped`, do NOT file, and this does NOT consume a slot (try the next finding).
 2. **File:**
    - title: prefix with the source — `[<source-name>] <repo>: <title…>` (audit) / `[qa] <flow_id>×<surface>: <reason…>` (qa) / `[research] <repo>: <title…>` (research), trimmed to ~80 chars
-   - team `$LINEAR_TEAM`; project `$AGENT_BACKLOG_PROJECT_ID` if set; assignee `$ASSIGNEE_EMAIL`; priority per STEP 2.
+   - team `$TRACKER_TEAM`; project `$AGENT_BACKLOG_PROJECT_ID` if set; assignee `$ASSIGNEE_EMAIL`; priority per STEP 2.
    - labels: **always the source's bucket label** (`<src_label>`) + the route label. agent-route → `[$AGENT_LABEL, <src_label>]` + `svc: <name>` if it exists (+ `$QUICK_WIN_LABEL` if the finding is small/contained — audit uses its severity, qa/research carry a `quick_win` boolean); investigate-route → `[$INVESTIGATE_LABEL, <src_label>]` + `svc: <name>` if it exists. The source label is what STEP 3 counts for that bucket's pacing — it MUST be on every ticket.
    - body:
      ```
@@ -185,7 +216,7 @@ For each finding to file (take the top `slots` from each stream's sorted list):
      <research-v1:> Cell: `<repo>:<mode>` · Category: <category> · **What:** <what> · **Where:** <where[]> · **Why:** <why> · **Suggested fix:** <suggested_fix> · **Acceptance:** <acceptance[]>
 
      <if investigate-route:> Routed to investigate-first (risky: <severity>/<category>). $pitcrew:investigate-run will analyze read-only; $pitcrew:unblock surfaces options to you before any code change.
-     <if agent-route:> Contained finding — implementer may pick up and open a fix PR (human-go gate before merge).
+     <if agent-route:> Contained finding — implementer may pick up and open a fix change (human-go gate before merge).
      ```
      **Redact** any token/secret in a quoted snippet.
    - Record `state.filed[key] = {ticket, route, severity, filed_at}`, history `filed`.
@@ -211,7 +242,7 @@ Scheduling belongs to the Codex scheduled task or external caller; this skill ne
 
 ═══ FAILURE MODES ═══
 - Source file missing/unreadable → log one line, skip that source. If all sources fail, exit.
-- Linear unreachable → degraded exit (PRIME DIRECTIVE).
+- configured tracker unreachable → degraded exit (PRIME DIRECTIVE).
 - A finding with no `repo` match in `repos[]` → skip (out of scope), note in history.
 - State corrupt → back up + reinit.
 - Uncertain dedup (might be a duplicate, might not) → prefer NOT filing and flag it in the digest

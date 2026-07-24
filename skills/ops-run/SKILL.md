@@ -27,14 +27,14 @@ After the canonical project load, extract only the role-specific values used bel
 3. Required: `repos[]` with at least one repo carrying a `health` block. If none has one,
    exit cleanly: `ops-run: no repos with a health block configured — nothing to watch.`
 
-```sh
+```text
 
 SLACK_WEBHOOK_URL=$(jq -r '.slack.ops_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
 SLACK_USER_MENTION=$(jq -r '.slack.user_mention // empty' "$CONFIG_FILE")
-LINEAR_TEAM=$(jq -r '.linear.team_name // "Example"' "$CONFIG_FILE")
-AGENT_BACKLOG_PROJECT_ID=$(jq -r '.linear.agent_backlog_project.id // empty' "$CONFIG_FILE")
-ASSIGNEE_EMAIL=$(jq -r '.linear.assignee_email // empty' "$CONFIG_FILE")
-AGENT_LABEL=$(jq -r '.linear.labels.agent // "agent"' "$CONFIG_FILE")
+TRACKER_TEAM="<resolved from configured tracker reference>"
+AGENT_BACKLOG_PROJECT_ID="<resolved from configured tracker reference>"
+ASSIGNEE_EMAIL="<resolved from configured tracker reference>"
+AGENT_LABEL="<resolved from configured tracker reference>"
 
 # Repos with a health block, and their endpoints:
 #   .repos[].health.dev_url / .prod_url            — GET, expect 2xx
@@ -51,9 +51,40 @@ health_routes() { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .health.cri
 
 **Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
+
+### Provider dispatch — fail closed
+
+Read `providers.forge` and `providers.tracker` from the validated configuration before
+performing provider work. The role logic uses only these generic operations:
+
+- **list eligible work**
+- **claim work**
+- **create change**
+- **review change**
+- **merge change**
+- **close lifecycle**
+
+Provider-specific command syntax belongs only in the selected provider reference. Uppercase operation names in later examples are abstract capabilities, not shell commands; resolve each through that reference.
+
+- When `providers.forge` is `github`, read
+  `references/providers/github-linear.md` and use configured forge **pull-request** terminology.
+- When `providers.forge` is `gitlab`, read
+  `references/providers/gitlab.md` and use GitLab **merge-request** terminology.
+- When `providers.tracker` is `linear`, validate the configured Linear team before tracker
+  operations.
+- When `providers.tracker` is `github` or `gitlab`, use the matching provider reference and issue terminology.
+- When `providers.tracker` is `none`, skip tracker work; if this role requires tracker work,
+  return the structured no-op and stop.
+
+**Never fall back to another provider, workspace, owner, project, repository, or environment.**
+Validate the configured provider/host/owner-or-group/repository binding before every provider
+operation. If it cannot be validated or lacks the required generic operation, return the
+structured no-op and stop.
+
+
 - This file is the complete instruction set. Self-contained, deterministic, fresh each fire.
 - DO NOT pause for confirmation. Auto mode is implied.
-- DO NOT trust conversation memory for state — health history lives in the state file + Linear. Re-read every fire.
+- DO NOT trust conversation memory for state — health history lives in the state file + configured tracker. Re-read every fire.
 - **ALWAYS read `$CONFIG_DIR/lessons.md`** at the top (rules under an "Ops" section apply).
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** if it exists (skill-family overview).
 - On a genuine hard failure, log ONE line and exit cleanly. Next fire retries.
@@ -132,11 +163,11 @@ Print one line per endpoint: `[ops] <repo>:<env> <healthy|DEGRADED(n/n fails)> <
 
 **STEP 3. File a confirmed incident (dedup first).**
 
-1. **Dedup:** `configured tracker list_issues operation(team=$LINEAR_TEAM, query="[incident] <repo> <env>")`,
+1. **Dedup:** `LIST_ELIGIBLE_WORK(team=$TRACKER_TEAM, query="[incident] <repo> <env>")`,
    exclude Done/Canceled. Open match → comment, don't refile; backfill `open_incident`.
 2. **Create** (no open match):
    - title: `[incident] <repo> <env> degraded — <one-line symptom>` (e.g. `health 503` / `timeout` / `/api/v1/shop/sync 500`)
-   - team `$LINEAR_TEAM`; project `$AGENT_BACKLOG_PROJECT_ID` if set; assignee `$ASSIGNEE_EMAIL`.
+   - team `$TRACKER_TEAM`; project `$AGENT_BACKLOG_PROJECT_ID` if set; assignee `$ASSIGNEE_EMAIL`.
    - labels: `[$AGENT_LABEL, Bug, incident, svc:<repo>]` (+ capability label if obvious). The
      `$AGENT_LABEL` is REQUIRED so the implementer can pick up the fix.
    - priority: **1 (Urgent)** if env=prod, else **3 (Medium)**.
@@ -148,7 +179,7 @@ Print one line per endpoint: `[ops] <repo>:<env> <healthy|DEGRADED(n/n fails)> <
    ```
    :rotating_light: *Prod incident* — `<repo>:<env>` degraded
    > <one-line symptom> (<http>, <ms>, <n>/<n> fails)
-   *Linear:* <url> (<TICKET-id>)
+   *configured tracker:* <url> (<TICKET-id>)
    <@mention if env=prod>
    ```
 
@@ -165,7 +196,7 @@ Scheduling belongs to the Codex scheduled task or external caller; this skill ne
 ═══ FAILURE MODES ═══
 - `curl` unavailable / DNS broken on the runner → RUNNER problem, not a prod outage. Log one
   line, do NOT file (you can't distinguish "prod down" from "my network down"). Exit; retry.
-- Linear unreachable → poll + Slack only, defer ticket filing (PRIME DIRECTIVE degraded mode).
+- configured tracker unreachable → poll + Slack only, defer ticket filing (PRIME DIRECTIVE degraded mode).
 - State file corrupt → back up + reinit.
 - Configured host doesn't resolve (NXDOMAIN) on the FIRST ever probe → likely a config typo,
   not an outage; log `ops-run: <repo>:<env> NXDOMAIN — check health.*_url config` and skip.

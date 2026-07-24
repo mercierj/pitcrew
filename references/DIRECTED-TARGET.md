@@ -1,56 +1,46 @@
-# Directed Target — optional on-demand argument for loop skills
+# Directed targets
 
-Every loop skill normally **auto-discovers** its work (queries Linear / scans repos / lists
-PRs). A skill may ALSO be pointed at one specific target on demand:
+Acting skills normally discover one eligible item from the configured providers. A
+caller may instead name one target. Directed mode changes only item selection: all
+identity, scope, approval, review, validation, and release gates still apply.
 
+## Accepted forms
+
+```text
+GitHub PR: https://github.com/<owner>/<repo>/pull/<number>
+GitLab MR: https://<host>/<group>/<project>/-/merge_requests/<number>
+Linear issue: https://linear.app/<workspace>/issue/<id>
+GitLab issue: https://<host>/<group>/<project>/-/issues/<number>
+Short change: <configured-repo>!<number>
+Short issue: <configured-repo>#<number>
 ```
-/validator-run https://linear.app/example/issue/EX-1303
-/reviewer-run  https://github.com/your-org/example-backend/pull/997
-/implementer-run EX-1303
-/investigate-run https://linear.app/example/issue/EX-1290
-```
 
-When a target is given, the skill does its job on THAT target this fire and exits — skipping
-its normal auto-discovery/queue. This is the interactive complement to the autonomous loop.
+A bare Linear identifier is accepted only when its prefix matches the configured
+tracker binding. The project is resolved by `references/CODEX-RUNTIME.md`; target
+parsing must never read a separate default project.
 
-## Parsing (do this at run start, before project resolution)
+## Validation
 
-Scan ALL invocation args. An arg is a **TARGET** if it matches any of:
-- Linear issue URL — `linear.app/<workspace>/issue/<ID>` (optionally `/<slug>`) → `TICKET=<ID>` (e.g. `EX-1303`).
-- Bare ticket id — `<PREFIX>-<n>` matching the configured `linear.ticket_prefix` (e.g. `EX-1303`).
-- GitHub PR URL — `github.com/<org>/<repo>/pull/<n>` → `REPO=<repo>`, `PR=<n>`.
-- Bare PR ref — `<repo>#<n>` where `<repo>` is in `repos[]`.
+Before any lookup or mutation:
 
-The PROJECT is the first non-target arg; if none, fall back to `~/.claude/agent-loop/default.txt`.
-So `/<skill> <url>` works with no explicit project. A target + a project (`/<skill> example <url>`)
-both resolve correctly.
+1. Read `providers.forge` and `providers.tracker`.
+2. Validate the configured provider and authenticated identity.
+3. Validate the URL host against the configured provider host.
+4. Validate the owner or group and the repository/project against `repos[]`.
+5. For tracker items, validate the configured workspace/team/project.
+6. Resolve a short reference only inside the configured repository named by it.
 
-## Scope guard (always)
+Any mismatch returns a structured no-op. Never fall back to a different provider,
+host, workspace, owner, group, project, or repository.
 
-Resolve the target and confirm it's IN scope before acting:
-- A `TICKET` must belong to the configured Linear team. A `REPO`/`PR` must be a repo in `repos[]`.
-- Out of scope → log one line (`<skill>: directed target <x> out of scope, skipping`) and exit. Never act on something outside the configured project.
+## Role behavior
 
-## Directed mode vs auto mode
+- `implementer-run` implements the selected eligible issue.
+- `reviewer-run` reviews the selected change.
+- `validator-run` validates the selected change.
+- `investigate-run` investigates the selected issue read-only.
+- `unblock` resumes or triages the selected blocked issue.
+- `releaser-run` still requires explicit release arming and every applicable
+  approval gate.
 
-- **Auto mode (no target):** unchanged — the skill's normal queue/scan behavior.
-- **Directed mode (target given):** operate ONLY on that target, then exit. Directed mode MAY act
-  on a target that auto mode would skip (wrong state, not yet labeled, lower in the sort) — the
-  operator naming it IS the eligibility. But every **safety** HARD RULE still holds (scope checks,
-  CI-green-before-merge, dev-before-prod, never-write-wrong-workspace, etc.). The operator can
-  reprioritize WHAT you act on; they don't waive the gates on HOW.
-
-## Per-skill meaning of a directed target
-
-| Skill | Target types | Directed action |
-|---|---|---|
-| `implementer-run` | Linear ID | Force-pick that ticket regardless of queue sort/state; run the normal scope-check (STEP C) + worktree implement (STEP D) + closeout. Then exit. |
-| `reviewer-run` | PR ref OR Linear ID | Review that PR (from a PR ref directly; from a Linear ID, resolve its linked open PR). Run the two-stage review. Then exit. |
-| `validator-run` | Linear ID OR PR ref | Validate that PR (resolve from the ticket's linked PR, or the PR ref). Run the normal validation buckets. Then exit. |
-| `investigate-run` | Linear ID | Investigate that ticket regardless of its label/state; post findings + candidate fixes. Then exit. |
-| `unblock` | Linear ID | Triage/unblock that specific ticket instead of searching the blocked queue. Then exit. |
-| `releaser-run` | uses its own `--release <repo>[@<ref>]` directive (predates this doc) | see releaser-run STEP A0. |
-
-**Not applicable** (auto-only — a single ticket/PR target doesn't fit their job): `ops-run`
-(watches health endpoints), `qa-run` (runs the smoke-flow suite), `research-run` (scans repo
-cells), `stale-sweep` (sweeps the whole board). These ignore a directed target.
+Operate on exactly one validated target, then stop.

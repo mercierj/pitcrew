@@ -69,6 +69,107 @@ class ReferenceContractTest(unittest.TestCase):
             "references/providers/gitlab.md", "glab auth status", "merge request"
         )
 
+    def test_acting_skills_route_providers_without_fallback(self):
+        skill_names = (
+            "manager-run",
+            "implementer-run",
+            "reviewer-run",
+            "validator-run",
+            "unblock",
+            "investigate-run",
+            "stale-sweep",
+            "ops-run",
+            "releaser-run",
+        )
+        for name in skill_names:
+            relative_path = f"skills/{name}/SKILL.md"
+            self.assert_markers(
+                relative_path,
+                "providers.forge",
+                "providers.tracker",
+                "references/providers/github-linear.md",
+                "pull-request",
+                "references/providers/gitlab.md",
+                "merge-request",
+                "configured Linear team",
+                "`providers.tracker` is `github` or `gitlab`",
+                "`providers.tracker` is `none`",
+                "structured no-op",
+                "list eligible work",
+                "claim work",
+                "create change",
+                "review change",
+                "merge change",
+                "close lifecycle",
+                "abstract capabilities, not shell commands",
+                "Never fall back",
+                "provider, workspace, owner, project, repository, or environment",
+            )
+            text = (ROOT / relative_path).read_text(encoding="utf-8")
+            for forbidden in (
+                "gh pr",
+                "glab mr",
+                "configured forge operation",
+                "CLAUDE.md",
+                "the `Skill` tool",
+                "github-actions[bot]",
+                "GitHub Gist",
+                "headRefName",
+                "baseRefName",
+                "headRefOid",
+                "author.login",
+            ):
+                with self.subTest(skill=name, forbidden=forbidden):
+                    self.assertNotIn(forbidden, text)
+            self.assertNotRegex(
+                text,
+                r"configured (?:forge|tracker) [a-z_]+ operation",
+                name,
+            )
+            self.assertNotRegex(text, r"\bPRs?\b", name)
+
+        self.assert_markers(
+            "skills/releaser-run/SKILL.md",
+            "release.autonomy is `off`",
+            "prod or preprod",
+            "explicit approval",
+            "Do not chain remote",
+            "Migrations",
+            "database writes",
+            "mutating console commands",
+            "rollback execution",
+        )
+
+    def test_getbill_acting_preflight_and_directed_targets(self):
+        for name in ("implementer-run", "validator-run", "stale-sweep", "releaser-run"):
+            self.assert_markers(
+                f"skills/{name}/SKILL.md",
+                "Re-read the repository `AGENTS.md`",
+                "Preserve all unrelated working-tree changes",
+                "Never create a worktree only because the checkout is dirty",
+                "Read the required domain reference",
+                "rebuild Graphify",
+                "Stage only files changed by this crew item",
+            )
+
+        implementer = (ROOT / "skills/implementer-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("git checkout -- .", implementer)
+
+        self.assert_markers(
+            "references/DIRECTED-TARGET.md",
+            "github.com/<owner>/<repo>/pull/<number>",
+            "/-/merge_requests/<number>",
+            "linear.app/<workspace>/issue/<id>",
+            "/-/issues/<number>",
+            "<configured-repo>!<number>",
+            "<configured-repo>#<number>",
+            "Validate the URL host",
+            "owner or group",
+            "Never fall back",
+        )
+
     def test_getbill_profile_contract(self):
         self.assert_markers(
             "references/profiles/getbill.md",
