@@ -91,6 +91,11 @@ def create_server(
             ).encode("utf-8")
             self._send(status, payload, "application/json; charset=utf-8")
 
+        def _send_empty(self, status: int) -> None:
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def _request_allowed(self) -> bool:
             expected_host = f"127.0.0.1:{self.server.server_port}"
             if self.headers.get("Host") != expected_host:
@@ -103,6 +108,9 @@ def create_server(
                 self._send_json(403, {"error": "request rejected"})
                 return
             parsed = urlsplit(self.path)
+            if parsed.path == "/favicon.ico":
+                self._send_empty(204)
+                return
             if parsed.path == "/api/status":
                 self._service_json(service.snapshot)
                 return

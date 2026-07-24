@@ -823,6 +823,20 @@ class DashboardHttpTest(unittest.TestCase):
         )
         self.assertNotIn(self.token.encode(), payload)
 
+    def test_favicon_probe_returns_empty_no_content(self):
+        status, headers, payload = self.request("GET", "/favicon.ico")
+
+        self.assertEqual(204, status)
+        self.assertEqual(b"", payload)
+        self.assertEqual("0", headers["content-length"])
+        self.assertNotIn(self.token.encode(), payload)
+        self.assert_security_headers(headers)
+        self.assertEqual([], self.service.calls)
+
+        missing_status, missing_headers, _ = self.request("GET", "/favicon.png")
+        self.assertEqual(404, missing_status)
+        self.assert_security_headers(missing_headers)
+
     def test_fixed_assets_replace_only_index_token_and_reject_other_paths(self):
         status, headers, index = self.request("GET", "/")
         self.assertEqual(200, status)
