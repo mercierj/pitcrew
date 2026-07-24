@@ -1,9 +1,11 @@
 import http.client
 import importlib.util
 import json
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from importlib.machinery import SourceFileLoader
@@ -767,9 +769,10 @@ class DashboardHttpTest(unittest.TestCase):
         self.thread.start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=2)
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=2)
         self.assets_patch.stop()
         self.temp.cleanup()
 
@@ -854,6 +857,24 @@ class DashboardHttpTest(unittest.TestCase):
                 self.assertEqual(404, status)
                 self.assertNotIn(self.token.encode(), payload)
                 self.assert_security_headers(headers)
+
+    def test_fixed_asset_symlink_cannot_escape_asset_root(self):
+        with tempfile.TemporaryDirectory() as outside_temp:
+            outside = Path(outside_temp) / "outside.js"
+            outside.write_text("window.stolen = true;", encoding="utf-8")
+            app = self.asset_root / "assets/app.js"
+            app.unlink()
+            try:
+                app.symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            status, headers, payload = self.request("GET", "/assets/app.js")
+
+        self.assertIn(status, {403, 404})
+        self.assertNotIn(b"window.stolen", payload)
+        self.assertNotIn(self.token.encode(), payload)
+        self.assert_security_headers(headers)
 
     def test_post_action_requires_session_and_accepts_valid_request(self):
         body = json.dumps(
@@ -960,6 +981,47 @@ class DashboardHttpTest(unittest.TestCase):
                 self.assertEqual(expected, status)
                 self.assert_security_headers(response_headers)
         self.assertEqual([], self.service.calls)
+
+    def test_partial_action_body_times_out_safely_and_shutdown_is_prompt(self):
+        request = (
+            "POST /api/actions HTTP/1.1\r\n"
+            f"Host: {self.host}\r\n"
+            f"Origin: http://{self.host}\r\n"
+            "Content-Type: application/json\r\n"
+            f"X-Pitcrew-Session: {self.token}\r\n"
+            "Content-Length: 100\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "{}"
+        ).encode()
+        with (
+            mock.patch.object(SERVER, "READ_TIMEOUT_SECONDS", 0.1),
+            socket.create_connection(("127.0.0.1", self.port), timeout=1) as client,
+        ):
+            client.settimeout(1)
+            client.sendall(request)
+            response = b""
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+
+        self.assertIn(b"HTTP/1.0 408", response)
+        self.assertIn(b"Content-Security-Policy: default-src 'self'", response)
+        self.assertIn(b"X-Content-Type-Options: nosniff", response)
+        self.assertIn(b"Cache-Control: no-store", response)
+        self.assertNotIn(self.token.encode(), response)
+        self.assertEqual([], self.service.calls)
+
+        started = time.monotonic()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        elapsed = time.monotonic() - started
+        self.assertFalse(self.thread.is_alive())
+        self.assertLess(elapsed, 1)
+        self.server = None
 
     def test_dashboard_error_is_safe_and_does_not_expose_session(self):
         status, headers, payload = self.request(

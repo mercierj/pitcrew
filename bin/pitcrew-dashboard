@@ -7,6 +7,7 @@ import argparse
 import json
 import secrets
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -26,11 +27,17 @@ from scripts.pitcrew_dashboard import DashboardError, DashboardService
 
 ASSET_ROOT = ROOT / "dashboard"
 MAX_BODY_BYTES = 8192
+READ_TIMEOUT_SECONDS = 5.0
 ASSET_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.js": ("assets/app.js", "text/javascript; charset=utf-8"),
     "/assets/styles.css": ("assets/styles.css", "text/css; charset=utf-8"),
 }
+
+
+class DashboardHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
 
 
 def create_server(
@@ -124,7 +131,12 @@ def create_server(
 
         def _serve_asset(self, relative_path: str, content_type: str) -> None:
             try:
-                payload = (ASSET_ROOT / relative_path).read_bytes()
+                asset_root = ASSET_ROOT.resolve(strict=True)
+                asset_path = (ASSET_ROOT / relative_path).resolve(strict=True)
+                if asset_path != asset_root and asset_root not in asset_path.parents:
+                    self._send_json(403, {"error": "request rejected"})
+                    return
+                payload = asset_path.read_bytes()
                 if relative_path == "index.html":
                     marker = b"__PITCREW_SESSION_TOKEN__"
                     if payload.count(marker) != 1:
@@ -166,7 +178,12 @@ def create_server(
             if length < 0:
                 self._send_json(400, {"error": "invalid request"})
                 return
-            body = self.rfile.read(length)
+            self.connection.settimeout(READ_TIMEOUT_SECONDS)
+            try:
+                body = self.rfile.read(length)
+            except (socket.timeout, TimeoutError):
+                self._send_json(408, {"error": "request timeout"})
+                return
             try:
                 request = json.loads(body)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -192,7 +209,7 @@ def create_server(
                 return
             self._send_json(202, result)
 
-    return ThreadingHTTPServer((host, port), DashboardHandler)
+    return DashboardHTTPServer((host, port), DashboardHandler)
 
 
 def parser() -> argparse.ArgumentParser:
