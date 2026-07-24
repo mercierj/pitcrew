@@ -173,6 +173,94 @@ class CliTest(unittest.TestCase):
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertFalse(marker.exists())
 
+    def test_installer_dry_run_targets_personal_marketplace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {
+                **os.environ,
+                "HOME": temp,
+                "CODEX_HOME": str(Path(temp) / ".codex"),
+            }
+            result = self.run_cli(
+                "bin/install-codex.sh",
+                "getbill",
+                "--profile",
+                "getbill",
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(".agents/plugins/marketplace.json", result.stdout)
+            self.assertIn("plugins/pitcrew", result.stdout)
+            self.assertNotIn(".codex/prompts", result.stdout)
+            self.assertNotIn(".claude", result.stdout)
+
+            default_project = self.run_cli(
+                "bin/install-codex.sh",
+                "--dry-run",
+                "--profile",
+                "getbill",
+                env=env,
+            )
+            self.assertEqual(0, default_project.returncode, default_project.stderr)
+            self.assertIn("/pitcrew/example/config.json", default_project.stdout)
+
+            extra_project = self.run_cli(
+                "bin/install-codex.sh",
+                "getbill",
+                "unexpected",
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(2, extra_project.returncode)
+            self.assertIn("Unexpected project argument", extra_project.stderr)
+
+    def test_installer_preserves_marketplace_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            marketplace = root / ".agents/plugins/marketplace.json"
+            marketplace.parent.mkdir(parents=True)
+            marketplace.write_text(
+                json.dumps(
+                    {
+                        "name": "personal",
+                        "interface": {"displayName": "Mine"},
+                        "plugins": [
+                            {"name": "other", "source": {"source": "local", "path": "./plugins/other"}},
+                            {"name": "pitcrew", "source": {"source": "local", "path": "./old"}},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = {**os.environ, "HOME": temp, "CODEX_HOME": str(root / ".codex")}
+            for args in (("--profile", "getbill", "getbill"), ("getbill", "--profile", "getbill")):
+                result = self.run_cli("bin/install-codex.sh", *args, env=env)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+            payload = json.loads(marketplace.read_text(encoding="utf-8"))
+            self.assertEqual("Mine", payload["interface"]["displayName"])
+            self.assertEqual(1, len([item for item in payload["plugins"] if item["name"] == "pitcrew"]))
+            self.assertIn({"name": "other", "source": {"source": "local", "path": "./plugins/other"}}, payload["plugins"])
+            pitcrew = next(item for item in payload["plugins"] if item["name"] == "pitcrew")
+            self.assertEqual("./plugins/pitcrew", pitcrew["source"]["path"])
+            self.assertTrue((root / ".codex/pitcrew/getbill/config.json").is_file())
+
+    def test_installer_refuses_unrelated_plugin_path_without_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plugin_path = root / "plugins/pitcrew"
+            plugin_path.mkdir(parents=True)
+            sentinel = plugin_path / "sentinel"
+            sentinel.write_text("keep", encoding="utf-8")
+            env = {**os.environ, "HOME": temp, "CODEX_HOME": str(root / ".codex")}
+
+            result = self.run_cli("bin/install-codex.sh", "getbill", env=env)
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("Refusing to replace existing plugin path", result.stderr)
+            self.assertTrue(plugin_path.is_dir())
+            self.assertEqual("keep", sentinel.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
