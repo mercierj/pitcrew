@@ -17,14 +17,17 @@ explicit configured project with a valid config and repository path. Create runt
 directories with owner-only permissions and keep state beneath that project.
 
 This bootstrap is a logical environment/path mapping, not permission to traverse
-those paths with shell reads. Actual configuration, default-project, and repository
-resolution must use the hardened `scripts/pitcrew_config.py` helper (for example,
-`repo --project <project>`) or an equivalent descriptor-based `O_NOFOLLOW` /
-no-symlink implementation. Reject symlinked runtime, project, default, and config
-components. Resolve and validate the configuration once, then pass the validated
-result forward; do not read configuration twice. `bin/pitcrew-codex.sh` remains the
-thin invocation boundary and must preserve these guarantees when it obtains a
-configured repository.
+those paths with shell reads during initial validation. Default-project and
+repository resolution must use the hardened `scripts/pitcrew_config.py` helper
+(`project` and `repo --project <project>`) or an equivalent descriptor-based
+`O_NOFOLLOW` / no-symlink implementation. Reject symlinked runtime, project,
+default, and config components and fail closed before invoking Codex.
+
+After that validation, `bin/pitcrew-codex.sh` deliberately grants Codex access only
+to the selected project's runtime directory through `--add-dir`, so the skill can
+read its configuration and atomically persist local state. This boundary preserves
+the caller's sandbox and approval policy; it does not claim to pin filesystem
+objects across the process handoff.
 
 ## Execution boundary
 
