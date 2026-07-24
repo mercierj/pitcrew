@@ -161,18 +161,28 @@ def classify_record(record: dict | None) -> str:
         return "unknown"
 
     exit_code = record.get("exit_code")
-    if exit_code not in (None, 0) or record.get("outcome") in {"failed", "interrupted"}:
+    record_outcome = record.get("outcome")
+    if exit_code not in (None, 0) or record_outcome in {"failed", "interrupted"}:
         return "failed"
-    if record.get("outcome") == "success":
-        return "healthy"
-    if record.get("outcome") != "noop":
-        return "unknown"
 
     summary = record.get("summary", "")
     try:
         decoded = json.loads(summary)
     except (json.JSONDecodeError, TypeError):
         decoded = summary
+
+    effective_outcome = record_outcome
+    structured_status = decoded.get("status") if isinstance(decoded, dict) else None
+    if isinstance(structured_status, str) and structured_status in VALID_OUTCOMES:
+        effective_outcome = structured_status
+
+    if effective_outcome in {"failed", "interrupted"}:
+        return "failed"
+    if effective_outcome == "success":
+        return "healthy"
+    if effective_outcome != "noop":
+        return "unknown"
+
     if isinstance(decoded, dict):
         reason = decoded.get("reason", "")
     else:

@@ -136,6 +136,64 @@ class HistoryStoreTest(unittest.TestCase):
             classify_record({"outcome": "noop", "summary": '{"reason":"no eligible item"}'}),
         )
 
+    def test_structured_noop_refines_successful_process_outcome(self):
+        authentication_noop = {
+            "outcome": "success",
+            "exit_code": 0,
+            "summary": json.dumps(
+                {
+                    "status": "noop",
+                    "reason": "configured GitLab provider authentication failed",
+                }
+            ),
+        }
+        expected_noop = {
+            "outcome": "success",
+            "exit_code": 0,
+            "summary": json.dumps(
+                {"status": "noop", "reason": "no eligible item"}
+            ),
+        }
+
+        self.assertEqual("warning", classify_record(authentication_noop))
+        self.assertEqual("healthy", classify_record(expected_noop))
+
+    def test_plain_non_json_success_remains_healthy(self):
+        self.assertEqual(
+            "healthy",
+            classify_record(
+                {"outcome": "success", "exit_code": 0, "summary": "Completed."}
+            ),
+        )
+
+    def test_structured_failures_are_failed_after_successful_process_exit(self):
+        for status in ("failed", "interrupted"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    "failed",
+                    classify_record(
+                        {
+                            "outcome": "success",
+                            "exit_code": 0,
+                            "summary": json.dumps({"status": status}),
+                        }
+                    ),
+                )
+
+    def test_unrecognized_structured_status_falls_back_to_record_outcome(self):
+        for status in ("unknown", ["noop"]):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    "healthy",
+                    classify_record(
+                        {
+                            "outcome": "success",
+                            "exit_code": 0,
+                            "summary": json.dumps({"status": status}),
+                        }
+                    ),
+                )
+
     def test_actionable_noops_are_warnings(self):
         reasons = (
             "required file unavailable",
@@ -162,6 +220,16 @@ class HistoryStoreTest(unittest.TestCase):
         self.assertEqual(
             "failed",
             classify_record({"outcome": "failed", "exit_code": 0, "summary": ""}),
+        )
+        self.assertEqual(
+            "failed",
+            classify_record(
+                {
+                    "outcome": "success",
+                    "exit_code": 2,
+                    "summary": '{"status":"success"}',
+                }
+            ),
         )
 
     def test_none_is_unknown(self):
