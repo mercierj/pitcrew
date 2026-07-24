@@ -3,6 +3,7 @@ import multiprocessing
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.pitcrew_history import HistoryStore, classify_record
 
@@ -57,6 +58,21 @@ class HistoryStoreTest(unittest.TestCase):
             self.assertEqual([], store.read(now="2026-07-25T12:00:00Z"))
             self.assertEqual("", path.read_text(encoding="utf-8"))
             self.assertEqual(0o600, path.stat().st_mode & 0o777)
+
+    def test_read_rewrites_only_when_a_valid_record_expires(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl", retention_days=7)
+            store.append(
+                _record("recent", "2026-07-24T12:00:00Z"),
+                now="2026-07-24T12:00:00Z",
+            )
+
+            with mock.patch.object(store, "_replace", wraps=store._replace) as replace:
+                store.read(now="2026-07-24T12:00:00Z")
+                replace.assert_not_called()
+
+                store.read(now="2026-08-01T12:00:00Z")
+                replace.assert_called_once_with([])
 
     def test_malformed_and_invalid_jsonl_lines_are_skipped(self):
         with tempfile.TemporaryDirectory() as temp:
