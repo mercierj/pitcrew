@@ -1,7 +1,19 @@
 ---
 name: releaser-run
-description: One pass of the releaser agent — an outward agent that ships already-merged work dev→prod per-repo, smoke-checks each stage, and auto-rolls-back on a confirmed prod break. Auto mode releases AGENT-AUTHORED work only (never your own in-flight merges); a directed --release mode ships a specific repo on demand. Per-repo armed (off|prepare|dev|full); coordinated cross-repo trains + supersession-aware. Encodes dev-before-prod, migration-before-code, red-never-ships, verify-landed as machine gates.
+description: Use when preparing or executing an explicitly armed release through configured gates.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the releaser agent. This is one pass. You ship **already-merged** work (what's on a
 repo's default branch, already through the review + human-go gate) out to dev and prod as a
@@ -21,23 +33,18 @@ running a release script, smoke-checking, and rolling back. Nothing else.
   directive (or a `[release-request]` ticket, STEP A0), you release exactly what was named —
   including human-authored work, because it was explicitly asked for — still through every gate.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
+
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "releaser-run: no project specified and no default.txt"; exit 0; }
 # Optional directed-release directive (nice-to-have on-demand mode):
-#   /releaser-run <project> --release <repo>[@<ref>]   → release that repo (HEAD or @ref) now,
+#   $pitcrew:releaser-run <project> --release <repo>[@<ref>]   → release that repo (HEAD or @ref) now,
 #   bypassing auto agent-only detection (a directed release may include human work — you asked).
 DIRECTIVE_REPO=""; DIRECTIVE_REF=""
 if [ "$2" = "--release" ] && [ -n "$3" ]; then
   DIRECTIVE_REPO="${3%@*}"; case "$3" in *@*) DIRECTIVE_REF="${3#*@}";; esac
 fi
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "releaser-run: config missing at $CONFIG_FILE"; exit 0; }
 
 GH_USER=$(jq -r '.github.reviewer_login' "$CONFIG_FILE")
 GH_ORG=$(jq -r '.github.org' "$CONFIG_FILE")
@@ -65,7 +72,7 @@ If `armed_repos` is empty, exit cleanly: `releaser-run: no repos armed (release.
 
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Resolve the live binding by introspecting your available tools — pick the Linear MCP family by capability (Claude Code: `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex: the `linear` server from `~/.codex/config.toml`), all operation-compatible; confirm the configured team (matching `linear.team_id` from config). Call `<LINEAR>__X` everywhere this file says `mcp__linear-server__X`. **Degraded mode for releaser specifically — STRICT:** if no Linear binding is live, do NOT advance any release into a NEW deploy (you can't file/track the release ticket or confirm ground truth). You MAY finish a verify/smoke/rollback step on an in-flight release using git/gh/curl evidence alone, then log `releaser-run: Linear unreachable — held new deploys, finished in-flight verification only` and exit.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
 - Self-contained, deterministic, fresh each fire. Re-read git/gh/Linear/state every fire.
 - DO NOT pause for confirmation within an armed repo's autonomy level — that IS the grant.
@@ -261,10 +268,9 @@ a full repo) get the @-mention. Then one-line stdout:
 [releaser:$PROJECT] armed <N> repos — <C> cut, <A> advanced, <P> parked, <B> blocked, <RB> rolled-back.
 ```
 
-═══ CADENCE ═══
+═══ SCHEDULING ═══
 
-`/loop 15m /releaser-run` (or 10m). Deploys settle between fires; a release walks its stages
-across several fires. Idle fires (nothing unreleased) are cheap no-ops, post nothing.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 - `gh`/git unavailable → log one line, exit; retry next fire.

@@ -1,7 +1,19 @@
 ---
 name: coverage-run
-description: One pass of the coverage agent — an outward producer that finds test-coverage gaps (capability × surface cells with no flow) in the test-flow repo, drafts grounded smoke/regression flows for the highest-value gaps, and opens a PR to the test-flow repo (reviewer + validator gate them). Paced. Never invents endpoints; grounds every flow in the architecture docs + surfaces.md + the api-client types. Never touches service code.
+description: Use when finding and filling one grounded test-flow coverage gap.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the coverage agent. This is one pass. You EXPAND test coverage: find capability × surface
 cells that have no flow, draft grounded flows for the highest-value gaps, and open a PR to the
@@ -9,14 +21,11 @@ test-flow repo. The reviewer + validator gate every flow. You author test contra
 never touch service code, never deploy. Complements the test-first rule (which turns bug-fixes
 into coverage); you add the PROACTIVE half — capabilities that exist but were never covered.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
+
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "coverage-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"; CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"; mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "coverage-run: config missing"; exit 0; }
 
 GH_USER=$(jq -r '.github.reviewer_login' "$CONFIG_FILE")
 SLACK_WEBHOOK_URL=$(jq -r '.slack.coverage_webhook_url // .slack.qa_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
@@ -34,7 +43,7 @@ If `qa.test_flow_repo` isn't configured, exit cleanly.
 
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**LINEAR BINDING (resilience layer — `references/LINEAR-ACCESS.md`).** You touch Linear only to read recent Bug/incident tickets for gap-prioritization (optional). Resolve the live binding by introspecting your available tools — pick the Linear MCP family by capability (Claude Code: `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex: the `linear` server from `~/.codex/config.toml`), all operation-compatible; if neither is live, skip the Linear-signal step and proceed on the matrix alone. Never bail blind.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
 - Self-contained, deterministic, fresh each fire. Re-read the flows + architecture every fire.
 - DO NOT pause for confirmation. Auto mode is implied.
@@ -116,9 +125,9 @@ merge). Record `state.addressed[cell]`, history `pr-opened`.
 Then stdout: `[coverage:$PROJECT] +<N> flows (<cells>), <G> gaps remain, <S> skipped-ungroundable.`
 If no gaps remain: log `coverage-run: matrix full (or all remaining gaps ungroundable/nonsensical)`, exit.
 
-═══ CADENCE ═══
-Slow — `/loop 12h /coverage-run` (or daily). Coverage expansion is deliberate; gated on the matrix
-having gaps + on review throughput (one PR per fire, paced).
+═══ SCHEDULING ═══
+
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 - test-flow repo not checked out / `git pull` conflicts → log one line, exit.

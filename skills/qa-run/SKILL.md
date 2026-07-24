@@ -1,33 +1,36 @@
 ---
 name: qa-run
-description: One pass of the QA flow runner — runs all smoke-priority flows from <test_flow_repo> against the dev environment, records drift/fail to a local findings ledger for /manager-run to ticket (paced + deduped), posts Slack recap. No longer files Linear tickets directly.
+description: Use when replaying configured dev smoke flows and recording failures without fixing them.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the QA flow runner. This is one pass.
 
-Your job is to run the test flows defined in `<test_flow_repo>/flows/**/*.md` against the project's **dev environment**, validate them end-to-end, record any drift or hard fail to a local **findings ledger**, post a Slack recap, and exit. You do NOT file Linear tickets yourself — that flooded the backlog (~20 tickets/run). `/manager-run` reads the ledger and turns findings into paced, deduped Linear tickets. You do NOT fix code. You execute the contract and report.
+Your job is to run the test flows defined in `<test_flow_repo>/flows/**/*.md` against the project's **dev environment**, validate them end-to-end, record any drift or hard fail to a local **findings ledger**, post a Slack recap, and exit. You do NOT file Linear tickets yourself — that flooded the backlog (~20 tickets/run). `$pitcrew:manager-run` reads the ledger and turns findings into paced, deduped Linear tickets. You do NOT fix code. You execute the contract and report.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-1. Resolve project name:
-   - If invoked with an argument (e.g. `/qa-run example`), use that.
-   - Else read `~/.claude/agent-loop/default.txt`.
-   - Else print FIRST-TIME-SETUP and exit.
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
-2. Read `~/.claude/agent-loop/$PROJECT/config.json`. If missing, print FIRST-TIME-SETUP and exit.
+   - If invoked with an argument (e.g. `$pitcrew:qa-run example`), use that.
 
-3. Required fields: `qa.test_flow_repo` (non-empty), `repos[]` contains that repo, `linear.use=true` and the same Linear fields as research-run.
 
-4. Initialize shell variables:
+**Required fields:** `qa.test_flow_repo` (non-empty), `repos[]` contains that repo, `linear.use=true` and the same Linear fields as research-run.
+
+**Role variables:**
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "qa-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "qa-run: config missing at $CONFIG_FILE — see pitcrew/references/SETUP.md"; exit 0; }
 
 QA_REPO_NAME=$(jq -r '.qa.test_flow_repo // empty' "$CONFIG_FILE")
 [ -z "$QA_REPO_NAME" ] && { echo "qa-run: qa.test_flow_repo not configured for project $PROJECT, exiting."; exit 0; }
@@ -53,21 +56,9 @@ QA_REPO_PATH=$(jq -r --arg n "$QA_REPO_NAME" '.repos[] | select(.name==$n) | .pa
 LINEAR_FILTER_URL="https://linear.app/$LINEAR_WORKSPACE/team/$TICKET_PREFIX/active?query=%5BQA%5D"
 ```
 
-═══ FIRST-TIME-SETUP block ═══
-
-```
-qa-run: no config found for project '<name>'.
-
-Setup: see pitcrew/references/SETUP.md. Required for qa-run:
-  - Fill in linear.* (team, workspace_slug, ticket_prefix, assignee_email, labels)
-  - Fill in repos[] (must include the test-flow repo)
-  - Set qa.test_flow_repo to that repo's name
-  - (Optional) slack.qa_webhook_url for notifications
-```
-
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**NO LINEAR DEPENDENCY (changed 2026-06-23).** qa-run no longer writes Linear directly — it records findings to a local ledger that `/manager-run` reads, dedups, routes, and tickets (paced). So qa-run needs NO Linear binding and is UNAFFECTED by Linear MCP availability. (Historical: qa-run filed a ticket per drift/fail → ~20 tickets/run flooded the backlog; the manager now paces them in.)
+**NO LINEAR DEPENDENCY (changed 2026-06-23).** qa-run no longer writes Linear directly — it records findings to a local ledger that `$pitcrew:manager-run` reads, dedups, routes, and tickets (paced). So qa-run needs NO Linear binding and is UNAFFECTED by configured tracker availability. (Historical: qa-run filed a ticket per drift/fail → ~20 tickets/run flooded the backlog; the manager now paces them in.)
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -92,7 +83,7 @@ Setup: see pitcrew/references/SETUP.md. Required for qa-run:
    - `docs/surfaces.md` — how each capability is invoked per surface
    Files change; reading once-and-cached produces stale runs.
 3. **Drift IS recorded.** Every noticed issue (drift, inconclusive, AND hard fail) is upserted into the findings ledger. Severity is a FIELD on the finding; the manager decides ticketing + labels later. Nothing is dropped — but nothing is filed to Linear here either.
-4. **qa-run does NOT label, route, or file tickets — the manager does.** qa-run's job ends at the ledger. Labels (`agent`/`investigate`/`svc:`), priority, dedup-against-Linear, and pacing are all `/manager-run`'s responsibility (it reads the ledger as a `qa-v1` source).
+4. **qa-run does NOT label, route, or file tickets — the manager does.** qa-run's job ends at the ledger. Labels (`agent`/`investigate`/`svc:`), priority, dedup-against-Linear, and pacing are all `$pitcrew:manager-run`'s responsibility (it reads the ledger as a `qa-v1` source).
 5. **The Slack recap lists fails/drift but does NOT link a Linear ticket per line** (the manager files them async, later). Each line notes `→ ledger`; the footer keeps `$LINEAR_FILTER_URL` (existing open QA tickets).
 6. **Don't push broken cleanup.** Every flow has a `## Cleanup` section. Run it even when validation fails. Orphan dev state piles up.
 7. **Don't retry on first fail.** A daily QA suite that retries hides flakiness. Mark fail, capture artifacts, move on. (Exception: explicit `retries: N` in flow frontmatter.)
@@ -109,7 +100,7 @@ Setup: see pitcrew/references/SETUP.md. Required for qa-run:
 
 Glob `flows/**/*.md`. Parse YAML frontmatter on each. Filter:
 - Default: `priority: smoke` only.
-- Args (passed as part of `/qa-run` invocation): `--priority=smoke|regression|extended|all`, `--surface=<surface>`, `--id=<flow_id>`, `--capability=<cap>`.
+- Args (passed as part of `$pitcrew:qa-run` invocation): `--priority=smoke|regression|extended|all`, `--surface=<surface>`, `--id=<flow_id>`, `--capability=<cap>`.
 
 Sort by `id` for deterministic run order.
 
@@ -135,7 +126,7 @@ For each flow `F`, for each surface `S` in `F.surfaces`:
 ═══ FINDINGS LEDGER (replaces direct Linear ticketing) ═══
 
 qa-run does NOT file Linear tickets. It maintains a single rolling **findings ledger** that
-`/manager-run` reads and turns into paced, deduped Linear tickets. The ledger is the durable
+`$pitcrew:manager-run` reads and turns into paced, deduped Linear tickets. The ledger is the durable
 record of what QA found; the manager owns what becomes a ticket, when, with which labels.
 
 **Path:** `LEDGER=$(jq -r --arg d "$CONFIG_DIR/findings" '.qa.findings_ledger // ($d + "/qa-findings.json")' "$CONFIG_FILE" | sed "s|^~|$HOME|")`; `mkdir -p "$(dirname "$LEDGER")"`. If absent, treat as `{"source":"qa-run","updated_at":null,"findings":[]}`.
@@ -175,7 +166,7 @@ kills the 20-tickets-per-run flood.
 5. Write the ledger atomically (`.tmp` → `mv`), set `updated_at`. **Redact** secrets/tokens/PII
    from every evidence excerpt.
 
-`/manager-run` reads this ledger as source format `qa-v1`: it dedups each entry against existing
+`$pitcrew:manager-run` reads this ledger as source format `qa-v1`: it dedups each entry against existing
 Linear + its own state (so a finding already ticketed is never re-filed), routes risky→investigate
 / contained→agent, and paces filing at the queue depth. A QA finding becomes a Linear ticket only
 when the manager has a free slot — never 20 at once.
@@ -189,7 +180,7 @@ If `$SLACK_WEBHOOK_URL` is empty, **silently skip notifications** — never fail
 ```
 :rotating_light: *QA failure* — `<flow_id>` on `<surface>`
 > <one-line reason>
-*Recorded:* ledger (occurrences: <n>) — `/manager-run` will ticket
+*Recorded:* ledger (occurrences: <n>) — `$pitcrew:manager-run` will ticket
 *Run:* `<RUN_ID>`
 *Suspected service:* `svc:<service>`
 ```
@@ -198,7 +189,7 @@ If `$SLACK_WEBHOOK_URL` is empty, **silently skip notifications** — never fail
 
 ```
 :robot_face: *QA run <RUN_ID>* — <pass>/<total> passed
-<!date^<EPOCH_START>^{date_short_pretty} at {time}|<TZ_FALLBACK>> · <duration>s · triggered by <human|/loop|/schedule>
+<!date^<EPOCH_START>^{date_short_pretty} at {time}|<TZ_FALLBACK>> · <duration>s · triggered by <human|scheduled task|/schedule>
 
 *Passed:*
 • `<flow_id>` × `<surface>` (<duration>s, <one-fact like "10 itineraries">)
@@ -261,14 +252,18 @@ post_slack() {
 
 ═══ FAILURE MODES & GOTCHAS ═══
 
-- **Bash permission denied on `curl` to Slack/Linear:** the user's local Claude Code prompt rejected an unfamiliar URL pattern. Document in `STATUS.md` as a blocker; don't retry. Use `.claude/settings.json` allowlist precedent.
+- **Permission denied on `curl` to Slack/Linear:** the caller's Codex approval policy rejected the action. Document it in `STATUS.md` as a blocker; do not retry or widen permissions.
 - **Drift on a NEW flow's first run:** likely the validation was guessed against API types but doesn't match live response. File the drift ticket, capture full response, move on. The runner finding this IS the system working.
 - **Cleanup endpoint 404 / 4xx:** treat as a separate fail. Don't swallow — broken cleanup creates compounding orphans on dev.
 - **Auth failure (401/403) on a surface:** abort that surface for the run, document in STATUS.md, file `$BUG_LABEL` + `svc:*`. Other surfaces continue.
 - **Rate limit (429):** sleep and retry once, then fail.
 - **Inconclusive result shape:** dump full response, file as drift, pick the most plausible field name in your reason text.
-- **`/loop` race:** if the previous iteration is still running, detect the prior `RUN_ID` directory and exit with a single line. Don't run two iterations in parallel.
+- **`scheduled task` race:** if the previous iteration is still running, detect the prior `RUN_ID` directory and exit with a single line. Don't run two iterations in parallel.
 
 ═══ TONE ═══
 
 You are a contract test runner, not a fix-it agent. Terse output. No backslashes-as-line-breaks in commit messages. No emoji in code or commits. Linear ticket bodies in markdown only — no escape sequences.
+
+═══ SCHEDULING ═══
+
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.

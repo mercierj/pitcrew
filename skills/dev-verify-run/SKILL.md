@@ -1,7 +1,19 @@
 ---
 name: dev-verify-run
-description: One pass of the dev-verify agent — post-deploy verifier. Watches for merged PRs that are now LIVE on dev, plans a targeted test (diff → affected capabilities → the relevant test-flow flows), runs ONLY those against the live dev environment, and records failures to a verify ledger for /manager-run to ticket. Does NOT deploy and does NOT gate PRs — it answers "what's on dev right now, does it actually work?".
+description: Use when checking recently deployed development behavior against targeted flows.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the dev-verify agent. This is one pass. You verify that freshly-released code actually
 works on the LIVE dev environment — the failure class that "green CI + green local validator"
@@ -10,14 +22,11 @@ changed, against dev, and record failures. You do NOT deploy (releaser's job) an
 (validator's job, pre-merge). You complete the pyramid: validator (pre-merge, local) → **you
 (post-deploy, live dev)** → qa-run (scheduled full suite).
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
+
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "dev-verify-run: no project + no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"; CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"; mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "dev-verify-run: config missing"; exit 0; }
 
 GH_USER=$(jq -r '.github.reviewer_login' "$CONFIG_FILE")
 GH_ORG=$(jq -r '.github.org' "$CONFIG_FILE")
@@ -40,7 +49,7 @@ gh_user_now=$(gh api user --jq .login 2>/dev/null)
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
 **NO LINEAR DEPENDENCY.** dev-verify records failures to a local ledger (`verify-v1` ≡ the qa-v1
-shape) that `/manager-run` reads under the `verify` bucket. So it needs NO Linear binding. It reads
+shape) that `$pitcrew:manager-run` reads under the `verify` bucket. So it needs NO Linear binding. It reads
 `docs/surfaces.md` for how to call each surface against dev (same Rosetta Stone qa-run uses).
 
 - Self-contained, deterministic, fresh each fire. Re-read PRs/git/dev every fire.
@@ -119,9 +128,9 @@ A PR whose flows all PASS → record `verified[<repo>#<pr>] = {result:"pass"}`, 
 will ticket). <caps>`. Then stdout:
 `[dev-verify:$PROJECT] verified <V> PRs on dev — <P> clean, <F> with failures (<N> ledger entries). <pending> still landing.`
 
-═══ CADENCE ═══
-`/loop 15m /dev-verify-run` — frequent enough to test soon after a deploy lands; gated on
-verify-landed + paced, so fires with nothing newly-live are cheap no-ops.
+═══ SCHEDULING ═══
+
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 - gh/git unavailable → log one line, exit; retry.

@@ -1,23 +1,30 @@
 ---
 name: manager-run
-description: One pass of the manager agent — the single paced gate from findings sources (audit / qa ledger / research ledger) into Linear. Per-source buckets (each source = its own label + depth, so none starves another); routes risky findings (critical/high + security/auth/money) to investigate-first, contained ones to the implementer. Files tickets only — never touches code.
+description: Use when pacing local findings into the configured issue tracker.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the manager agent. This is one pass. You convert a curated **findings source** (an
 audit, a vuln report, a backlog dump) into a paced stream of well-formed Linear tickets the rest
 of the loop acts on. You **file and prioritize tickets only** — you never write code, never deploy.
 Your whole value is: the right finding, well-described, at the right pace, routed to the right place.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
+
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "manager-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "manager-run: config missing at $CONFIG_FILE"; exit 0; }
 
 LINEAR_TEAM=$(jq -r '.linear.team_name // "Example"' "$CONFIG_FILE")
 AGENT_BACKLOG_PROJECT_ID=$(jq -r '.linear.agent_backlog_project.id // empty' "$CONFIG_FILE")
@@ -48,7 +55,7 @@ If `.manager.sources` is empty, exit cleanly: `manager-run: no findings sources 
 
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Resolve the live binding by introspecting your available tools — pick the Linear MCP family by capability (Claude Code: `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex: the `linear` server from `~/.codex/config.toml`), all operation-compatible; confirm the configured team (matching `linear.team_id` from config). Call `<LINEAR>__X` everywhere this file says `mcp__linear-server__X`. No live binding → log `manager-run: Linear unreachable — degraded` and exit (the manager only writes Linear; nothing to do degraded). Never bail blind.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
 - Self-contained, deterministic, fresh each fire. State lives in Linear + the state file + the source file. Re-read every fire.
 - DO NOT pause for confirmation. Auto mode is implied.
@@ -70,7 +77,7 @@ If `.manager.sources` is empty, exit cleanly: `manager-run: no findings sources 
 4. **ROUTE risky findings to investigate-first, NEVER straight to agent.** A finding is RISKY if
    its severity is `critical`/`high` OR its category matches `$RISKY_RE` (security/auth/access-
    control/money/injection/secret). Risky → label `[$INVESTIGATE_LABEL, $AUDIT_LABEL]` + the matching `svc: <name>` if one exists
-   (NOT `$AGENT_LABEL`) so investigate-run analyzes it read-only and /unblock surfaces it to you
+   (NOT `$AGENT_LABEL`) so investigate-run analyzes it read-only and $pitcrew:unblock surfaces it to you
    to decide before any code change. Non-risky (low/medium, contained) → `[$AGENT_LABEL,
    $AUDIT_LABEL]` + `svc: <name>` if it exists (+ `$QUICK_WIN_LABEL` if the fix is small) for the implementer.
    NEVER put `$AGENT_LABEL` on a risky finding — that would auto-implement a security fix unattended.
@@ -156,8 +163,8 @@ vs `$INVESTIGATE_LABEL` and state.)
 - this source's `investigate` slots = `max(0, src_wip   - source_investigate_open)`.
 
 A finding is filed against ITS source's bucket only (an audit finding can't borrow qa's slots).
-If EVERY source's both slot-counts are 0 → all buckets full; file nothing, post nothing (or a
-heartbeat if >4h). Exit. Otherwise STEP 4 fills each source's open slots from that source's
+If EVERY source's both slot-counts are 0 → all buckets full; file nothing, return the
+structured no-op, and stop. Otherwise STEP 4 fills each source's open slots from that source's
 sorted findings.
 
 **STEP 4. Dedup + file, up to the slot counts, highest-priority first.**
@@ -177,7 +184,7 @@ For each finding to file (take the top `slots` from each stream's sorted list):
      <qa-v1:> Flow: `<flow_id>` × `<surface>` · **Failing <occurrences>× since <first_seen>** (last <last_run_id>) · **Reason:** <reason> · **Evidence:** <endpoint> → <failed_validation>; response excerpt: <≤2KB>
      <research-v1:> Cell: `<repo>:<mode>` · Category: <category> · **What:** <what> · **Where:** <where[]> · **Why:** <why> · **Suggested fix:** <suggested_fix> · **Acceptance:** <acceptance[]>
 
-     <if investigate-route:> Routed to investigate-first (risky: <severity>/<category>). /investigate-run will analyze read-only; /unblock surfaces options to you before any code change.
+     <if investigate-route:> Routed to investigate-first (risky: <severity>/<category>). $pitcrew:investigate-run will analyze read-only; $pitcrew:unblock surfaces options to you before any code change.
      <if agent-route:> Contained finding — implementer may pick up and open a fix PR (human-go gate before merge).
      ```
      **Redact** any token/secret in a quoted snippet.
@@ -198,11 +205,9 @@ Then one-line stdout:
 [manager:$PROJECT] filed <A> agent + <I> investigate, deduped <D>; backlog <R> remain.
 ```
 
-═══ CADENCE ═══
+═══ SCHEDULING ═══
 
-Slow — `/loop 1h /manager-run` (or 2h). It's a backlog feeder gated on the loop's own throughput
-(STEP 3 pacing), so firing often just no-ops when the queues are full. One fire after the
-implementer drains a couple tickets tops the queue back up.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 - Source file missing/unreadable → log one line, skip that source. If all sources fail, exit.

@@ -89,6 +89,63 @@ class ReferenceContractTest(unittest.TestCase):
             "AWS credentials/configuration",
         )
 
+    def test_all_skills_are_codex_native(self):
+        forbidden = (
+            "~/.claude",
+            "AskUserQuestion",
+            "ScheduleWakeup",
+            "mcp__claude",
+            "/loop",
+            "~/.codex/prompts",
+        )
+        for skill_file in sorted((ROOT / "skills").glob("*/SKILL.md")):
+            text = skill_file.read_text(encoding="utf-8")
+            frontmatter = text.split("---", 2)[1]
+            self.assertIn("description: Use when", frontmatter, skill_file)
+            self.assertIn("references/CODEX-RUNTIME.md", text, skill_file)
+            self.assertIn("references/PROVIDERS.md", text, skill_file)
+            for token in forbidden:
+                self.assertNotIn(token, text, f"{skill_file} contains {token}")
+
+    def test_cross_skill_invocations_are_namespaced(self):
+        skill_names = [
+            path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md")
+        ]
+        for skill_file in sorted((ROOT / "skills").glob("*/SKILL.md")):
+            text = skill_file.read_text(encoding="utf-8")
+            for name in skill_names:
+                self.assertNotIn(f"/{name}", text, skill_file)
+
+    def test_unattended_unblock_and_external_scheduling_contract(self):
+        unblock = (ROOT / "skills/unblock/SKILL.md").read_text(encoding="utf-8")
+        for marker in (
+            "unattended `codex exec`",
+            "Do not continue to STEP 7",
+            '"status": "blocked"',
+            '"question": "<exact selected question>"',
+            '"choices":',
+            "Atomically persist",
+            "resume at STEP 7",
+            "question: $question",
+            "choices: $choices",
+            "context: $context",
+            "status: \"selecting\"",
+        ):
+            self.assertIn(marker, unblock)
+
+        forbidden_pacing = (
+            ".loop.",
+            "FAST_WAKEUP",
+            "SLOW_HEARTBEAT",
+            "SELF-PACING",
+            "self-pace",
+            "Heartbeat-only",
+        )
+        for skill_file in sorted((ROOT / "skills").glob("*/SKILL.md")):
+            text = skill_file.read_text(encoding="utf-8")
+            for marker in forbidden_pacing:
+                self.assertNotIn(marker, text, f"{skill_file} contains {marker}")
+
 
 if __name__ == "__main__":
     unittest.main()

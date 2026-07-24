@@ -1,25 +1,30 @@
 ---
 name: implementer-run
-description: One pass of the implementer agent — picks up agent-labeled Linear tickets, opens PRs, addresses reviewer change-requests, auto-merges docs/test-only PRs on reviewer sign-off, otherwise merges on human "go"
+description: Use when implementing one eligible configured issue through a reviewed change.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the implementer agent. This is one pass.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-1. Resolve project name (arg → `~/.claude/agent-loop/default.txt` → exit with FIRST-TIME-SETUP).
-2. Read `~/.claude/agent-loop/$PROJECT/config.json` (or exit with FIRST-TIME-SETUP).
-3. Required fields: `linear.use=true`, full `linear.*`, `github.reviewer_login`, `github.org`, `repos[]` (≥1).
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
+
+**Required fields:** `linear.use=true`, full `linear.*`, `github.reviewer_login`, `github.org`, `repos[]` (≥1).
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "implementer-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
 WORKTREE_ROOT="/tmp/agent-loop-quickwins/$PROJECT"
-mkdir -p "$STATE_DIR" "$WORKTREE_ROOT"
-[ ! -f "$CONFIG_FILE" ] && { echo "implementer-run: config missing at $CONFIG_FILE — see pitcrew/references/SETUP.md"; exit 0; }
 
 LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
 [ "$LINEAR_USE" != "true" ] && { echo "implementer-run requires Linear (.linear.use=true), exiting."; exit 0; }
@@ -47,7 +52,7 @@ STATE_PROCESSING=$(jq -r '.linear.states.processing // "agent-processing"' "$CON
 STATE_REVIEW=$(jq -r '.linear.states.review // "agent-review"' "$CONFIG_FILE")
 STATE_BLOCKED=$(jq -r '.linear.states.blocked // "agent-blocked"' "$CONFIG_FILE")
 STATE_DONE=$(jq -r '.linear.states.done // "agent-done"' "$CONFIG_FILE")
-# State IDs — PREFER these over names when calling mcp__linear-server__save_issue (see HARD RULE 10).
+# State IDs — PREFER these over names when calling configured tracker save_issue operation (see HARD RULE 10).
 STATE_TODO_ID=$(jq -r '.linear.state_ids.todo // empty' "$CONFIG_FILE")
 STATE_PROCESSING_ID=$(jq -r '.linear.state_ids.processing // empty' "$CONFIG_FILE")
 STATE_REVIEW_ID=$(jq -r '.linear.state_ids.review // empty' "$CONFIG_FILE")
@@ -57,9 +62,6 @@ GH_USER=$(jq -r '.github.reviewer_login' "$CONFIG_FILE")
 GH_ORG=$(jq -r '.github.org' "$CONFIG_FILE")
 SLACK_WEBHOOK_URL=$(jq -r '.slack.implementer_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
 SLACK_USER_MENTION=$(jq -r '.slack.user_mention // empty' "$CONFIG_FILE")
-FAST_WAKEUP=$(jq -r '.loop.fast_wakeup_seconds // 120' "$CONFIG_FILE")
-SLOW_HEARTBEAT=$(jq -r '.loop.slow_heartbeat_seconds // 1500' "$CONFIG_FILE")
-
 repo_path()           { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .path' "$CONFIG_FILE" | sed "s|^~|$HOME|"; }
 repo_default_branch() { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .default_branch' "$CONFIG_FILE"; }
 repo_tags()           { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .tags // [] | join(",")' "$CONFIG_FILE"; }
@@ -67,24 +69,11 @@ repo_contributor_skill() { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .c
 all_repo_names()      { jq -r '.repos[].name' "$CONFIG_FILE"; }
 ```
 
-═══ FIRST-TIME-SETUP block ═══
-
-```
-implementer-run: no config found for project '<name>'.
-
-Setup: see pitcrew/references/SETUP.md. Required:
-  - linear.* (workspace, team, ticket_prefix, assignee_email, labels, label_ids)
-  - github.reviewer_login, github.org
-  - repos[] — every repo the agent is allowed to open PRs in
-  - (Optional) repos[].tags — semantic labels the agent uses to route tickets
-  - (Optional) slack.quickwins_webhook_url, slack.user_mention
-```
-
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X` with the live prefix. If NEITHER family is live (or only a wrong-workspace one is): log one line `<skill>: Linear unreachable — degraded mode` and exit cleanly (a Linear-write agent does no writes; an acting agent does only Linear-independent, read-grounded work). Never bail blind, never write to the wrong workspace.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `/implementer-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (force-pick that ticket regardless of queue sort/state and run the normal scope-check (STEP C) + worktree implement (STEP D) + closeout, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
+**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `$pitcrew:implementer-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (force-pick that ticket regardless of queue sort/state and run the normal scope-check (STEP C) + worktree implement (STEP D) + closeout, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -94,7 +83,7 @@ Setup: see pitcrew/references/SETUP.md. Required:
 - DO NOT skip steps because you "remember" doing them last fire. Each fire is fresh; re-execute every step from STEP 0.
 - DO NOT trust conversation memory for state. State lives on disk, in Linear, in GitHub, in git — go read it directly.
 - DO NOT abort because you're "missing context". You aren't.
-- If you genuinely cannot proceed (corrupt state, MCP down, gh unauth'd), log ONE line, exit cleanly. The next fire will retry.
+- If you genuinely cannot proceed (corrupt state, provider unavailable, gh unauth'd), log ONE line, exit cleanly. The next fire will retry.
 - **ALWAYS read `$CONFIG_DIR/lessons.md` at the very top of the run** (if it exists). Rules under the "Implementer" section (legacy "Quickwins" header still works for backwards compat) apply to STEP C scope-check and STEP D implementation. If a rule would have bailed this ticket, bail it.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
 
@@ -114,7 +103,7 @@ The `$QUICK_WIN_LABEL`, `$BUG_LABEL`, `$IMPROVEMENT_LABEL` labels still describe
 
 **On bail (scope, mid-impl, or fix-exhausted):** do NOT remove any labels. Move state to `$STATE_BLOCKED`. The label stays put so a human can re-evaluate and move it back to `$STATE_TODO` after their triage.
 
-If the Linear MCP tools (`mcp__linear-server__*`) are not available, exit cleanly with: "Linear MCP not available, exiting."
+If the required configured tracker operation is unavailable, return a structured no-op and stop.
 
 ═══ SLACK NOTIFICATIONS (one summary message per run, never blocks the run) ═══
 
@@ -144,13 +133,9 @@ Append events at these moments:
 
 **End-of-run summary (post once, very last thing the agent does):**
 
-If no events: check the heartbeat state file `$STATE_DIR/implementer-state.json` (key `last_slack_post_at` — ISO timestamp, or absent if never posted).
-- If `last_slack_post_at` is absent OR >2 hours ago: post a minimal heartbeat (see "Heartbeat-only post" below) so you can see the loop is alive. Update `last_slack_post_at`.
-- Else (last post within 2h): post nothing, exit silently. The 2h gate prevents spam during quiet periods while ensuring you never go a full afternoon without confirmation the loop is alive.
-
-If there are events, post the full summary as below and update `last_slack_post_at`.
-
-Otherwise build a single Slack mrkdwn message:
+If there are no events, return the structured no-op and stop. Scheduling and quiet-run
+monitoring belong to the external caller. If there are events, build and post one Slack
+mrkdwn message:
 
 ```
 :robot_face: *Quick-wins run* — <!date^<EPOCH-SECONDS>^{date_short_pretty} at {time}|<ISO-fallback>>
@@ -190,22 +175,6 @@ _Filter audit: <T> $STATE_REVIEW tickets evaluated → <S> signed-off+validated 
 - `*Ready for your `go`*` — only if count > 0. The @-mention fires if this section is non-empty OR if Validation failed has entries.
 - `*Auto-merge held on CI*` — only if count > 0. Informational; CI flipping green triggers auto-merge on the next fire without your intervention. No @-mention.
 - Filter audit footer always appears.
-
-**Heartbeat-only post (no events this run, but >2h since last post):**
-
-Use this terser template — no @-mention, no event header, just a status snapshot so you know the loop is alive:
-
-```
-:hourglass_flowing_sand: *Implementer heartbeat* — <!date^<EPOCH>^{date_short_pretty} at {time}|<ISO>>
-_No events this run. Status snapshot:_
-• `$STATE_TODO`: <N> tickets queued
-• `$STATE_PROCESSING`: <N> (orphans? STEP 0 handles)
-• `$STATE_REVIEW`: <N> open PRs
-• `$STATE_BLOCKED`: <N> tickets need human triage
-_(Next event will trigger a full summary. Heartbeats throttled to every 2h.)_
-```
-
-Build the counts from one Linear query per state (same queries used elsewhere in the run; cache the results).
 
 **Building the pending list:** query Linear for all `$STATE_REVIEW` tickets with label `$AGENT_LABEL` (one query, no merge needed). For each, find the matching PR via `gh pr list --search "<TICKET-id> in:title" --state open --json number,url,title,headRepository --limit 1`. Skip tickets where no open PR is found.
 
@@ -265,31 +234,6 @@ If you build the digest WITHOUT running the per-PR `gh pr view --json reviews` c
 EVENTS_FILE=$(mktemp /tmp/implementer-events.XXXXXX)
 trap 'rm -f "$EVENTS_FILE"' EXIT
 
-# Heartbeat state — tracks the last time we posted to Slack so we can throttle no-event runs to >2h.
-IMPLEMENTER_STATE_FILE="$STATE_DIR/implementer-state.json"
-[ ! -f "$IMPLEMENTER_STATE_FILE" ] && echo '{}' > "$IMPLEMENTER_STATE_FILE"
-
-last_slack_post_at() {
-  jq -r '.last_slack_post_at // ""' "$IMPLEMENTER_STATE_FILE" 2>/dev/null
-}
-
-# Returns 0 (true) if last post was >2h ago OR never. Used to decide whether a no-event run still posts a heartbeat.
-should_post_heartbeat() {
-  local last; last=$(last_slack_post_at)
-  [ -z "$last" ] && return 0
-  # Parse as UTC (TZ=UTC) — the stored timestamp is written with `date -u` (UTC); without this,
-  # BSD `date -j -f` interprets it in local time and the gap is off by the local UTC offset.
-  local last_epoch; last_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$last" +%s 2>/dev/null || echo 0)
-  local now_epoch; now_epoch=$(date -u +%s)
-  [ $((now_epoch - last_epoch)) -gt 7200 ]
-}
-
-mark_slack_posted() {
-  local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local tmp="$IMPLEMENTER_STATE_FILE.tmp"
-  jq --arg t "$now" '.last_slack_post_at = $t' "$IMPLEMENTER_STATE_FILE" > "$tmp" && mv "$tmp" "$IMPLEMENTER_STATE_FILE"
-}
-
 log_event() {
   printf '%s\n' "$*" >> "$EVENTS_FILE"
 }
@@ -297,25 +241,17 @@ log_event() {
 post_summary() {
   [ -z "$SLACK_WEBHOOK_URL" ] && return 0
   local body
-  if [ -s "$EVENTS_FILE" ]; then
-    # construct full-summary body from $EVENTS_FILE + Linear pending query
-    body="<full-summary built per template above>"
-  elif should_post_heartbeat; then
-    # construct heartbeat body — terser, no @-mention, just queue snapshot
-    body="<heartbeat-only body built per heartbeat template above>"
-  else
-    return 0  # no events AND <2h since last post — stay silent
-  fi
+  [ -s "$EVENTS_FILE" ] || return 0
+  body="<full-summary built per template above>"
   curl -fsS --max-time 8 -X POST -H 'Content-type: application/json' \
     --data "$(jq -nc --arg text "$body" '{text: $text}')" \
     "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || true
-  mark_slack_posted  # update last_slack_post_at regardless of which branch fired
 }
 ```
 
-Construct the full-summary `body` by reading `$EVENTS_FILE` line-by-line, mapping event-types to emoji+sentence, and concatenating with the live pending-PRs query. Construct the heartbeat `body` per the "Heartbeat-only post" template — one Linear query per state, just counts.
+Construct the full-summary `body` by reading `$EVENTS_FILE` line-by-line, mapping event-types to emoji+sentence, and concatenating with the live pending-PRs query.
 
-**Important: post_summary is called exactly ONCE, at the very end of the run, regardless of which path the run took.** Add a `post_summary` call in every clean-exit branch. With the heartbeat logic, this is now BENIGN to call on no-event runs — it self-throttles to ≥2h cadence.
+**Important: `post_summary` is called exactly once, at the end of an eventful run.**
 
 ═══ HARD RULES (NEVER violate) ═══
 1. NEVER push to default branch. Always feature branch (`feat/<TICKET>-slug`, `fix/...`, `chore/...`, `docs/...`).
@@ -327,7 +263,7 @@ Construct the full-summary `body` by reading `$EVENTS_FILE` line-by-line, mappin
 7. Don't `git add -A` — stage specific files.
 8. Do NOT add Co-Authored-By footers on commits.
 9. NEVER remove the `$BUG_LABEL` or `$IMPROVEMENT_LABEL` labels — those are categorization, not eligibility flags. Only `$QUICK_WIN_LABEL` may be removed (when bailing on scope, see STEP C).
-10. **State transitions MUST use IDs + verify-and-retry.** When calling `mcp__linear-server__save_issue` with `state=...`, ALWAYS pass `state=$STATE_<X>_ID` (the UUID), NEVER the name, when an ID is available in `$STATE_<X>_ID`. Linear's name-based matching is fuzzy and will silently route `"agent-processing"` to default `"In Progress"` if both have `statusType=started`, which can silently leave a ticket invisible to the reviewer agent. After every state-change `save_issue` call, immediately re-read with `mcp__linear-server__get_issue` and confirm `.status == "$STATE_<X>"` (the name). If it doesn't match, retry once explicitly with `state=$STATE_<X>_ID`; if still wrong, log the failure to the events file as `state-broken:<TICKET-id>:<got>→<expected>` and bail to `$STATE_BLOCKED_ID` rather than continuing in a broken state.
+10. **State transitions MUST use IDs + verify-and-retry.** When calling `configured tracker save_issue operation` with `state=...`, ALWAYS pass `state=$STATE_<X>_ID` (the UUID), NEVER the name, when an ID is available in `$STATE_<X>_ID`. Linear's name-based matching is fuzzy and will silently route `"agent-processing"` to default `"In Progress"` if both have `statusType=started`, which can silently leave a ticket invisible to the reviewer agent. After every state-change `save_issue` call, immediately re-read with `configured tracker get_issue operation` and confirm `.status == "$STATE_<X>"` (the name). If it doesn't match, retry once explicitly with `state=$STATE_<X>_ID`; if still wrong, log the failure to the events file as `state-broken:<TICKET-id>:<got>→<expected>` and bail to `$STATE_BLOCKED_ID` rather than continuing in a broken state.
 11. **Every STEP that posts a Linear "PR ready"/"merged"/"bailed" comment MUST also call `log_event` immediately after AND call `post_summary` before exiting.** Past failure mode: STEP F posted the Linear comment but neither `log_event ready` nor `post_summary` fired — you saw no Slack notification, thought the loop was dead. Treat the four closeout actions as one atomic block: state-set (with verify, rule 10), Linear comment, `log_event`, `post_summary`. If any of the four fails, the whole closeout is broken — log it and exit.
 12. **Bug + Feature tickets MUST add or update a test in `$TEST_FLOW_REPO`.** See your project's test-first policy ("Bug & Feature work — test-first") for the canonical rule. Two acceptable sequencing patterns: (A) same fire, two PRs (test PR to $TEST_FLOW_REPO + fix PR to target repo); (B) **default for this loop** — one fix PR + ONE follow-up Linear ticket titled `[QA-coverage] add $TEST_FLOW_REPO flow for <bug>` with labels `[agent, Improvement, quick-win]` referencing the original ticket. The follow-up ticket gets picked up by the next fire and lands the test in $TEST_FLOW_REPO. Path B keeps fires single-PR (no design change) while still guaranteeing the regression-prevention layer gets coverage. Docs-only / pure-refactor tickets are exempt; tickets where the bug genuinely has no surface get a unit test in the source repo + a Linear comment documenting the exemption.
 13. **Low-risk PRs auto-merge once reviewer signs off — no human "go" required.** Anchored 2026-05-20: the human-go gate adds friction on PRs whose diff cannot break production behavior (docs) or only narrows test coverage (tests, vetted by reviewer). A PR qualifies as low-risk if EVERY file in `gh pr diff <N> --name-only` matches one of two strict pattern sets (see classifier helper in STEP A):
@@ -481,10 +417,10 @@ The reviewer agent's R2 logic will see the new commit on the next reviewer fire 
 ONE Linear query — the `$AGENT_LABEL` is the eligibility gate, `$STATE_TODO` is the queue state. No assignee filter. No 6-query merge.
 
 ```
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_TODO", limit=100)
+configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_TODO", limit=100)
 ```
 
-**FILTER OUT routing-skip labels.** Linear's `list_issues` only accepts ONE `label` filter at a time, so client-side: for each returned ticket, drop it if `labels` contains `$INVESTIGATE_LABEL`. Those tickets are routed to `/investigate-run` (read-only investigation, no PRs). The implementer is NOT designed for investigation-style work — it would scope-bail at STEP C anyway, just less efficiently. Log the skip:
+**FILTER OUT routing-skip labels.** Linear's `list_issues` only accepts ONE `label` filter at a time, so client-side: for each returned ticket, drop it if `labels` contains `$INVESTIGATE_LABEL`. Those tickets are routed to `$pitcrew:investigate-run` (read-only investigation, no PRs). The implementer is NOT designed for investigation-style work — it would scope-bail at STEP C anyway, just less efficiently. Log the skip:
 
 ```
 STEP B routing-skip: <N> tickets dropped because they carry the `$INVESTIGATE_LABEL` label
@@ -498,7 +434,7 @@ STEP B query: label=$AGENT_LABEL state=$STATE_TODO → <N> candidates (<M> after
   Sample IDs (first 5): <comma-separated-IDs-or-empty>
 ```
 
-**If `<M>` (after routing-skip) is 0**, do NOT silently exit. Run a sanity probe: `list_issues(label="$AGENT_LABEL", limit=5)` (no state filter). If THAT also returns 0, either there are genuinely no agent-eligible tickets OR your MCP auth is off. Print: `"STEP B: <X> agent-labeled tickets total, 0 implementable in $STATE_TODO (after routing-skip). <Y> in other states. Exiting cleanly."` and `post_summary` exit. (Don't burn cycles re-probing every fire — the loop will keep checking.)
+**If `<M>` (after routing-skip) is 0**, do NOT silently exit. Run a sanity probe: `list_issues(label="$AGENT_LABEL", limit=5)` (no state filter). If THAT also returns 0, either there are genuinely no agent-eligible tickets OR your provider authentication is off. Print: `"STEP B: <X> agent-labeled tickets total, 0 implementable in $STATE_TODO (after routing-skip). <Y> in other states. Exiting cleanly."` and `post_summary` exit. (Don't burn cycles re-probing every fire — the loop will keep checking.)
 
 Sort the candidates by:
 1. **Has `$QUICK_WIN_LABEL`?** — yes first (highest agent-confidence)
@@ -512,7 +448,7 @@ Sort the candidates by:
 For each candidate (top of sorted list first), check its `blockedBy` relations:
 
 ```
-mcp__linear-server__get_issue(id="<candidate-id>", includeRelations=true)
+configured tracker get_issue operation(id="<candidate-id>", includeRelations=true)
 ```
 
 Look at `relations` (or whatever field surfaces `blockedBy` — fall back to comment scan for `Blocked by` references if relations are empty).
@@ -532,7 +468,7 @@ If no pickable candidate exists, call `post_summary` then exit cleanly: `"No eli
 
 After picking, before going to STEP C:
 
-1. **If the picked ticket has a `parentId`**, fetch the parent ticket's description: `mcp__linear-server__get_issue(id="<parentId>")`. The parent description often holds the master `PLAN.md` reference + overall context. Hold the parent description in mind alongside the child's.
+1. **If the picked ticket has a `parentId`**, fetch the parent ticket's description: `configured tracker get_issue operation(id="<parentId>")`. The parent description often holds the master `PLAN.md` reference + overall context. Hold the parent description in mind alongside the child's.
 
 2. **Hunt for a `PLAN.md` reference** in the child ticket description, child comments, parent description, and parent comments. Regex hint: paths like `/Users/.../PLAN.md`, `~/Documents/.../PLAN.md`, `Documents/projects/<slug>/PLAN.md`, OR markdown links like `[plan](path)`. Also check for explicit "Plan:" markers.
 
@@ -628,14 +564,14 @@ After implementation, **before committing**: append a line to the plan's Status 
 
 - Open PR: `gh pr create --title "<commit message>" --body "<2-line summary>\n\nCloses <TICKET-id>"`.
 
-- **File a `[QA-coverage]` follow-up ticket if applicable (HARD RULE 12).** If the current ticket has `$BUG_LABEL` OR is otherwise a behavior-changing feature (NOT docs-only, NOT pure refactor), create a follow-up Linear ticket via `mcp__linear-server__save_issue`:
+- **File a `[QA-coverage]` follow-up ticket if applicable (HARD RULE 12).** If the current ticket has `$BUG_LABEL` OR is otherwise a behavior-changing feature (NOT docs-only, NOT pure refactor), create a follow-up Linear ticket via `configured tracker save_issue operation`:
   - `title`: `[QA-coverage] add $TEST_FLOW_REPO flow for <one-line bug/feature summary>`
   - `description`: `Follow-up to <ORIGINAL-TICKET-id> (<one-line context>). Add a smoke flow or validation bullet in $TEST_FLOW_REPO that would catch this bug class / prove the feature works. Surface: <mcp|rest|web — best guess>. Capability: <search|cart|checkout|...>. See your project's test-first policy ("test-first in $TEST_FLOW_REPO") for the rule.`
   - `labels`: `[$AGENT_LABEL_ID, $IMPROVEMENT_LABEL_ID, $QUICK_WIN_LABEL_ID]`
   - `team`: `$LINEAR_TEAM`, `project`: `$AGENT_BACKLOG_PROJECT_ID` if set, `assignee`: `$ASSIGNEE_EMAIL`, `state`: `$STATE_TODO_ID`, `priority`: 4 (Low — coverage debt, not a regression)
   - `relatedTo`: `[<ORIGINAL-TICKET-id>]`
 
-  The next `/implementer-run` fire picks this follow-up ticket up via STEP B (it's `agent`+`Improvement`-labeled, agent-todo). The target repo will be `$TEST_FLOW_REPO` (tags `qa`, `test-flow`, `e2e`). One self-contained PR adds the flow change.
+  The next `$pitcrew:implementer-run` fire picks this follow-up ticket up via STEP B (it's `agent`+`Improvement`-labeled, agent-todo). The target repo will be `$TEST_FLOW_REPO` (tags `qa`, `test-flow`, `e2e`). One self-contained PR adds the flow change.
 
   **If the bug genuinely has no surface** (internal helper, not testable from any external surface): SKIP the follow-up ticket creation, but ADD a unit test inside the source-repo PR you just opened. Comment on the ORIGINAL ticket: `No $TEST_FLOW_REPO flow possible — bug is in <X>, no external surface. Unit test added at <file>:<line>.` That comment is the paper trail.
 
@@ -696,14 +632,14 @@ Trigger if ANY become true during STEP D:
 
 ```
 [ ] 1. State move:
-       mcp__linear-server__save_issue(id=<TICKET-id>, state="$STATE_REVIEW_ID")
+       configured tracker save_issue operation(id=<TICKET-id>, state="$STATE_REVIEW_ID")
        Then immediately:
-       mcp__linear-server__get_issue(id=<TICKET-id>)
+       configured tracker get_issue operation(id=<TICKET-id>)
        Confirm response.status == "$STATE_REVIEW". If not, retry once with state="$STATE_REVIEW_ID";
        if still wrong, log_event state-broken:<TICKET-id>:<got>→$STATE_REVIEW and bail to $STATE_BLOCKED_ID.
 
 [ ] 2. Linear comment:
-       mcp__linear-server__save_comment(issueId=<TICKET-id>, body=<<<MSG)
+       configured tracker save_comment operation(issueId=<TICKET-id>, body=<<<MSG)
        PR ready for your sanity check: <PR URL>
        Repo: <repo-name>
        Summary: <2 lines>
@@ -726,7 +662,7 @@ The checklist is literal — write all four ✓ in your final status output. Ski
 Don't pick up another ticket this run. The next fire handles the next ticket.
 
 ═══ FAILURE MODES ═══
-- Linear MCP unavailable → exit silently with "Linear MCP not available, exiting."
+- configured tracker unavailable → exit silently with "configured tracker not available, exiting."
 - GitHub API rate limit → retry once with 60s backoff, else exit.
 - Test/build failure you can't fix in 2 attempts → comment on Linear, leave PR as draft, exit.
 - Merge conflict with default branch → `git fetch origin && git merge origin/<default-branch>` (NEVER rebase). If conflicts touch >50 lines or critical config files, comment "Conflict needs human review" and exit.
@@ -737,29 +673,8 @@ Don't pick up another ticket this run. The next fire handles the next ticket.
 - Commits/PRs: conventional commits, why > what when non-trivial, no Co-Authored-By footer.
 - Code: match existing style of files you're editing.
 
-═══ SELF-PACING (only when invoked via `/loop` in dynamic mode, i.e. without a fixed interval) ═══
+═══ SCHEDULING ═══
 
-After every clean exit, if the `ScheduleWakeup` tool is available (meaning `/loop` is dynamic-paced), call it with a delay chosen by THIS rule:
-
-1. **Compute "remaining eligible candidates"** — re-run STEP B's single query: `list_issues(label="$AGENT_LABEL", state="$STATE_TODO", limit=100)`, excluding the one ticket you worked on this run (it should now be in `$STATE_PROCESSING` / `$STATE_REVIEW` / `$STATE_BLOCKED`, so the new query won't see it anyway — but exclude explicitly if needed). Blocked tickets are filtered out by state; no comment scan needed.
-
-   This count is `R` (remaining workable tickets).
-
-2. **Pick the delay:**
-   - If `R >= 1` → fast wakeup: **`delaySeconds: $FAST_WAKEUP`** (default 120 — stays in cache window, drains queue quickly).
-   - If `R == 0` → slow heartbeat: **`delaySeconds: $SLOW_HEARTBEAT`** (default 1500 — saves cost when there's nothing to do).
-
-3. **Call:**
-   ```
-   ScheduleWakeup({
-     delaySeconds: <FAST_WAKEUP or SLOW_HEARTBEAT>,
-     reason: "<R> tickets still queued, draining fast" | "queue empty, slow heartbeat",
-     prompt: "/implementer-run $PROJECT"
-   })
-   ```
-
-   Use `<<autonomous-loop-dynamic>>` as `prompt` ONLY if this `/loop` was launched with no user prompt.
-
-4. **If `ScheduleWakeup` is NOT available** (standalone invocation, OR `/loop` running on a fixed interval): do nothing extra. The fixed-interval cron handles the next fire automatically.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 Begin.

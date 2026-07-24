@@ -1,37 +1,40 @@
 ---
 name: research-run
-description: One pass of the researcher agent — scans one (repo, mode) cell for code/docs/architecture drift and records findings to a local ledger for /manager-run to ticket (paced + deduped). No longer files Linear tickets directly.
+description: Use when scanning one configured repository for high-confidence drift or hardening findings.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the researcher agent. This is one pass.
 
-Your job is **NOT to fix code** and **NOT to file Linear tickets** (filing directly across N repos × 3 modes flooded the backlog). You scan one cell of the codebase, identify high-confidence improvements, and record them to a local **findings ledger**. `/manager-run` reads the ledger and turns findings into paced, deduped Linear tickets.
+Your job is **NOT to fix code** and **NOT to file Linear tickets** (filing directly across N repos × 3 modes flooded the backlog). You scan one cell of the codebase, identify high-confidence improvements, and record them to a local **findings ledger**. `$pitcrew:manager-run` reads the ledger and turns findings into paced, deduped Linear tickets.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
+
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
 This skill is project-driven. Before doing anything else:
 
-1. Resolve project name:
-   - If invoked with an argument (e.g. `/research-run example`), use that.
-   - Else read the single line in `~/.claude/agent-loop/default.txt`.
-   - Else print the FIRST-TIME-SETUP block below and exit cleanly.
+   - If invoked with an argument (e.g. `$pitcrew:research-run example`), use that.
 
-2. Read `~/.claude/agent-loop/$PROJECT/config.json`. If missing, print FIRST-TIME-SETUP and exit.
 
-3. Required fields for this skill: `linear.use=true`, `linear.team_name`, `linear.workspace_slug`, `linear.ticket_prefix`, `linear.assignee_email`, `linear.labels.improvement`, `linear.labels.quick_win`, `github.reviewer_login`, `repos[]` (≥1 entry). If `researcher.architecture_repo` is empty, the `architecture` mode is dropped silently.
+**Required fields:** `linear.use=true`, `linear.team_name`, `linear.workspace_slug`, `linear.ticket_prefix`, `linear.assignee_email`, `linear.labels.improvement`, `linear.labels.quick_win`, `github.reviewer_login`, `repos[]` (≥1 entry). If `researcher.architecture_repo` is empty, the `architecture` mode is dropped silently.
 
-4. Initialize shell variables (run once at the top):
+**Role variables:**
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "agent-loop: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "agent-loop: config missing at $CONFIG_FILE — see pitcrew/references/SETUP.md"; exit 0; }
 
-# research-run no longer writes Linear directly — it records findings to a ledger that /manager-run
+# research-run no longer writes Linear directly — it records findings to a ledger that $pitcrew:manager-run
 # tickets. So it does NOT require linear.use. The findings ledger path:
 RESEARCH_LEDGER=$(jq -r --arg d "$CONFIG_DIR/findings" '.researcher.findings_ledger // ($d + "/research-findings.json")' "$CONFIG_FILE" | sed "s|^~|$HOME|")
 mkdir -p "$(dirname "$RESEARCH_LEDGER")"
@@ -57,23 +60,9 @@ repo_lang()           { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .lang
 all_repo_names()      { jq -r '.repos[].name' "$CONFIG_FILE"; }
 ```
 
-═══ FIRST-TIME-SETUP block (print when config is missing) ═══
-
-```
-research-run: no config found for project '<name>'.
-
-To set up:
-  1. Pick a project name (lowercase, no spaces) — e.g. 'example', 'life-tracker'.
-  2. mkdir -p ~/.claude/agent-loop/<name>/state
-  3. cp <path-to-pitcrew>/references/config.example.json ~/.claude/agent-loop/<name>/config.json
-  4. $EDITOR ~/.claude/agent-loop/<name>/config.json  (see pitcrew/references/SETUP.md)
-  5. (Optional) echo "<name>" > ~/.claude/agent-loop/default.txt
-  6. Re-run /research-run [<name>]
-```
-
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**NO LINEAR DEPENDENCY.** research-run no longer writes Linear directly — it records findings to a local ledger that `/manager-run` reads, dedups, routes, and tickets (paced). So research-run needs NO Linear binding and is UNAFFECTED by Linear MCP availability. (Historical: it filed up to 3 Improvement tickets per cell directly; across all repos × 3 modes that flooded the backlog — the manager now paces them in.)
+**NO LINEAR DEPENDENCY.** research-run no longer writes Linear directly — it records findings to a local ledger that `$pitcrew:manager-run` reads, dedups, routes, and tickets (paced). So research-run needs NO Linear binding and is UNAFFECTED by configured tracker availability. (Historical: it filed up to 3 Improvement tickets per cell directly; across all repos × 3 modes that flooded the backlog — the manager now paces them in.)
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -83,7 +72,7 @@ To set up:
 - DO NOT skip steps because you "remember" doing them last fire. Each fire is fresh; re-execute every step from STEP 0.
 - DO NOT trust conversation memory for state. State lives on disk, in Linear, in GitHub, in git — go read it directly.
 - DO NOT abort because you're "missing context". You aren't. The prompt + state files + tool calls are everything you need.
-- If you genuinely cannot proceed (corrupt state, MCP down, gh unauth'd), log ONE line, exit cleanly. The next fire will retry. NEVER halt mid-flight asking the human.
+- If you genuinely cannot proceed (corrupt state, provider unavailable, gh unauth'd), log ONE line, exit cleanly. The next fire will retry. NEVER halt mid-flight asking the human.
 - **ALWAYS read `$CONFIG_DIR/lessons.md` at the very top of the run** (if it exists). Rules under the "Researcher" section apply to every finding you consider this fire. If a rule would have skipped a finding you're about to file, skip it.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
 
@@ -225,7 +214,7 @@ For each finding produced by the analysis:
 **STEP 4. Write the surviving findings to the research ledger.**
 
 research-run does NOT file Linear tickets. It appends to a rolling **research findings ledger**
-that `/manager-run` reads (source format `research-v1`) and turns into paced, deduped Linear
+that `$pitcrew:manager-run` reads (source format `research-v1`) and turns into paced, deduped Linear
 tickets under the `research` bucket. Path: `$RESEARCH_LEDGER` (default `$CONFIG_DIR/findings/
 research-findings.json`). If absent, treat as `{"source":"research-run","updated_at":null,"findings":[]}`.
 
@@ -255,7 +244,7 @@ For each finding to record, UPSERT the ledger:
    a 5-file change is NOT quick-win; introducing a new error-class hierarchy across many sites is NOT.
 2. Write the ledger atomically (`.tmp` → `mv`), set `updated_at`. **Redact** any secret/token.
 
-`/manager-run` reads this ledger as `research-v1`: it dedups each entry against existing Linear +
+`$pitcrew:manager-run` reads this ledger as `research-v1`: it dedups each entry against existing Linear +
 its own state, routes (mostly `agent` since these are contained Improvements; a hardening finding
 in an auth/security/money file → `investigate`), and paces filing under the `research` bucket — so
 research drift drips into Linear at the loop's throughput, never a flood.
@@ -287,5 +276,9 @@ Format:
 - Linear ticket bodies: terse, factual, no emojis, no hype. Code-block snippets are fine.
 - Don't editorialize — describe the finding, cite the evidence, suggest the fix.
 - Don't suggest fixes you're <80% confident about. Better to file fewer high-quality tickets than many speculative ones.
+
+═══ SCHEDULING ═══
+
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 Begin.

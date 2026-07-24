@@ -1,25 +1,32 @@
 ---
 name: stale-sweep
-description: One pass of the stale-sweep agent — cleans up lifecycle gaps in the agent loop. Moves Linear tickets whose PRs are merged-and-closed to agent-done; closes stale bot-authored deploy PRs (superseded by newer version OR >7d aged); prunes leaked worktrees + validator artifacts + state-file backups.
+description: Use when repairing stale crew lifecycle state and pruning owned artifacts.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the stale-sweep agent. This is one pass. Your job is to clean up the gap between "PR merged" and "Linear ticket marked done" — a state-machine drift that accumulates when:
 - A human merges an agent-opened PR directly in the GitHub UI instead of replying "go" in Linear
 - Implementer crashed mid-merge before updating Linear
 - The reviewer or operator manually closed a PR without updating Linear
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-1. Resolve project name (arg → `~/.claude/agent-loop/default.txt` → exit with FIRST-TIME-SETUP).
-2. Read `~/.claude/agent-loop/$PROJECT/config.json` (or exit with FIRST-TIME-SETUP).
-3. Required fields: `linear.use=true`, full `linear.*`, `github.reviewer_login`, `github.org`.
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
+
+**Required fields:** `linear.use=true`, full `linear.*`, `github.reviewer_login`, `github.org`.
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "stale-sweep: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-[ ! -f "$CONFIG_FILE" ] && { echo "stale-sweep: config missing at $CONFIG_FILE"; exit 0; }
 
 LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
 [ "$LINEAR_USE" != "true" ] && { echo "stale-sweep requires Linear (.linear.use=true), exiting."; exit 0; }
@@ -33,7 +40,6 @@ STATE_REVIEW=$(jq -r '.linear.states.review // "agent-review"' "$CONFIG_FILE")
 STATE_BLOCKED=$(jq -r '.linear.states.blocked // "agent-blocked"' "$CONFIG_FILE")
 STATE_DONE=$(jq -r '.linear.states.done // "agent-done"' "$CONFIG_FILE")
 GH_ORG=$(jq -r '.github.org' "$CONFIG_FILE")
-STATE_DIR="$CONFIG_DIR/state"
 
 # Helpers for STEP 4 filesystem cleanup.
 repo_path()      { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .path' "$CONFIG_FILE" | sed "s|^~|$HOME|"; }
@@ -42,7 +48,7 @@ all_repo_names() { jq -r '.repos[].name' "$CONFIG_FILE"; }
 
 ═══ PRIME DIRECTIVE ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X` with the live prefix. If NEITHER family is live (or only a wrong-workspace one is): log one line `<skill>: Linear unreachable — degraded mode` and exit cleanly (a Linear-write agent does no writes; an acting agent does only Linear-independent, read-grounded work). Never bail blind, never write to the wrong workspace.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -51,7 +57,7 @@ all_repo_names() { jq -r '.repos[].name' "$CONFIG_FILE"; }
 - DO NOT hesitate because conversation context feels thin — the file you're reading IS the contract.
 - DO NOT skip steps because you "remember" doing them last fire. Each fire is fresh.
 - DO NOT trust conversation memory for state. Linear / GitHub are the source of truth.
-- If you genuinely cannot proceed (MCP down, gh unauth'd), log ONE line, exit cleanly.
+- If you genuinely cannot proceed (provider unavailable, gh unauth'd), log ONE line, exit cleanly.
 - **ALWAYS read `$CONFIG_DIR/lessons.md` at the very top of the run** (if it exists). Rules under any section may apply.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
 
@@ -71,7 +77,7 @@ all_repo_names() { jq -r '.repos[].name' "$CONFIG_FILE"; }
    | `main` / `master` (default branch) | **CLOSE** (safe — newer contains older) | **LEAVE OPEN** (possible intentional hold) |
    | `prod` / `production` / `release` / `status` (dedicated deploy branch) | **CLOSE** | **CLOSE** |
 
-   Original conservative version (2026-05-20 morning, never closed anything on default branch) was over-restrictive for the actual release-PR pattern. Loosened the same day after the first /stale-sweep fire surfaced 10 candidates all targeting `main`/`master`, none closable.
+   Original conservative version (2026-05-20 morning, never closed anything on default branch) was over-restrictive for the actual release-PR pattern. Loosened the same day after the first $pitcrew:stale-sweep fire surfaced 10 candidates all targeting `main`/`master`, none closable.
 
 ═══ EACH RUN — DO IN ORDER ═══
 
@@ -80,9 +86,9 @@ all_repo_names() { jq -r '.repos[].name' "$CONFIG_FILE"; }
 Sweep three categories of tickets, all with `$AGENT_LABEL`:
 
 ```
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_REVIEW",     limit=100)
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_PROCESSING", limit=100)
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_TODO",       limit=100)
+configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_REVIEW",     limit=100)
+configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_PROCESSING", limit=100)
+configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_TODO",       limit=100)
 ```
 
 The first set is the main concern (PRs awaiting human "go"). The second catches tickets that implementer started but crashed during. The third catches edge cases where an agent-todo ticket somehow has a merged PR (shouldn't happen but cheap to check).
@@ -119,8 +125,8 @@ For each candidate ticket, classify the matching PR (if any) into one of:
 For each ticket → action mapping from STEP 2:
 
 ```
-mcp__linear-server__save_issue(id="<TICKET-id>", state="<target-state>")
-mcp__linear-server__save_comment(issueId="<TICKET-id>", body="<comment-from-table-above>")
+configured tracker save_issue operation(id="<TICKET-id>", state="<target-state>")
+configured tracker save_comment operation(issueId="<TICKET-id>", body="<comment-from-table-above>")
 ```
 
 Do NOT modify labels. Do NOT modify assignee. Only state + a single comment.
@@ -134,7 +140,7 @@ Release workflows in `example-backend`, `example-frontend`, `example-frontend`, 
 ```sh
 # Pull all open PRs across the in-scope repos
 rtk proxy gh search prs --state=open --owner="$GH_ORG" --limit=100 \
-  --json=number,title,repository,createdAt,updatedAt,author > /tmp/stale-sweep-prs.json
+  --json=number,title,repository,createdAt,updatedAt,author > /tmp/pitcrew-stale-sweep-prs.json
 
 # Enrich with baseRefName + headRefName per candidate (search doesn't include them)
 # For each candidate PR matching the title regex + bot author:
@@ -168,7 +174,7 @@ Then apply HARD RULE 6:
 
 ```sh
 gh pr close <N> --repo <repo> --delete-branch --comment \
-  "Auto-closed by /stale-sweep: <reason>. Reopen if intentional."
+  "Auto-closed by $pitcrew:stale-sweep: <reason>. Reopen if intentional."
 ```
 
 Where `<reason>` is one of:
@@ -255,16 +261,12 @@ If everything is 0, print `"[stale-sweep] Nothing to sweep. State, PRs, and file
 - **Ticket in `$STATE_TODO` with a merged PR** — weird (someone manually merged a PR for an agent-todo ticket without going through the loop). Still sweep it to `$STATE_DONE` with a comment noting the irregularity: `Stale-sweep: PR was merged while ticket was in $STATE_TODO — closing. If this was intentional, no action needed.`
 
 ═══ FAILURE MODES ═══
-- Linear MCP unavailable → exit silently with "Linear MCP not available, exiting."
+- configured tracker unavailable → exit silently with "configured tracker not available, exiting."
 - GitHub API rate-limited → retry once with 60s backoff, else exit cleanly (no partial sweep). State unchanged for next fire to retry.
 - Single ticket update fails mid-sweep → log it, continue with the rest. Partial progress is fine.
 
-═══ CADENCE ═══
+═══ SCHEDULING ═══
 
-Recommended: once or twice a day via `/loop` with fixed interval (not dynamic — there's no urgency).
-- `/loop 6h /stale-sweep` is plenty.
-- Or invoke manually when you suspect drift (e.g. after merging several PRs by hand in the GitHub UI).
-
-This is NOT a hot-path skill. Run it sparingly.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 Begin.

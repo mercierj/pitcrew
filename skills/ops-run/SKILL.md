@@ -1,28 +1,33 @@
 ---
 name: ops-run
-description: One pass of the ops agent — an outward, observe-and-file prod-health watcher. Polls each repo's configured health endpoints + critical routes, anti-flap re-checks, and files/refreshes incident Bug tickets on confirmed+repeated degradation. Never deploys, never rolls back.
+description: Use when observing configured health endpoints and recording confirmed degradation.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the ops agent. This is one pass. You are an **outward** agent: you watch RUNNING
 production and file tickets. You **observe and file only** — you never deploy, never roll
 back, never mutate prod. Rollback is the releaser's job (its smoke gate); fixes are the
 implementer's. Your output is an accurate, de-duplicated, anti-flap incident signal.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-1. Resolve project name (arg → `~/.claude/agent-loop/default.txt` → exit with FIRST-TIME-SETUP).
-2. Read `~/.claude/agent-loop/$PROJECT/config.json` (or exit with FIRST-TIME-SETUP).
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
+
 3. Required: `repos[]` with at least one repo carrying a `health` block. If none has one,
    exit cleanly: `ops-run: no repos with a health block configured — nothing to watch.`
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "ops-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "ops-run: config missing at $CONFIG_FILE — see pitcrew/references/SETUP.md"; exit 0; }
 
 SLACK_WEBHOOK_URL=$(jq -r '.slack.ops_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
 SLACK_USER_MENTION=$(jq -r '.slack.user_mention // empty' "$CONFIG_FILE")
@@ -42,28 +47,9 @@ health_field() { jq -r --arg n "$1" --arg f "$2" '.repos[] | select(.name==$n) |
 health_routes() { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .health.critical_routes // [] | .[]' "$CONFIG_FILE"; }
 ```
 
-═══ FIRST-TIME-SETUP block ═══
-
-```
-ops-run: no config found for project '<name>'.
-
-Setup: see pitcrew/references/SETUP.md. Required for ops-run:
-  - At least one repos[] entry with a `health` block:
-      "health": {
-        "dev_url":  "https://<svc>.dev.example.com/health",
-        "prod_url": "https://<svc>.example.com/health",
-        "critical_routes": ["/api/v1/<route>"],   // optional
-        "expect_body": "ok",                        // optional
-        "anti_flap_rechecks": 3,                    // optional
-        "recheck_delay_seconds": 20                 // optional
-      }
-  - linear.* (for filing incident tickets)
-  - (Optional) slack.ops_webhook_url for incident alerts
-```
-
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X`. **Degraded mode for ops specifically:** if no Linear binding is live, you may STILL poll health (Linear-independent) and Slack-alert on a confirmed outage, but you cannot file/dedup tickets — log `ops-run: Linear unreachable — health polled, ticket filing deferred` and skip the ticket step. Never bail blind.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
 - This file is the complete instruction set. Self-contained, deterministic, fresh each fire.
 - DO NOT pause for confirmation. Auto mode is implied.
@@ -146,7 +132,7 @@ Print one line per endpoint: `[ops] <repo>:<env> <healthy|DEGRADED(n/n fails)> <
 
 **STEP 3. File a confirmed incident (dedup first).**
 
-1. **Dedup:** `<LINEAR>__list_issues(team=$LINEAR_TEAM, query="[incident] <repo> <env>")`,
+1. **Dedup:** `configured tracker list_issues operation(team=$LINEAR_TEAM, query="[incident] <repo> <env>")`,
    exclude Done/Canceled. Open match → comment, don't refile; backfill `open_incident`.
 2. **Create** (no open match):
    - title: `[incident] <repo> <env> degraded — <one-line symptom>` (e.g. `health 503` / `timeout` / `/api/v1/shop/sync 500`)
@@ -172,11 +158,9 @@ Print one line per endpoint: `[ops] <repo>:<env> <healthy|DEGRADED(n/n fails)> <
 [ops:$PROJECT] probed <E> endpoints — <H> healthy, <D> degraded (<F> incidents filed, <R> recovered, <B> blips absorbed).
 ```
 
-═══ CADENCE ═══
+═══ SCHEDULING ═══
 
-Tight: `/loop 10m /ops-run` (or `/loop 15m`). Fast enough to catch an outage within a couple
-of fires, slow enough that anti-flap rechecks don't hammer endpoints. Idle (all-healthy)
-fires are cheap and post nothing to Slack unless a recovery happened.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 - `curl` unavailable / DNS broken on the runner → RUNNER problem, not a prod outage. Log one

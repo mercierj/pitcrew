@@ -1,26 +1,31 @@
 ---
 name: validator-run
-description: One pass of the validator agent — tests an open agent-authored PR locally (Playwright for frontend-visual, link/build-check for docs), posts a verdict, gates the implementer's "Pending your go" list on validator-passed.
+description: Use when validating one eligible change locally before merge.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the validator agent. Your job is to actually test PRs the implementer agent opened, before they get merged. Reviewer agent confirms the CODE is fine; you confirm the BEHAVIOR is fine.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-1. Resolve project name (arg → `~/.claude/agent-loop/default.txt` → exit with FIRST-TIME-SETUP).
-2. Read `~/.claude/agent-loop/$PROJECT/config.json` (or exit with FIRST-TIME-SETUP).
-3. Required fields: `linear.use=true`, `github.reviewer_login`, `github.org`, `repos[]` (≥1).
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
+
+**Required fields:** `linear.use=true`, `github.reviewer_login`, `github.org`, `repos[]` (≥1).
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "validator-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
 WORKTREE_ROOT="/tmp/agent-loop-validator/$PROJECT"
 ARTIFACTS_ROOT="/tmp/agent-loop-validator-artifacts/$PROJECT"
-mkdir -p "$STATE_DIR" "$WORKTREE_ROOT" "$ARTIFACTS_ROOT"
-[ ! -f "$CONFIG_FILE" ] && { echo "validator-run: config missing at $CONFIG_FILE"; exit 0; }
 
 LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
 [ "$LINEAR_USE" != "true" ] && { echo "validator-run requires Linear (.linear.use=true), exiting."; exit 0; }
@@ -89,9 +94,9 @@ If `viewports` is missing, the validator uses the default `[mobile, tablet, desk
 
 ═══ PRIME DIRECTIVE ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X` with the live prefix. If NEITHER family is live (or only a wrong-workspace one is): log one line `<skill>: Linear unreachable — degraded mode` and exit cleanly (a Linear-write agent does no writes; an acting agent does only Linear-independent, read-grounded work). Never bail blind, never write to the wrong workspace.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `/validator-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (validate that PR (resolve from the ticket's linked PR, or the PR ref directly) via the normal validation buckets, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
+**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `$pitcrew:validator-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (validate that PR (resolve from the ticket's linked PR, or the PR ref directly) via the normal validation buckets, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
@@ -151,7 +156,7 @@ Read the JSON. If corrupt, back up to `<file>.bak.<ts>` and reinitialize.
 Query Linear: tickets in `$STATE_REVIEW` with label `$AGENT_LABEL`:
 
 ```
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_REVIEW", limit=50)
+configured tracker list_issues operation(label="$AGENT_LABEL", state="$STATE_REVIEW", limit=50)
 ```
 
 For each ticket:
@@ -662,7 +667,7 @@ Write `summary.md`:
 
 2. **Linear comment.** Find the ticket via `gh pr view <N> --json body` and parsing `Closes <TICKET-id>` from the body, OR re-derive from PR title prefix. Then:
    ```
-   mcp__linear-server__save_comment(issueId="<TICKET-id>", body="<contents of summary.md>")
+   configured tracker save_comment operation(issueId="<TICKET-id>", body="<contents of summary.md>")
    ```
 
 **STEP 9. Update state.**
@@ -689,7 +694,7 @@ Trim `history` to last 100 entries. Write atomically.
 
 ═══ FAILURE MODES ═══
 
-- Linear MCP down → exit silently, retry next fire.
+- configured tracker down → exit silently, retry next fire.
 - `gh` unauth'd → exit with one-line.
 - Playwright install fails → verdict = `inconclusive`, post and exit. (Next fire retries.)
 - Port collision (port already in use) → kill existing process if it's a known dev-server pattern, else verdict = `inconclusive` with reason.
@@ -709,11 +714,9 @@ Three buckets in the digest now:
 
 (The integration logic lives in implementer-run.md, not here. This skill just produces the verdict.)
 
-═══ CADENCE ═══
+═══ SCHEDULING ═══
 
-Recommended: `/loop 10m /validator-run` — slightly faster than implementer (15min) so PRs get validated soon after they're opened. Or `/loop /validator-run` for self-paced.
-
-Each fire validates ONE PR (sequential to avoid port collisions). With ~5 in-flight PRs, all get validated within 50min of opening.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ TONE ═══
 - Verdicts: terse, factual. PASSED ✓ / FAILED ✗ / INCONCLUSIVE ⏸. No fluff.

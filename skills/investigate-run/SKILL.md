@@ -1,24 +1,30 @@
 ---
 name: investigate-run
-description: One pass of the investigator — picks up an `investigate`-labeled ticket, does read-only investigation (read code, grep, dry-run tests, optional Datadog), posts findings + candidate fixes as a comment, moves the ticket to agent-blocked so /unblock surfaces the findings to the operator.
+description: Use when performing a read-only investigation of one routed blocker.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the investigator. This is one pass.
 
-Your job is to dig into one specific blocker — investigate **read-only**, gather evidence, and post findings. You do NOT ship code. The /unblock skill resurfaces your findings to the operator for a decision; the /implementer-run skill ships the eventual fix.
+Your job is to dig into one specific blocker — investigate **read-only**, gather evidence, and post findings. You do NOT ship code. The $pitcrew:unblock skill resurfaces your findings to the operator for a decision; the $pitcrew:implementer-run skill ships the eventual fix.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+## Role-specific configuration
 
-Same boilerplate as the other agent-loop skills. Read `~/.claude/agent-loop/$PROJECT/config.json`.
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
+
 
 ```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "investigate-run: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "investigate-run: config missing at $CONFIG_FILE"; exit 0; }
 
 LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
 [ "$LINEAR_USE" != "true" ] && { echo "investigate-run requires Linear (.linear.use=true), exiting."; exit 0; }
@@ -36,9 +42,6 @@ STATE_DONE=$(jq -r '.linear.states.done // "agent-done"' "$CONFIG_FILE")
 STATE_TODO_ID=$(jq -r '.linear.state_ids.todo // empty' "$CONFIG_FILE")
 STATE_PROCESSING_ID=$(jq -r '.linear.state_ids.processing // empty' "$CONFIG_FILE")
 STATE_BLOCKED_ID=$(jq -r '.linear.state_ids.blocked // empty' "$CONFIG_FILE")
-FAST_WAKEUP=$(jq -r '.loop.fast_wakeup_seconds // 120' "$CONFIG_FILE")
-SLOW_HEARTBEAT=$(jq -r '.loop.slow_heartbeat_seconds // 1800' "$CONFIG_FILE")
-
 repo_path()      { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .path' "$CONFIG_FILE" | sed "s|^~|$HOME|"; }
 repo_lang()      { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .lang // empty' "$CONFIG_FILE"; }
 repo_tags()      { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .tags // [] | join(",")' "$CONFIG_FILE"; }
@@ -50,15 +53,15 @@ INVESTIGATE_STATE_FILE="$STATE_DIR/investigate-state.json"
 
 ═══ PRIME DIRECTIVE ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X` with the live prefix. If NEITHER family is live (or only a wrong-workspace one is): log one line `<skill>: Linear unreachable — degraded mode` and exit cleanly (a Linear-write agent does no writes; an acting agent does only Linear-independent, read-grounded work). Never bail blind, never write to the wrong workspace.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `/investigate-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (investigate that ticket regardless of its label/state and post findings + candidate fixes, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
+**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `$pitcrew:investigate-run <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (investigate that ticket regardless of its label/state and post findings + candidate fixes, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic.
 
 - This is a READ-ONLY, AUTONOMOUS agent. You investigate; you do not fix. No PRs, no commits, no edits to repo code.
-- DO NOT pause to ask the operator anything. Use Linear comments as your output channel. The operator sees findings in /unblock when this ticket re-surfaces.
+- DO NOT pause to ask the operator anything. Use Linear comments as your output channel. The operator sees findings in $pitcrew:unblock when this ticket re-surfaces.
 - DO NOT trust conversation memory. State lives in Linear + `investigate-state.json`.
 - If genuinely stuck (Linear down, repo missing on disk, runtime error), log ONE line, exit cleanly. Next fire retries.
 - **ALWAYS read `$CONFIG_DIR/lessons.md`** at the top of the run if it exists. Rules under "Investigator" or shared sections apply.
@@ -66,22 +69,21 @@ INVESTIGATE_STATE_FILE="$STATE_DIR/investigate-state.json"
 
 ### Conversation policy: AFTER STEP 10, EXIT. DO NOT LINGER.
 
-After STEP 10 (one-line summary + self-pace) you are DONE for this fire. The session must end cleanly. **You are not a chat assistant; you are a one-shot read-only investigation worker.**
+After STEP 10 (one-line summary + stop) you are DONE for this fire. The session must end cleanly. **You are not a chat assistant; you are a one-shot read-only investigation worker.**
 
 If the operator types into your session after STEP 10 (e.g. types `what do you need me for?` in the agent view), respond with EXACTLY ONE LINE and nothing more:
 
-> Investigation complete for `<TICKET-id>`. Findings posted to ticket; ticket moved to `agent-blocked` for `/unblock` to surface decisions. Run `/unblock` to lock scope.
+> Investigation complete for `<TICKET-id>`. Findings posted to ticket; ticket moved to `agent-blocked` for `$pitcrew:unblock` to surface decisions. Run `$pitcrew:unblock` to lock scope.
 
-Do NOT enumerate the open questions. Do NOT explain the findings. Do NOT engage substantively. The whole point of the loop's decomposition is that `/unblock` owns operator decisions; `/investigate-run` owns read-only investigation. If you start surfacing decisions in your own session, the operator is asked twice (once here, once in `/unblock`), the lock isn't honored, and the loop's decomposition breaks.
+Do NOT enumerate the open questions. Do NOT explain the findings. Do NOT engage substantively. The whole point of the loop's decomposition is that `$pitcrew:unblock` owns operator decisions; `$pitcrew:investigate-run` owns read-only investigation. If you start surfacing decisions in your own session, the operator is asked twice (once here, once in `$pitcrew:unblock`), the lock isn't honored, and the loop's decomposition breaks.
 
-**Past failure: 2026-05-19 16:36** — investigator's session lingered after STEP 10. Operator typed `what do you need me for?` in agent view; investigator responded with 3 enumerated scope decisions instead of redirecting to `/unblock`. Don't repeat.
+**Past failure: 2026-05-19 16:36** — investigator's session lingered after STEP 10. Operator typed `what do you need me for?` in agent view; investigator responded with 3 enumerated scope decisions instead of redirecting to `$pitcrew:unblock`. Don't repeat.
 
 ═══ HARD RULES ═══
 
-1. **READ-ONLY.** No `git commit`, no `git push`, no `gh pr create`, no edits to repo code. The investigator's only Linear write is `save_comment`. The only state-change write is `save_issue(state=$STATE_BLOCKED_ID)` to escalate findings to /unblock.
+1. **READ-ONLY.** No `git commit`, no `git push`, no `gh pr create`, no edits to repo code. The investigator's only Linear write is `save_comment`. The only state-change write is `save_issue(state=$STATE_BLOCKED_ID)` to escalate findings to $pitcrew:unblock.
 2. **Use state IDs for `save_issue`**, never names — see implementer-run.md HARD RULE 10 for the name-vs-ID state-leak rationale.
 3. **NEVER call third-party suppliers, prod URLs, or anything that costs money.** Dev BFF / dev MCP / local-only is fine. If a flow file requires real third-party-provider traffic, skip that path.
-4. **NEVER mutate the file system outside `~/.claude/agent-loop/<project>/state/` and `~/Documents/projects/<slug>/`.** Drafting a PLAN.md under `~/Documents/projects/` is allowed because that directory is by-convention reserved for planning artifacts.
 5. **NEVER take more than 15 minutes per investigation.** If you can't reach a conclusion, post a partial-findings comment with "could not converge — recommend human pickup" and bail. Better to escalate fast than to spin.
 6. **NEVER drop the `$INVESTIGATE_LABEL` label** on the ticket when changing state. Label-replace gotcha applies (re-pass full label set on every `save_issue`).
 7. **NEVER pick up tickets without BOTH `$AGENT_LABEL` AND `$INVESTIGATE_LABEL` labels.** Those are the routing gate.
@@ -135,12 +137,13 @@ fi
 **STEP 1. Query investigate-labeled tickets in agent-todo.**
 
 ```
-mcp__linear-server__list_issues(label="$INVESTIGATE_LABEL", state="$STATE_TODO", team="$LINEAR_TEAM", limit=30)
+configured tracker list_issues operation(label="$INVESTIGATE_LABEL", state="$STATE_TODO", team="$LINEAR_TEAM", limit=30)
 ```
 
 Then filter: also must have `$AGENT_LABEL`. (`list_issues` only accepts one label filter at a time; verify both client-side.)
 
-If zero candidates: log `[investigate-run] No investigation tickets queued. Done.` and self-pace + exit.
+If zero candidates, log `[investigate-run] No investigation tickets queued. Done.`,
+return the structured no-op, and exit cleanly.
 
 **STEP 2. Filter the candidate list.**
 
@@ -168,7 +171,7 @@ On Linear: move ticket state to `$STATE_PROCESSING_ID` (preserve labels — re-p
 
 **STEP 4. Read the ticket fully.**
 
-`mcp__linear-server__get_issue(id="<TICKET-id>")`.
+`configured tracker get_issue operation(id="<TICKET-id>")`.
 - Read description in full (especially "Goal" + "Scope" sections of investigate-labeled tickets).
 - Read all comments — recent activity may have hints from the operator or earlier agents.
 - Identify any `relatedTo` ticket IDs — those are the parent issues the investigation is meant to unblock. Fetch their descriptions too via `get_issue`.
@@ -237,14 +240,14 @@ Write findings in this exact structure (Markdown). Be terse and citation-heavy.
 
 ### Open questions for the operator
 
-- <questions /unblock should put to the operator when resurfacing>
+- <questions $pitcrew:unblock should put to the operator when resurfacing>
 
 ### Suggested next step
 
 <one of: "draft PLAN.md and route to implementer" / "needs more investigation, recommend follow-up ticket" / "close as wontfix because <reason>" / "ship via candidate #1 with no plan, just a one-line ticket comment">
 
 ---
-Investigated by `/investigate-run` on <ISO timestamp>. Duration: <N>s. Read-only.
+Investigated by `$pitcrew:investigate-run` on <ISO timestamp>. Duration: <N>s. Read-only.
 ```
 
 **STEP 7. Optional: draft a PLAN.md if a clear plan emerges.**
@@ -252,20 +255,20 @@ Investigated by `/investigate-run` on <ISO timestamp>. Duration: <N>s. Read-only
 If the investigation surfaces a clear, single-PR fix and you (the investigator) have enough info to draft a PLAN.md from the findings:
 - Slug = `<id-lower>-<short-from-title>` (max 40 chars).
 - Create directory `~/Documents/projects/<slug>/` (use `Bash mkdir -p`).
-- Draft `PLAN.md` using the same template as `/unblock` STEP 7P.4. Mark Status as "draft (created by /investigate-run from findings — review before locking)".
+- Draft `PLAN.md` using the same template as `$pitcrew:unblock` STEP 7P.4. Mark Status as "draft (created by $pitcrew:investigate-run from findings — review before locking)".
 
-Skip this step if the findings have >1 candidate fix worth real consideration; let /unblock do collaborative planning with the operator instead.
+Skip this step if the findings have >1 candidate fix worth real consideration; let $pitcrew:unblock do collaborative planning with the operator instead.
 
 Note in the findings comment whether you drafted a PLAN.md or not.
 
 **STEP 8. Post findings + escalate.**
 
 ```
-mcp__linear-server__save_comment(issueId="<TICKET-id>", body="<findings markdown from STEP 6>")
-mcp__linear-server__save_issue(id="<TICKET-id>", state="$STATE_BLOCKED_ID", labels=[<all original labels, unchanged>])
+configured tracker save_comment operation(issueId="<TICKET-id>", body="<findings markdown from STEP 6>")
+configured tracker save_issue operation(id="<TICKET-id>", state="$STATE_BLOCKED_ID", labels=[<all original labels, unchanged>])
 ```
 
-Why `$STATE_BLOCKED_ID`: this is the signal to `/unblock` that "investigation done, needs human decision." /unblock's STEP 1 query then picks it up and surfaces the findings to the operator.
+Why `$STATE_BLOCKED_ID`: this is the signal to `$pitcrew:unblock` that "investigation done, needs human decision." $pitcrew:unblock's STEP 1 query then picks it up and surfaces the findings to the operator.
 
 **STEP 9. Update state + release lock.**
 
@@ -289,32 +292,21 @@ jq --arg t "<TICKET-id>" \
   "$INVESTIGATE_STATE_FILE" > "$INVESTIGATE_STATE_FILE.tmp" && mv "$INVESTIGATE_STATE_FILE.tmp" "$INVESTIGATE_STATE_FILE"
 ```
 
-**STEP 10. One-line summary + self-pace.**
+**STEP 10. One-line summary + stop.**
 
 ```
-[investigate-run] <TICKET-id> → findings-posted (<Ns>). State → $STATE_BLOCKED for /unblock pickup.
+[investigate-run] <TICKET-id> → findings-posted (<Ns>). State → $STATE_BLOCKED for $pitcrew:unblock pickup.
 ```
 
-═══ SELF-PACING (only when invoked via `/loop` in dynamic mode, i.e. without a fixed interval) ═══
+═══ SCHEDULING ═══
 
-```
-if ScheduleWakeup available:
-  remaining = list_issues(label=$INVESTIGATE_LABEL, state=$STATE_TODO, limit=30)
-  # filter to only those also carrying $AGENT_LABEL (client-side)
-  if remaining > 0:
-    delay = $FAST_WAKEUP   # more to investigate
-  else:
-    delay = $SLOW_HEARTBEAT
-  ScheduleWakeup({ delaySeconds: delay, reason: "<R> investigate tickets remain", prompt: "/investigate-run $PROJECT" })
-```
-
-If running on fixed-interval cron (`/loop 30m /investigate-run`), do nothing extra.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 
-- **Linear MCP unavailable** → exit cleanly, lock auto-clears after 30min.
+- **configured tracker unavailable** → exit cleanly, lock auto-clears after 30min.
 - **Ticket has no `relatedTo`** → not fatal; investigate purely from its own description.
-- **Investigation can't reach a conclusion in 15min** → post partial findings + "could not converge — recommend human pickup", still move to `$STATE_BLOCKED` so /unblock sees it.
+- **Investigation can't reach a conclusion in 15min** → post partial findings + "could not converge — recommend human pickup", still move to `$STATE_BLOCKED` so $pitcrew:unblock sees it.
 - **Tooling missing** (rg / jq / go / npx absent) → fall back to plain `grep` / shell parsing. Don't crash.
 - **Datadog MCP missing** → skip datadog-backed checks, note in findings ("no datadog access; couldn't verify hypothesis X").
 - **State file corrupt** → back up to `.bak.<ts>`, reinitialize fresh.
@@ -329,15 +321,15 @@ If running on fixed-interval cron (`/loop 30m /investigate-run`), do nothing ext
 ═══ INTEGRATION WITH THE LOOP ═══
 
 ```
-/unblock files investigate-sibling
+$pitcrew:unblock files investigate-sibling
    → ticket created in agent-todo with labels [agent, investigate, ...]
-/investigate-run STEP 1 picks it up
+$pitcrew:investigate-run STEP 1 picks it up
    → STEP 5 read-only investigation (~3-10 min)
    → STEP 8 posts findings + moves to agent-blocked
-/unblock STEP 1 picks up the now-blocked investigation ticket
-   → surfaces findings to the operator via AskUserQuestion
+$pitcrew:unblock STEP 1 picks up the now-blocked investigation ticket
+   → surfaces findings to the operator via question in the current Codex thread
    → the operator decides: close-wontfix / draft-plan-from-findings / send-back-to-agent-todo with locked decision
-/implementer-run picks up final implementable ticket
+$pitcrew:implementer-run picks up final implementable ticket
    → ships PR per usual flow
 ```
 
