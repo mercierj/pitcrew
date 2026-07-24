@@ -147,6 +147,19 @@ class CliTest(unittest.TestCase):
                 json.loads(line)
                 for line in history_path.read_text(encoding="utf-8").splitlines()
             ]
+            self.assertEqual(
+                ["noop", "success"],
+                [record["outcome"] for record in history],
+            )
+            overlap = history[0]
+            self.assertEqual(
+                "research-run already running",
+                json.loads(overlap["summary"])["reason"],
+            )
+            for record in history:
+                self.assertTrue(record["started_at"].endswith("Z"))
+                self.assertTrue(record["finished_at"].endswith("Z"))
+                self.assertGreaterEqual(record["duration_ms"], 0)
             latest = history[-1]
             self.assertEqual("research-run", latest["skill"])
             self.assertEqual("success", latest["outcome"])
@@ -201,6 +214,49 @@ class CliTest(unittest.TestCase):
             latest = history[-1]
             self.assertEqual("failed", latest["outcome"])
             self.assertEqual(17, latest["exit_code"])
+
+    def test_scheduled_runner_records_command_launch_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            codex_home = root / ".codex"
+            secret = "do-not-leak-this-command-path"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(codex_home),
+                "PITCREW_LOCK_ROOT": str(root / "locks"),
+                "CODEX_BIN": str(root / secret),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(127, result.returncode)
+            self.assertEqual("pitcrew lock: failed to launch command\n", result.stderr)
+            self.assertNotIn(secret, result.stderr)
+            history_path = codex_home / "pitcrew/getbill/history.jsonl"
+            self.assertTrue(history_path.is_file())
+            history = [
+                json.loads(line)
+                for line in history_path.read_text(encoding="utf-8").splitlines()
+            ]
+            latest = history[-1]
+            self.assertEqual("failed", latest["outcome"])
+            self.assertIsNone(latest["exit_code"])
+            self.assertEqual(
+                "No bounded final summary was produced.",
+                latest["summary"],
+            )
+            self.assertNotIn(secret, latest["summary"])
 
     def test_scheduled_runner_reuses_unlocked_file_after_crash(self):
         with tempfile.TemporaryDirectory() as temp:

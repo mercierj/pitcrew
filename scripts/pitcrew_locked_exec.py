@@ -93,9 +93,28 @@ def main() -> int:
             return 0
 
         started_monotonic = time.monotonic_ns()
-        args.summary_file.unlink(missing_ok=True)
-        os.set_inheritable(descriptor, True)
-        child = subprocess.Popen(command, pass_fds=(descriptor,))
+        try:
+            args.summary_file.unlink(missing_ok=True)
+            os.set_inheritable(descriptor, True)
+            child = subprocess.Popen(command, pass_fds=(descriptor,))
+        except OSError:
+            HistoryStore(args.history_file).append(
+                {
+                    "project": args.project,
+                    "skill": args.skill,
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                    "duration_ms": (
+                        time.monotonic_ns() - started_monotonic
+                    )
+                    // 1_000_000,
+                    "outcome": "failed",
+                    "exit_code": None,
+                    "summary": NO_SUMMARY,
+                }
+            )
+            print("pitcrew lock: failed to launch command", file=sys.stderr)
+            return 127
 
         def forward(signum: int, _frame: object) -> None:
             if child.poll() is None:
