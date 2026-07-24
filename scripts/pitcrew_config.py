@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,15 @@ def validate(config: Mapping[str, Any]) -> None:
 
     if not isinstance(config.get("repos"), list):
         raise ConfigError("repos must be an array")
+    for index, repository in enumerate(config["repos"]):
+        if not isinstance(repository, Mapping):
+            raise ConfigError(f"repos[{index}] must be an object")
+        for key in ("name", "path"):
+            value = repository.get(key)
+            if not isinstance(value, str) or not value:
+                raise ConfigError(f"repos[{index}].{key} must be a non-empty string")
+        if any(unicodedata.category(character).startswith("C") for character in repository["path"]):
+            raise ConfigError(f"repos[{index}].path must not contain control characters")
     release = config.get("release", {})
     if not isinstance(release, Mapping):
         raise ConfigError("release must be an object")
@@ -241,6 +251,70 @@ def _open_runtime_project(project: str, values: Mapping[str, str]) -> int:
         os.close(root_fd)
 
 
+def _open_runtime_project_for_read(project: str, values: Mapping[str, str]) -> int:
+    if not PROJECT_NAME.fullmatch(project):
+        raise ConfigError("project_name must match ^[a-z0-9][a-z0-9_-]*$")
+    codex_home = values.get("CODEX_HOME")
+    if codex_home:
+        anchor = Path(codex_home).expanduser()
+        components = ("pitcrew", project)
+    else:
+        home = values.get("HOME")
+        if not home:
+            raise ConfigError("HOME or CODEX_HOME is required")
+        anchor = Path(home).expanduser()
+        components = (".codex", "pitcrew", project)
+
+    descriptor: int | None = None
+    try:
+        descriptor = _open_absolute_directory(anchor)
+        for component in components:
+            next_descriptor = _open_directory_at(descriptor, component, create=False)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise ConfigError("runtime config path must not be a symlink or missing") from error
+
+
+def load_runtime_config(
+    project: str, env: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    values = os.environ if env is None else env
+    project_fd = _open_runtime_project_for_read(project, values)
+    try:
+        try:
+            config_fd = os.open(
+                "config.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=project_fd
+            )
+            with os.fdopen(config_fd, "r", encoding="utf-8") as config_file:
+                config = json.load(config_file)
+        except OSError as error:
+            raise ConfigError("runtime config path must not be a symlink or missing") from error
+    finally:
+        os.close(project_fd)
+    validate(config)
+    return dict(config)
+
+
+def configured_repo_path(config: Mapping[str, Any], project: str) -> str:
+    repositories = config["repos"]
+    selected = next(
+        (repository for repository in repositories if repository["name"] == project),
+        repositories[0] if repositories else None,
+    )
+    if selected is None:
+        raise ConfigError("repos must contain a configured repository")
+    path = selected["path"]
+    if path == "~":
+        return str(Path.home())
+    if path.startswith("~/"):
+        return str(Path.home() / path[2:])
+    return path
+
+
 def legacy_config_paths(
     project: str, env: Mapping[str, str] | None = None
 ) -> tuple[Path, Path]:
@@ -302,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
     init_parser.add_argument("--project", required=True)
     migrate_parser = subparsers.add_parser("migrate")
     migrate_parser.add_argument("--project", required=True)
+    repo_parser = subparsers.add_parser("repo")
+    repo_parser.add_argument("--project", required=True)
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
@@ -314,6 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Migrating legacy config from {source} to {destination}")
         destination = migrate_legacy(args.project)
         print(f"Migrated config to {destination}")
+        return 0
+    if args.command == "repo":
+        print(configured_repo_path(load_runtime_config(args.project), args.project))
         return 0
     destination = write_project(root / "profiles" / f"{args.profile}.json", args.project)
     print(f"Created {destination}")

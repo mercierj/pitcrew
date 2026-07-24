@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.pitcrew_config import (
     ConfigError,
     _write_exclusive_config,
+    load_runtime_config,
     load_profile,
     migrate_legacy,
     runtime_root,
@@ -133,6 +134,50 @@ class ConfigTest(unittest.TestCase):
                     validate(malformed)
         with self.assertRaisesRegex(ConfigError, "config must be an object"):
             validate([])
+
+    def test_repositories_require_non_empty_name_and_path(self):
+        valid = {
+            "schema_version": 1,
+            "project_name": "example",
+            "providers": {"forge": "github", "tracker": "linear"},
+            "repos": [{"name": "example", "path": "/tmp/example"}],
+            "release": {"autonomy": "off"},
+            "safety": {
+                "allow_database_writes": False,
+                "allow_destructive_git": False,
+                "allow_secret_reads": False,
+            },
+        }
+        for repository in (None, [], {}, {"name": "", "path": "/tmp/example"}, {"name": "example", "path": ""}):
+            with self.subTest(repository=repository):
+                invalid = {**valid, "repos": [repository]}
+                with self.assertRaisesRegex(ConfigError, r"repos\[0\]"):
+                    validate(invalid)
+
+    def test_load_runtime_config_rejects_symlinked_runtime_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            outside = root / "outside"
+            outside.mkdir()
+            codex_home = root / "codex"
+            runtime = codex_home / "pitcrew"
+            runtime.parent.mkdir()
+            runtime.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ConfigError, "symlink"):
+                load_runtime_config("getbill", {"CODEX_HOME": str(codex_home)})
+
+            runtime.unlink()
+            runtime.mkdir()
+            (runtime / "getbill").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ConfigError, "symlink"):
+                load_runtime_config("getbill", {"CODEX_HOME": str(codex_home)})
+
+            (runtime / "getbill").unlink()
+            project = runtime / "getbill"
+            project.mkdir()
+            (project / "config.json").symlink_to(root / "config.json")
+            with self.assertRaisesRegex(ConfigError, "symlink"):
+                load_runtime_config("getbill", {"CODEX_HOME": str(codex_home)})
 
     def test_cli_reports_malformed_json_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp:

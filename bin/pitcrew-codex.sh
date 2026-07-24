@@ -1,53 +1,84 @@
-#!/bin/bash
-# pitcrew-codex.sh — run ONE pitcrew skill as a single headless Codex pass.
-#
-# Codex has no `/loop`, so this is what cron fires on a cadence (the Claude Code
-# install uses `/loop` instead). See docs/CODEX.md for the crontab.
-#
-# Usage:  pitcrew-codex.sh <skill> [project]
-#
-# Env overrides:
-#   CODEX_BIN      path to the codex CLI            (default: codex on PATH)
-#   PITCREW_HOME   shared runtime root              (default: ~/.claude/agent-loop)
-#   CODEX_SANDBOX  read-only|workspace-write|danger-full-access (default: workspace-write)
-#
-# Sandbox note: workspace-write lets the agent write the configured repos + the runtime
-# dir, with network OFF. Skills that need network (e.g. `gh`/curl against an API) want a
-# Codex profile that re-enables it, or CODEX_SANDBOX=danger-full-access. research-run /
-# qa-run do their core work locally and run fine sandboxed.
+#!/usr/bin/env bash
+# Run one bounded Pitcrew skill through Codex without changing its safety policy.
 
-set -uo pipefail
+set -euo pipefail
 
-SKILL="${1:?usage: pitcrew-codex.sh <skill> [project]}"
-HOME_DIR="${PITCREW_HOME:-$HOME/.claude/agent-loop}"
-PROJECT="${2:-$(cat "$HOME_DIR/default.txt" 2>/dev/null || echo example)}"
-CODEX_BIN="${CODEX_BIN:-codex}"
-SANDBOX="${CODEX_SANDBOX:-workspace-write}"
-PROMPT_FILE="$HOME/.codex/prompts/$SKILL.md"
-PROJECT_DIR="$HOME_DIR/$PROJECT"
+readonly SKILLS=(
+  coverage-run dev-verify-run implementer-run investigate-run manager-run ops-run
+  qa-run releaser-run research-run reviewer-run stale-sweep unblock validator-run
+)
 
-command -v "$CODEX_BIN" >/dev/null 2>&1 || { echo "pitcrew-codex: codex CLI not found ('$CODEX_BIN'). Set CODEX_BIN to the binary path."; exit 1; }
-[ -f "$PROMPT_FILE" ] || { echo "pitcrew-codex: no prompt at $PROMPT_FILE — run ./bin/install-codex.sh first."; exit 1; }
-[ -f "$PROJECT_DIR/config.json" ] || { echo "pitcrew-codex: no config at $PROJECT_DIR/config.json — run ./bin/configure.sh $PROJECT."; exit 1; }
+usage() {
+  echo "usage: pitcrew-codex.sh <skill> [project] [--dry-run]" >&2
+}
 
-# Make every configured repo path (plus the runtime dir) a writable root for the sandbox.
-ADD_DIRS=(--add-dir "$PROJECT_DIR")
-while IFS= read -r p; do
-  p="${p/#\~/$HOME}"
-  [ -n "$p" ] && [ -d "$p" ] && ADD_DIRS+=(--add-dir "$p")
-done < <(jq -r '.repos[].path // empty' "$PROJECT_DIR/config.json" 2>/dev/null)
+is_allowed_skill() {
+  local candidate="$1"
+  local skill
+  for skill in "${SKILLS[@]}"; do
+    [[ "$candidate" == "$skill" ]] && return 0
+  done
+  return 1
+}
 
-PROMPT="$(cat "$PROMPT_FILE")
+SKILL="${1:-}"
+[[ -n "$SKILL" ]] || { usage; exit 2; }
+is_allowed_skill "$SKILL" || {
+  echo "pitcrew-codex: unsupported skill: $SKILL" >&2
+  exit 2
+}
+shift
 
----
-Run ONE non-interactive pass for project: $PROJECT.
-Resolve config from $PROJECT_DIR/config.json, do the work, then stop. Never ask for input."
+PROJECT=""
+DRY_RUN=false
+while (($#)); do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    --*)
+      echo "pitcrew-codex: unknown argument: $1" >&2
+      exit 2
+      ;;
+    *)
+      [[ -z "$PROJECT" ]] || { usage; exit 2; }
+      PROJECT="$1"
+      ;;
+  esac
+  shift
+done
 
-# Feed the prompt on stdin (the skill body starts with a `---` frontmatter fence, which
-# `codex exec` would otherwise parse as a flag). `-` tells codex to read from stdin.
-printf '%s' "$PROMPT" | "$CODEX_BIN" exec \
-  --sandbox "$SANDBOX" \
-  --cd "$PROJECT_DIR" \
-  "${ADD_DIRS[@]}" \
-  --skip-git-repo-check \
-  -
+CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME or CODEX_HOME is required}/.codex}"
+RUNTIME_ROOT="$CODEX_HOME_DIR/pitcrew"
+if [[ -z "$PROJECT" ]]; then
+  [[ -f "$RUNTIME_ROOT/default.txt" ]] || {
+    echo "pitcrew-codex: default project missing: $RUNTIME_ROOT/default.txt" >&2
+    exit 2
+  }
+  PROJECT="$(tr -d '\r\n' < "$RUNTIME_ROOT/default.txt")"
+fi
+
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+  echo "pitcrew-codex: invalid project: $PROJECT" >&2
+  exit 2
+}
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
+REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
+[[ -n "$REPO" && -d "$REPO" ]] || {
+  echo "pitcrew-codex: configured repository is unavailable: $REPO" >&2
+  exit 2
+}
+
+PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. Fail closed when a configured provider or permission is unavailable."
+
+if "$DRY_RUN"; then
+  printf '%s\n' "cd=$REPO" "prompt=$PROMPT"
+  exit 0
+fi
+
+exec "${CODEX_BIN:-codex}" exec \
+  --cd "$REPO" \
+  --add-dir "$RUNTIME_ROOT/$PROJECT" \
+  "$PROMPT"
