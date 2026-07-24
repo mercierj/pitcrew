@@ -2,6 +2,7 @@
 # Run one bounded Pitcrew skill through Codex without changing its safety policy.
 
 set -euo pipefail
+umask 077
 
 readonly SKILLS=(
   coverage-run dev-verify-run implementer-run investigate-run manager-run ops-run
@@ -9,7 +10,7 @@ readonly SKILLS=(
 )
 
 usage() {
-  echo "usage: pitcrew-codex.sh <skill> [project] [--dry-run]" >&2
+  echo "usage: pitcrew-codex.sh <skill> [project] [--dry-run] [--scheduled]" >&2
 }
 
 is_allowed_skill() {
@@ -31,10 +32,14 @@ shift
 
 PROJECT=""
 DRY_RUN=false
+SCHEDULED=false
 while (($#)); do
   case "$1" in
     --dry-run)
       DRY_RUN=true
+      ;;
+    --scheduled)
+      SCHEDULED=true
       ;;
     --*)
       echo "pitcrew-codex: unknown argument: $1" >&2
@@ -70,7 +75,41 @@ if "$DRY_RUN"; then
   exit 0
 fi
 
-exec "${CODEX_BIN:-codex}" exec \
-  --cd "$REPO" \
-  --add-dir "$RUNTIME_ROOT/$PROJECT" \
-  "$PROMPT"
+CODEX_ARGS=(
+  exec
+  --cd "$REPO"
+  --add-dir "$RUNTIME_ROOT/$PROJECT"
+)
+
+if "$SCHEDULED"; then
+  LOCK_ROOT="${PITCREW_LOCK_ROOT:-$RUNTIME_ROOT/$PROJECT/locks}"
+  SUMMARY_DIR="$RUNTIME_ROOT/$PROJECT/logs"
+  SUMMARY_FILE="$SUMMARY_DIR/$SKILL.last.txt"
+  LOCK_FILE="$LOCK_ROOT/$SKILL.lock"
+  mkdir -p "$LOCK_ROOT" "$SUMMARY_DIR"
+  chmod 700 "$LOCK_ROOT" "$SUMMARY_DIR"
+  if [[ -e "$SUMMARY_FILE" ]]; then
+    chmod 600 "$SUMMARY_FILE"
+  fi
+  CODEX_ARGS+=(
+    --ephemeral
+    --sandbox workspace-write
+    -c sandbox_workspace_write.network_access=true
+    -c approval_policy='"never"'
+    --color never
+    --output-last-message "$SUMMARY_FILE"
+  )
+fi
+
+CODEX_ARGS+=("$PROMPT")
+
+if "$SCHEDULED"; then
+  python3 "$REPO_ROOT/scripts/pitcrew_locked_exec.py" \
+    --lock-file "$LOCK_FILE" \
+    --project "$PROJECT" \
+    --skill "$SKILL" \
+    -- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
+  chmod 600 "$SUMMARY_FILE" 2>/dev/null || true
+else
+  exec "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
+fi

@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -45,7 +46,10 @@ class PluginContractTest(unittest.TestCase):
             (ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual("pitcrew", manifest["name"])
-        self.assertEqual("0.2.0", manifest["version"])
+        self.assertRegex(
+            manifest["version"],
+            r"^0\.2\.0(?:\+codex\.[0-9]{14})?$",
+        )
         self.assertEqual("./skills/", manifest["skills"])
         self.assertEqual("MIT", manifest["license"])
         self.assertEqual("https://github.com/mercierj/pitcrew", manifest["homepage"])

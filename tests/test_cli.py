@@ -1,7 +1,10 @@
 import os
 import json
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -47,6 +50,209 @@ class CliTest(unittest.TestCase):
             self.assertIn("Use $pitcrew:research-run", result.stdout)
             self.assertNotIn("danger-full-access", result.stdout)
             self.assertIn("/Users/jo/Prog/getbill", result.stdout)
+
+    def test_scheduled_runner_is_ephemeral_networked_and_never_overlaps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            codex_home = root / ".codex"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(codex_home),
+                "PITCREW_LOCK_ROOT": str(root / "locks"),
+                "FAKE_CODEX_MARKER": str(root / "codex-started"),
+                "FAKE_CODEX_ARGS": str(root / "codex-args"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' 'bounded summary' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n"
+                "touch \"$FAKE_CODEX_MARKER\"\n"
+                "sleep 2\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            first = subprocess.Popen(
+                [
+                    str(ROOT / "bin/pitcrew-codex.sh"),
+                    "research-run",
+                    "getbill",
+                    "--scheduled",
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            marker = Path(env["FAKE_CODEX_MARKER"])
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), "first scheduled run did not start")
+
+            overlapping = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+            stdout, stderr = first.communicate(timeout=5)
+            self.assertEqual(0, first.returncode, stderr)
+            self.assertEqual(0, overlapping.returncode, overlapping.stderr)
+            payload = json.loads(overlapping.stdout)
+            self.assertEqual("noop", payload["status"])
+            self.assertIn("already running", payload["reason"])
+
+            args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
+            self.assertIn("--ephemeral", args)
+            self.assertIn("--sandbox", args)
+            self.assertIn("workspace-write", args)
+            self.assertIn("sandbox_workspace_write.network_access=true", args)
+            self.assertIn("--output-last-message", args)
+            self.assertIn(
+                ".codex/pitcrew/getbill/logs/research-run.last.txt",
+                args,
+            )
+            self.assertEqual(
+                0o700,
+                Path(env["PITCREW_LOCK_ROOT"]).stat().st_mode & 0o777,
+            )
+            self.assertEqual(
+                0o700,
+                (codex_home / "pitcrew/getbill/logs").stat().st_mode & 0o777,
+            )
+            self.assertEqual(
+                0o600,
+                (codex_home / "pitcrew/getbill/logs/research-run.last.txt").stat().st_mode
+                & 0o777,
+            )
+
+    def test_scheduled_runner_reuses_unlocked_file_after_crash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "PITCREW_LOCK_ROOT": str(root / "locks"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            lock = root / "locks/research-run.lock"
+            lock.parent.mkdir(parents=True)
+            lock.touch(mode=0o600)
+            marker = root / "codex-called"
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                f"#!/usr/bin/env bash\ntouch {marker}\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(marker.exists())
+            self.assertTrue(lock.is_file())
+            self.assertEqual(0o600, lock.stat().st_mode & 0o777)
+
+    def test_lock_survives_helper_crash_while_child_is_running(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            lock = root / "role.lock"
+            first_marker = root / "first-started"
+            first_pid = root / "first.pid"
+            second_marker = root / "second-started"
+            first_child = root / "first-child"
+            first_child.write_text(
+                "#!/usr/bin/env bash\n"
+                f"printf '%s\\n' \"$$\" > {first_pid}\n"
+                f"touch {first_marker}\n"
+                "sleep 10\n",
+                encoding="utf-8",
+            )
+            first_child.chmod(0o755)
+            second_child = root / "second-child"
+            second_child.write_text(
+                f"#!/usr/bin/env bash\ntouch {second_marker}\n",
+                encoding="utf-8",
+            )
+            second_child.chmod(0o755)
+            helper = ROOT / "scripts/pitcrew_locked_exec.py"
+
+            first = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(helper),
+                    "--lock-file",
+                    str(lock),
+                    "--project",
+                    "getbill",
+                    "--skill",
+                    "research-run",
+                    "--",
+                    str(first_child),
+                ],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 3
+            while not first_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(first_marker.exists(), "locked child did not start")
+
+            first.kill()
+            first.wait(timeout=3)
+            try:
+                second = subprocess.run(
+                    [
+                        sys.executable,
+                        str(helper),
+                        "--lock-file",
+                        str(lock),
+                        "--project",
+                        "getbill",
+                        "--skill",
+                        "research-run",
+                        "--",
+                        str(second_child),
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=3,
+                )
+                self.assertEqual(0, second.returncode, second.stderr)
+                self.assertEqual("noop", json.loads(second.stdout)["status"])
+                self.assertFalse(second_marker.exists())
+            finally:
+                if first_pid.exists():
+                    os.kill(int(first_pid.read_text(encoding="utf-8")), signal.SIGTERM)
 
     def test_getbill_dry_run_never_requests_mutation(self):
         with tempfile.TemporaryDirectory() as temp:

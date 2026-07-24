@@ -55,6 +55,42 @@ def validate(config: Mapping[str, Any]) -> None:
         raise ConfigError("providers.forge must be github or gitlab")
     if providers.get("tracker") not in TRACKERS:
         raise ConfigError("providers.tracker is unsupported")
+    if "gitlab" in {providers.get("forge"), providers.get("tracker")}:
+        gitlab = _mapping(config, "gitlab")
+        for key in ("host", "user", "owner", "project_path"):
+            value = gitlab.get(key)
+            if not isinstance(value, str) or not value:
+                raise ConfigError(f"gitlab.{key} must be a non-empty string")
+        if "/" not in gitlab["project_path"] or "://" in gitlab["project_path"]:
+            raise ConfigError("gitlab.project_path must be an owner/project path")
+        if not isinstance(gitlab.get("project_id"), int) or gitlab["project_id"] <= 0:
+            raise ConfigError("gitlab.project_id must be a positive integer")
+        if providers.get("tracker") == "gitlab":
+            tracker = gitlab.get("tracker")
+            if not isinstance(tracker, Mapping):
+                raise ConfigError("gitlab.tracker must be an object")
+            labels = tracker.get("labels")
+            states = tracker.get("states")
+            if not isinstance(labels, Mapping):
+                raise ConfigError("gitlab.tracker.labels must be an object")
+            if not isinstance(states, Mapping):
+                raise ConfigError("gitlab.tracker.states must be an object")
+            ticket_prefix = tracker.get("ticket_prefix")
+            if not isinstance(ticket_prefix, str) or not ticket_prefix:
+                raise ConfigError("gitlab.tracker.ticket_prefix must be a non-empty string")
+            assignee_username = tracker.get("assignee_username")
+            if assignee_username is not None and (
+                not isinstance(assignee_username, str) or not assignee_username
+            ):
+                raise ConfigError(
+                    "gitlab.tracker.assignee_username must be a non-empty string when set"
+                )
+            for key in ("agent", "investigate", "quick_win", "bug", "improvement"):
+                if not isinstance(labels.get(key), str) or not labels[key]:
+                    raise ConfigError(f"gitlab.tracker.labels.{key} must be a non-empty string")
+            for key in ("todo", "processing", "review", "blocked", "done"):
+                if not isinstance(states.get(key), str) or not states[key]:
+                    raise ConfigError(f"gitlab.tracker.states.{key} must be a non-empty string")
 
     if config.get("schema_version") != 1:
         raise ConfigError("schema_version must be 1")

@@ -2,15 +2,58 @@
   "schema_version": 1,
   "project_name": "getbill",
   "providers": {"forge": "gitlab", "tracker": "gitlab"},
+  "gitlab": {
+    "host": "gitlab.com",
+    "user": "joachim28",
+    "owner": "getbill1",
+    "project_path": "getbill1/getbill",
+    "project_id": 59043683,
+    "tracker": {
+      "assignee_username": "joachim28",
+      "ticket_prefix": "getbill1/getbill#",
+      "labels": {
+        "agent": "pitcrew-agent",
+        "investigate": "pitcrew-route::investigate",
+        "quick_win": "pitcrew-size::quick-win",
+        "bug": "pitcrew-type::bug",
+        "improvement": "pitcrew-type::improvement"
+      },
+      "states": {
+        "todo": "pitcrew-state::todo",
+        "processing": "pitcrew-state::processing",
+        "review": "pitcrew-state::review",
+        "blocked": "pitcrew-state::blocked",
+        "done": "pitcrew-state::done"
+      }
+    }
+  },
   "repos": [
     {
       "name": "getbill",
       "path": "/Users/jo/Prog/getbill",
-      "default_branch": "main",
+      "default_branch": "develop",
       "lang": "php",
       "tags": ["symfony", "stimulus", "vite", "mysql"]
     }
   ],
+  "researcher": {
+    "findings_ledger": "/Users/jo/.codex/pitcrew/getbill/findings/research-findings.json"
+  },
+  "manager": {
+    "target_queue_depth": 3,
+    "investigate_wip": 1,
+    "risky_categories_regex": "IDOR|access.?control|auth|identity|spoof|takeover|currency|money|price|unit.?math|injection|secret|token|SSRF|XSS|CSRF|PII|security|webhook|signature|bypass|encryption|crypto|tenant",
+    "sources": [
+      {
+        "name": "research",
+        "format": "research-v1",
+        "label": "pitcrew-source::research",
+        "findings_json": "/Users/jo/.codex/pitcrew/getbill/findings/research-findings.json",
+        "target_depth": 3,
+        "investigate_wip": 1
+      }
+    ]
+  },
   "release": {"autonomy": "off"},
   "project": {
     "instructions": ["AGENTS.md"],

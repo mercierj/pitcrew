@@ -66,7 +66,10 @@ class ReferenceContractTest(unittest.TestCase):
 
     def test_gitlab_contract(self):
         self.assert_markers(
-            "references/providers/gitlab.md", "glab auth status", "merge request"
+            "references/providers/gitlab.md",
+            "glab auth status",
+            "merge request",
+            '--hostname "$GITLAB_HOST"',
         )
 
     def test_acting_skills_route_providers_without_fallback(self):
@@ -216,6 +219,8 @@ class ReferenceContractTest(unittest.TestCase):
                     "files from findings",
                     text,
                 )
+                self.assertIn("graphify-out/converted", text)
+                self.assertIn("Never print or quote discovered PII", text)
 
         for name in ("research-run", "qa-run"):
             self.assert_markers(

@@ -36,6 +36,28 @@ class ConfigTest(unittest.TestCase):
     def test_getbill_profile_fails_closed(self):
         profile = load_profile(ROOT / "profiles/getbill.json")
         self.assertEqual("gitlab", profile["providers"]["forge"])
+        self.assertEqual("gitlab.com", profile["gitlab"]["host"])
+        self.assertEqual("getbill1/getbill", profile["gitlab"]["project_path"])
+        self.assertEqual(59043683, profile["gitlab"]["project_id"])
+        self.assertEqual("joachim28", profile["gitlab"]["user"])
+        self.assertEqual("develop", profile["repos"][0]["default_branch"])
+        self.assertEqual(
+            "pitcrew-state::todo",
+            profile["gitlab"]["tracker"]["states"]["todo"],
+        )
+        self.assertEqual(
+            "pitcrew-agent",
+            profile["gitlab"]["tracker"]["labels"]["agent"],
+        )
+        self.assertEqual(
+            "research-v1",
+            profile["manager"]["sources"][0]["format"],
+        )
+        self.assertRegex(
+            profile["manager"]["risky_categories_regex"],
+            r"webhook.*signature.*bypass",
+        )
+        self.assertNotIn("architecture_repo", profile["researcher"])
         self.assertEqual("off", profile["release"]["autonomy"])
         self.assertEqual(
             ["prod", "preprod"],
@@ -50,6 +72,21 @@ class ConfigTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigError, "providers.forge"):
             validate(fixture)
+
+    def test_gitlab_provider_requires_explicit_project_and_lifecycle_mapping(self):
+        profile = json.loads(
+            (ROOT / "profiles/getbill.json").read_text(encoding="utf-8")
+        )
+        del profile["gitlab"]["tracker"]["states"]["review"]
+        with self.assertRaisesRegex(ConfigError, "gitlab.tracker.states.review"):
+            validate(profile)
+
+        profile = json.loads(
+            (ROOT / "profiles/getbill.json").read_text(encoding="utf-8")
+        )
+        del profile["gitlab"]["tracker"]["ticket_prefix"]
+        with self.assertRaisesRegex(ConfigError, "gitlab.tracker.ticket_prefix"):
+            validate(profile)
 
     def test_invalid_project_does_not_create_runtime_directories(self):
         with tempfile.TemporaryDirectory() as temp:

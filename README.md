@@ -86,6 +86,19 @@ preprod action requires a fresh explicit approval.
 See [the Codex guide](docs/CODEX.md) and
 [scheduled-task templates](references/SCHEDULED-TASKS.md).
 
+For a persistent local GetBill installation on macOS, install the safe core
+loops with:
+
+```bash
+python3 bin/pitcrew-schedule.py install --project getbill
+python3 bin/pitcrew-schedule.py status --project getbill
+```
+
+The installer deliberately omits human-gated, release, production, and
+not-yet-configured QA/ops roles. Each installed job performs one bounded pass,
+uses a non-overlapping per-role lock, and returns. Scheduled transcripts are
+discarded; only the latest bounded role summary is retained.
+
 ## State and providers
 
 The generic lifecycle is:

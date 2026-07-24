@@ -80,6 +80,11 @@ all_repo_names()      { jq -r '.repos[].name' "$CONFIG_FILE"; }
 6. You do NOT label, route, or create work items — the manager does. Record `severity`, `category`, and `quick_win` (≤2 files, mechanical, no architecture); the manager derives downstream tracker metadata.
 7. The ledger is the durable record of research; the manager owns whether and when it becomes a configured-tracker work item.
 8. Findings MUST be self-contained: the record must give the next agent (or human) everything needed without re-discovery.
+9. **PII-safe discovery.** Never print or quote discovered PII in tool output, logs, state, or
+   ledger records. For GetBill, never scan generated or converted data artifacts such as
+   `graphify-out/converted`, uploaded files, import/export samples containing real rows, or other
+   ignored/untracked corpora. Inspect candidate file names and Git tracking/ignore status before
+   reading content; skip any corpus that may contain customer or debtor data.
 
 ═══ CELLS & STATE ═══
 
@@ -200,7 +205,11 @@ ALL findings must include: file path(s), line number(s) where relevant, a one-pa
 - Record a finding when a claim is provably wrong.
 
 ### Mode: `architecture`
-- Read all markdown files in `$ARCH_REPO_PATH`.
+- Before reading content, require the architecture path and every candidate document to be tracked
+  by Git and not ignored. Skip `graphify-out/converted` and any generated/imported data artifact,
+  even if a broad architecture path contains it.
+- Read only curated architecture markdown such as `GRAPH_REPORT.md`, wiki indexes, `SYSTEM.md`,
+  `AUTH.md`, or `CAPABILITIES.md`; never glob and dump an entire converted corpus.
 - For each concrete claim (e.g. "X service calls Y endpoint", "Z capability is exposed only on platform W"), check the relevant repo(s) for the actual implementation. Mismatches → finding.
 - Cross-repo contract checks: if a consumer calls a producer endpoint, does the producer actually expose it? If a schema declares a field as required, do consumers send it? Use the consumer side as ground truth, verify against the producer side.
 
