@@ -141,6 +141,66 @@ class CliTest(unittest.TestCase):
                 (codex_home / "pitcrew/getbill/logs/research-run.last.txt").stat().st_mode
                 & 0o777,
             )
+            history_path = codex_home / "pitcrew/getbill/history.jsonl"
+            self.assertTrue(history_path.is_file())
+            history = [
+                json.loads(line)
+                for line in history_path.read_text(encoding="utf-8").splitlines()
+            ]
+            latest = history[-1]
+            self.assertEqual("research-run", latest["skill"])
+            self.assertEqual("success", latest["outcome"])
+            self.assertEqual("bounded summary", latest["summary"])
+            self.assertGreaterEqual(latest["duration_ms"], 0)
+
+    def test_scheduled_runner_records_failed_codex_exit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            codex_home = root / ".codex"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(codex_home),
+                "PITCREW_LOCK_ROOT": str(root / "locks"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' 'bounded failure summary' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n"
+                "exit 17\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(17, result.returncode, result.stderr)
+            history_path = codex_home / "pitcrew/getbill/history.jsonl"
+            self.assertTrue(history_path.is_file())
+            history = [
+                json.loads(line)
+                for line in history_path.read_text(encoding="utf-8").splitlines()
+            ]
+            latest = history[-1]
+            self.assertEqual("failed", latest["outcome"])
+            self.assertEqual(17, latest["exit_code"])
 
     def test_scheduled_runner_reuses_unlocked_file_after_crash(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -213,6 +273,10 @@ class CliTest(unittest.TestCase):
                     "getbill",
                     "--skill",
                     "research-run",
+                    "--summary-file",
+                    str(root / "first-summary.txt"),
+                    "--history-file",
+                    str(root / "history.jsonl"),
                     "--",
                     str(first_child),
                 ],
@@ -238,6 +302,10 @@ class CliTest(unittest.TestCase):
                         "getbill",
                         "--skill",
                         "research-run",
+                        "--summary-file",
+                        str(root / "second-summary.txt"),
+                        "--history-file",
+                        str(root / "history.jsonl"),
                         "--",
                         str(second_child),
                     ],

@@ -10,7 +10,15 @@ import os
 import signal
 import subprocess
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
+
+from pitcrew_history import HistoryStore
+
+
+MAX_SUMMARY_BYTES = 64 * 1024
+NO_SUMMARY = "No bounded final summary was produced."
 
 
 def parser() -> argparse.ArgumentParser:
@@ -18,8 +26,24 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--lock-file", required=True, type=Path)
     result.add_argument("--project", required=True)
     result.add_argument("--skill", required=True)
+    result.add_argument("--summary-file", required=True, type=Path)
+    result.add_argument("--history-file", required=True, type=Path)
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def read_summary(path: Path) -> str:
+    try:
+        with path.open("rb") as summary:
+            contents = summary.read(MAX_SUMMARY_BYTES)
+    except FileNotFoundError:
+        return NO_SUMMARY
+    decoded = contents.decode("utf-8", errors="replace").strip()
+    return decoded or NO_SUMMARY
 
 
 def main() -> int:
@@ -31,6 +55,7 @@ def main() -> int:
         print("pitcrew lock: command is required", file=sys.stderr)
         return 2
 
+    started_at = utc_now()
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -40,11 +65,24 @@ def main() -> int:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            reason = f"{args.skill} already running"
+            HistoryStore(args.history_file).append(
+                {
+                    "project": args.project,
+                    "skill": args.skill,
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                    "duration_ms": 0,
+                    "outcome": "noop",
+                    "exit_code": 0,
+                    "summary": json.dumps({"reason": reason}, separators=(",", ":")),
+                }
+            )
             print(
                 json.dumps(
                     {
                         "status": "noop",
-                        "reason": f"{args.skill} already running",
+                        "reason": reason,
                         "project": args.project,
                         "skill": args.skill,
                         "next_action": "run again after the configured interval",
@@ -54,6 +92,8 @@ def main() -> int:
             )
             return 0
 
+        started_monotonic = time.monotonic_ns()
+        args.summary_file.unlink(missing_ok=True)
         os.set_inheritable(descriptor, True)
         child = subprocess.Popen(command, pass_fds=(descriptor,))
 
@@ -66,10 +106,30 @@ def main() -> int:
             for signum in (signal.SIGINT, signal.SIGTERM)
         }
         try:
-            return child.wait()
+            return_code = child.wait()
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+
+        if return_code == 0:
+            outcome = "success"
+        elif return_code < 0:
+            outcome = "interrupted"
+        else:
+            outcome = "failed"
+        HistoryStore(args.history_file).append(
+            {
+                "project": args.project,
+                "skill": args.skill,
+                "started_at": started_at,
+                "finished_at": utc_now(),
+                "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000,
+                "outcome": outcome,
+                "exit_code": return_code,
+                "summary": read_summary(args.summary_file),
+            }
+        )
+        return return_code
 
 
 if __name__ == "__main__":

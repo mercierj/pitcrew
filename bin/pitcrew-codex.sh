@@ -85,6 +85,7 @@ if "$SCHEDULED"; then
   LOCK_ROOT="${PITCREW_LOCK_ROOT:-$RUNTIME_ROOT/$PROJECT/locks}"
   SUMMARY_DIR="$RUNTIME_ROOT/$PROJECT/logs"
   SUMMARY_FILE="$SUMMARY_DIR/$SKILL.last.txt"
+  HISTORY_FILE="$RUNTIME_ROOT/$PROJECT/history.jsonl"
   LOCK_FILE="$LOCK_ROOT/$SKILL.lock"
   mkdir -p "$LOCK_ROOT" "$SUMMARY_DIR"
   chmod 700 "$LOCK_ROOT" "$SUMMARY_DIR"
@@ -108,6 +109,8 @@ if "$SCHEDULED"; then
     --lock-file "$LOCK_FILE" \
     --project "$PROJECT" \
     --skill "$SKILL" \
+    --summary-file "$SUMMARY_FILE" \
+    --history-file "$HISTORY_FILE" \
     -- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
   chmod 600 "$SUMMARY_FILE" 2>/dev/null || true
 else
