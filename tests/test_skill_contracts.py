@@ -219,9 +219,26 @@ class ReferenceContractTest(unittest.TestCase):
         self.assertIn("built-in lifecycle is open", stale)
         self.assertIn("state=merged", stale)
         self.assertIn("state=closed", stale)
+        self.assertIn(
+            """LIST_ELIGIBLE_CHANGES \\
+  --search "<TICKET-id>" \\
+  --repo "$FORGE_OWNER/<repo-name>" \\
+  --state merged \\""",
+            stale,
+        )
         self.assertIn("`state=merged` and non-null `merged_at`", stale)
         self.assertIn("`closed_at` may be null", stale)
+        self.assertNotIn("non-null `closed_at`", stale)
         self.assertNotIn("both merged AND closed", stale)
+        self.assertIn(
+            'INSPECT_CHANGE <change-id> --json state,merged_at,closed_at',
+            stale,
+        )
+        self.assertIn("Immediately before `CLOSE_LIFECYCLE`", stale)
+        self.assertRegex(
+            stale,
+            r"re-confirm `state=merged` and\s+non-null `merged_at`",
+        )
         self.assertIn("CLOSE_LIFECYCLE", stale)
         self.assertIn("pitcrew:stale-sweep:done:", stale)
         self.assertIn("verify both", stale)

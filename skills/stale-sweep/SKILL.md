@@ -195,7 +195,21 @@ For each candidate ticket, classify the matching change (if any) into one of:
 
 **STEP 3. Apply the state changes.**
 
-For a merged change, use the configured tracker's close-lifecycle capability:
+Inspect the selected terminal change again immediately before any tracker
+mutation:
+
+```text
+INSPECT_CHANGE <change-id> --json state,merged_at,closed_at
+```
+
+Immediately before `CLOSE_LIFECYCLE`, GitLab must re-confirm `state=merged` and
+non-null `merged_at`; `closed_at` may remain null. If the result no longer
+matches the STEP 2 classification, do not mutate the ticket: reclassify an open
+change as active, reclassify a closed change with null `merged_at` as
+closed-without-merge, and otherwise leave it alone.
+
+For a re-confirmed merged change, use the configured tracker's close-lifecycle
+capability:
 
 ```text
 CLOSE_LIFECYCLE(
