@@ -1,6 +1,14 @@
+import {createNavigation} from "./navigation.mjs";
+
 const POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
 const ACTIONS = new Set(["trigger", "stop", "restart"]);
+
+const navigation = createNavigation(document.querySelector("#app-navigation"), {
+  pilotage: document.querySelector("#view-pilotage"),
+  agents: document.querySelector("#view-agents"),
+  history: document.querySelector("#view-history"),
+});
 
 const sessionToken = document.querySelector('meta[name="pitcrew-session"]')?.content ?? "";
 const dateFormatter = new Intl.DateTimeFormat("fr-FR", {

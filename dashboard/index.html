@@ -8,10 +8,10 @@
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <header class="site-header">
+  <header id="app-header" class="site-header">
     <div>
       <p class="eyebrow">Pilotage local</p>
-      <h1>GetBill <span>Pitcrew</span></h1>
+      <p class="brand">GetBill <span>Pitcrew</span></p>
       <p class="header-copy">Surveillez les agents, leurs passages et le travail GitLab depuis cette machine.</p>
     </div>
     <div class="refresh-panel">
@@ -27,126 +27,192 @@
 
   <p id="operational-status" class="sr-only" aria-live="polite">Initialisation du tableau de bord.</p>
 
-  <main>
-    <section id="proposals" class="panel proposal-panel" aria-labelledby="proposals-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Validation humaine</p>
-          <h2 id="proposals-title">Propositions à examiner</h2>
-        </div>
-        <p id="proposal-state" class="section-note">Aucune proposition chargée</p>
-      </div>
-      <div id="proposal-list" class="proposal-list" aria-live="polite"></div>
-    </section>
-
-    <section id="decision-banner" class="panel decision-panel" aria-labelledby="decision-title" hidden>
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Action requise</p>
-          <h2 id="decision-title">Décision à prendre</h2>
-        </div>
-        <p class="section-note">L’agent reprendra automatiquement après votre réponse</p>
-      </div>
-      <div id="decision-content" aria-live="polite"></div>
-    </section>
-
-    <section id="overview" class="panel overview" aria-labelledby="overview-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Vue d’ensemble</p>
-          <h2 id="overview-title">État opérationnel</h2>
-        </div>
-        <p class="section-note">Mise à jour locale toutes les 10 secondes</p>
-      </div>
-      <div id="global-banner" class="banner banner-neutral">Collecte des premiers signaux…</div>
-      <div id="overview-metrics" class="metric-grid">
-        <article class="metric"><span>Actifs</span><strong id="metric-active">—</strong></article>
-        <article class="metric"><span>Arrêtés</span><strong id="metric-stopped">—</strong></article>
-        <article class="metric"><span>En cours</span><strong id="metric-running">—</strong></article>
-        <article class="metric"><span>Alertes</span><strong id="metric-warning">—</strong></article>
-        <article class="metric"><span>Échecs</span><strong id="metric-failed">—</strong></article>
-        <article class="metric"><span>Jetons · 7 jours</span><strong id="metric-tokens-7d">—</strong></article>
-        <article class="metric"><span>Coût estimé · 7 jours</span><strong id="metric-cost-7d">—</strong></article>
-      </div>
-      <p id="overview-usage-note" class="usage-note" aria-live="polite"></p>
-    </section>
-
-    <section id="gitlab-work" aria-labelledby="gitlab-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Synchronisation distante</p>
-          <h2 id="gitlab-title">Travail GitLab</h2>
-        </div>
-        <p id="gitlab-state" class="section-note">En attente du premier relevé</p>
-      </div>
-      <section id="merge-requests" class="merge-requests-panel" aria-labelledby="merge-requests-title">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Validation</p>
-            <h3 id="merge-requests-title">Merge requests ouvertes</h3>
-          </div>
-          <p id="merge-requests-state" class="section-note">Aucune MR chargée</p>
-        </div>
-        <div id="merge-request-list" class="merge-request-list" aria-live="polite"></div>
+  <div class="app-shell">
+    <aside aria-label="Navigation et santé du crew">
+      <nav id="app-navigation" aria-label="Vues du tableau de bord">
+        <button type="button" data-view-target="pilotage">Pilotage</button>
+        <button type="button" data-view-target="agents">Agents</button>
+        <button type="button" data-view-target="history">Historique</button>
+      </nav>
+      <section id="crew-health" aria-labelledby="crew-health-title">
+        <h2 id="crew-health-title">Santé du crew</h2>
+        <p>Collecte des signaux en cours…</p>
       </section>
-      <div id="gitlab-groups" class="work-grid"></div>
-    </section>
+    </aside>
 
-    <section id="live-agents" class="panel live-panel" aria-labelledby="live-agents-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Temps réel</p>
-          <h2 id="live-agents-title">Agents en cours</h2>
-        </div>
-        <p class="section-note">État local · actualisé toutes les 10 secondes</p>
-      </div>
-      <div id="live-agent-grid" class="live-agent-grid" aria-live="polite"></div>
-    </section>
+    <main>
+      <section id="view-pilotage" data-view="pilotage" aria-labelledby="pilotage-title">
+        <h1 id="pilotage-title" tabindex="-1">Pilotage</h1>
 
-    <section id="agents" aria-labelledby="agents-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Automatisation</p>
-          <h2 id="agents-title">Agents activés</h2>
-        </div>
-        <p class="section-note">Déclenchement et contrôle agent par agent</p>
-      </div>
-      <div id="agent-grid" class="agent-grid" aria-busy="true"></div>
+        <section id="action-queue" class="panel" aria-labelledby="action-queue-title">
+          <h2 id="action-queue-title">Actions à traiter</h2>
+          <p>La file d’actions sera affichée ici.</p>
+        </section>
 
-      <details id="disabled-roles" class="disabled-panel">
-        <summary>Rôles désactivés <span id="disabled-count">0</span></summary>
-        <div id="disabled-list" class="disabled-list"></div>
-      </details>
-    </section>
+        <section id="workflow-board" class="panel" aria-labelledby="workflow-board-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Flux de travail</p>
+              <h2 id="workflow-board-title">Workflow</h2>
+            </div>
+            <div class="filters">
+              <label for="workflow-search">Rechercher
+                <input id="workflow-search" name="workflow-search" type="search">
+              </label>
+              <label for="workflow-role">Rôle
+                <select id="workflow-role" name="workflow-role">
+                  <option value="">Tous les rôles</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <p>Le tableau de workflow sera affiché ici.</p>
+        </section>
 
-    <section id="activity" class="panel" aria-labelledby="activity-title">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Sept derniers jours</p>
-          <h2 id="activity-title">Activité des agents</h2>
-        </div>
-      </div>
-      <form id="history-filters" class="filters">
-        <label for="history-skill">Agent
-          <select id="history-skill" name="skill">
-            <option value="">Tous les agents</option>
-          </select>
-        </label>
-        <label for="history-outcome">Résultat
-          <select id="history-outcome" name="outcome">
-            <option value="">Tous les résultats</option>
-            <option value="success">Succès</option>
-            <option value="noop">Sans action</option>
-            <option value="failed">Échec</option>
-            <option value="interrupted">Interrompu</option>
-          </select>
-        </label>
-        <button class="button" type="submit">Appliquer les filtres</button>
-      </form>
-      <ol id="activity-list" class="activity-list"></ol>
-    </section>
+        <section id="done-work" class="panel" aria-labelledby="done-work-title">
+          <h2 id="done-work-title">Travail terminé <span id="done-count">0</span></h2>
+          <ol id="done-list"></ol>
+        </section>
 
-  </main>
+        <section id="proposals" class="panel proposal-panel" aria-labelledby="proposals-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Validation humaine</p>
+              <h2 id="proposals-title">Propositions à examiner</h2>
+            </div>
+            <p id="proposal-state" class="section-note">Aucune proposition chargée</p>
+          </div>
+          <div id="proposal-list" class="proposal-list" aria-live="polite"></div>
+        </section>
+
+        <section id="decision-banner" class="panel decision-panel" aria-labelledby="decision-title" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Action requise</p>
+              <h2 id="decision-title">Décision à prendre</h2>
+            </div>
+            <p class="section-note">L’agent reprendra automatiquement après votre réponse</p>
+          </div>
+          <div id="decision-content" aria-live="polite"></div>
+        </section>
+
+        <section id="overview" class="panel overview" aria-labelledby="overview-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Vue d’ensemble</p>
+              <h2 id="overview-title">État opérationnel</h2>
+            </div>
+            <p class="section-note">Mise à jour locale toutes les 10 secondes</p>
+          </div>
+          <div id="global-banner" class="banner banner-neutral">Collecte des premiers signaux…</div>
+          <div id="overview-metrics" class="metric-grid">
+            <article class="metric"><span>Actifs</span><strong id="metric-active">—</strong></article>
+            <article class="metric"><span>Arrêtés</span><strong id="metric-stopped">—</strong></article>
+            <article class="metric"><span>En cours</span><strong id="metric-running">—</strong></article>
+            <article class="metric"><span>Alertes</span><strong id="metric-warning">—</strong></article>
+            <article class="metric"><span>Échecs</span><strong id="metric-failed">—</strong></article>
+            <article class="metric"><span>Jetons · 7 jours</span><strong id="metric-tokens-7d">—</strong></article>
+            <article class="metric"><span>Coût estimé · 7 jours</span><strong id="metric-cost-7d">—</strong></article>
+          </div>
+          <p id="overview-usage-note" class="usage-note" aria-live="polite"></p>
+        </section>
+
+        <section id="gitlab-work" aria-labelledby="gitlab-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Synchronisation distante</p>
+              <h2 id="gitlab-title">Travail GitLab</h2>
+            </div>
+            <p id="gitlab-state" class="section-note">En attente du premier relevé</p>
+          </div>
+          <section id="merge-requests" class="merge-requests-panel" aria-labelledby="merge-requests-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Validation</p>
+                <h3 id="merge-requests-title">Merge requests ouvertes</h3>
+              </div>
+              <p id="merge-requests-state" class="section-note">Aucune MR chargée</p>
+            </div>
+            <div id="merge-request-list" class="merge-request-list" aria-live="polite"></div>
+          </section>
+          <div id="gitlab-groups" class="work-grid"></div>
+        </section>
+      </section>
+
+      <section id="view-agents" data-view="agents" aria-labelledby="agents-view-title" hidden>
+        <h1 id="agents-view-title" tabindex="-1">Agents</h1>
+
+        <section id="live-agents" class="panel live-panel" aria-labelledby="live-agents-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Temps réel</p>
+              <h2 id="live-agents-title">Agents en cours</h2>
+            </div>
+            <p class="section-note">État local · actualisé toutes les 10 secondes</p>
+          </div>
+          <div id="live-agent-grid" class="live-agent-grid" aria-live="polite"></div>
+        </section>
+
+        <section id="agents" aria-labelledby="agents-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Automatisation</p>
+              <h2 id="agents-title">Agents activés</h2>
+            </div>
+            <p class="section-note">Déclenchement et contrôle agent par agent</p>
+          </div>
+          <div id="agent-list">
+            <div id="agent-grid" class="agent-grid" aria-busy="true"></div>
+          </div>
+
+          <details id="disabled-roles" class="disabled-panel">
+            <summary>Rôles désactivés <span id="disabled-count">0</span></summary>
+            <div id="disabled-list" class="disabled-list"></div>
+          </details>
+        </section>
+      </section>
+
+      <section id="view-history" data-view="history" aria-labelledby="history-view-title" hidden>
+        <h1 id="history-view-title" tabindex="-1">Historique</h1>
+
+        <section id="activity" class="panel" aria-labelledby="activity-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Sept derniers jours</p>
+              <h2 id="activity-title">Activité des agents</h2>
+            </div>
+          </div>
+          <form id="history-filters" class="filters">
+            <label for="history-skill">Agent
+              <select id="history-skill" name="skill">
+                <option value="">Tous les agents</option>
+              </select>
+            </label>
+            <label for="history-outcome">Résultat
+              <select id="history-outcome" name="outcome">
+                <option value="">Tous les résultats</option>
+                <option value="success">Succès</option>
+                <option value="noop">Sans action</option>
+                <option value="failed">Échec</option>
+                <option value="interrupted">Interrompu</option>
+              </select>
+            </label>
+            <button class="button" type="submit">Appliquer les filtres</button>
+          </form>
+          <ol id="activity-list" class="activity-list"></ol>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="detail-panel" aria-labelledby="detail-title">
+    <header>
+      <h2 id="detail-title">Détail</h2>
+      <button id="detail-close" class="button" type="button">Fermer</button>
+    </header>
+    <div id="detail-content"></div>
+    <p id="detail-action-status" class="sr-only" aria-live="polite"></p>
+  </dialog>
 
   <footer>
     <p>Pitcrew fonctionne uniquement sur l’interface locale de cette machine.</p>

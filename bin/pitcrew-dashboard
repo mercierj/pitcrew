@@ -30,8 +30,17 @@ MAX_BODY_BYTES = 8192
 READ_TIMEOUT_SECONDS = 5.0
 ASSET_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
+    "/assets/agents.mjs": ("agents.mjs", "text/javascript; charset=utf-8"),
+    "/assets/api.mjs": ("api.mjs", "text/javascript; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/detail-panel.mjs": ("detail-panel.mjs", "text/javascript; charset=utf-8"),
+    "/assets/format.mjs": ("format.mjs", "text/javascript; charset=utf-8"),
+    "/assets/history.mjs": ("history.mjs", "text/javascript; charset=utf-8"),
+    "/assets/navigation.mjs": ("navigation.mjs", "text/javascript; charset=utf-8"),
+    "/assets/pilotage.mjs": ("pilotage.mjs", "text/javascript; charset=utf-8"),
+    "/assets/source-store.mjs": ("source-store.mjs", "text/javascript; charset=utf-8"),
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/assets/view-model.mjs": ("view-model.mjs", "text/javascript; charset=utf-8"),
 }
 
 

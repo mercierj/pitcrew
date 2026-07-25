@@ -1987,6 +1987,37 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.html = (self.dashboard / "index.html").read_text(encoding="utf-8")
         self.javascript = (self.dashboard / "app.js").read_text(encoding="utf-8")
         self.styles = (self.dashboard / "styles.css").read_text(encoding="utf-8")
+        self.modules = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in self.dashboard.glob("*.mjs")
+        }
+
+    def test_html_has_application_shell_views_and_future_module_regions(self):
+        for identifier in (
+            "app-header",
+            "app-navigation",
+            "view-pilotage",
+            "view-agents",
+            "view-history",
+            "action-queue",
+            "workflow-board",
+            "done-work",
+            "crew-health",
+            "detail-panel",
+        ):
+            self.assertIn(f'id="{identifier}"', self.html)
+        self.assertLess(
+            self.html.index('id="action-queue"'),
+            self.html.index('id="workflow-board"'),
+        )
+        self.assertRegex(self.html, r"<dialog\b")
+        for view in ("pilotage", "agents", "history"):
+            self.assertRegex(
+                self.html,
+                rf'<section[^>]+id="view-{view}"[^>]*>\s*'
+                rf'<h1[^>]+tabindex="-1"',
+            )
+            self.assertIn(f'data-view-target="{view}"', self.html)
 
     def test_html_is_semantic_accessible_and_has_all_dashboard_regions(self):
         self.assertRegex(self.html, r"<html[^>]+lang=[\"']fr[\"']")
@@ -2020,7 +2051,9 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn('type="button"', self.html)
 
     def test_sources_are_local_and_use_no_external_assets(self):
-        combined = "\n".join((self.html, self.javascript, self.styles))
+        combined = "\n".join(
+            (self.html, self.javascript, self.styles, *self.modules.values())
+        )
         self.assertIsNone(re.search(r"https?://", combined, re.IGNORECASE))
         self.assertNotRegex(self.html, r"<(?:img|iframe|object|embed)\b")
         self.assertNotIn("@font-face", self.styles)
@@ -2240,7 +2273,12 @@ class DashboardRealAssetsHttpTest(unittest.TestCase):
         self.assertIn(self.token.encode(), index)
         self.assertNotIn(b"__PITCREW_SESSION_TOKEN__", index)
 
-        for path in ("/assets/app.js", "/assets/styles.css"):
+        for path in (
+            "/assets/app.js",
+            "/assets/styles.css",
+            "/assets/navigation.mjs",
+            "/assets/view-model.mjs",
+        ):
             with self.subTest(path=path):
                 status, payload = self.request(path)
                 self.assertEqual(200, status)
