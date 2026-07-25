@@ -198,6 +198,41 @@ class ReferenceContractTest(unittest.TestCase):
             (ROOT / "references/providers/gitlab.md").read_text(encoding="utf-8"),
         )
 
+    def test_stale_sweep_repairs_gitlab_merged_lifecycle_drift(self):
+        stale = (ROOT / "skills/stale-sweep/SKILL.md").read_text(encoding="utf-8")
+        gitlab = (ROOT / "references/providers/gitlab.md").read_text(
+            encoding="utf-8"
+        )
+
+        for state in (
+            "STATE_REVIEW",
+            "STATE_PROCESSING",
+            "STATE_TODO",
+            "STATE_BLOCKED",
+            "STATE_DONE",
+        ):
+            self.assertIn(
+                f'LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="${state}"',
+                stale,
+            )
+
+        self.assertIn("built-in lifecycle is open", stale)
+        self.assertIn("state=merged", stale)
+        self.assertIn("state=closed", stale)
+        self.assertIn("`state=merged` and non-null `merged_at`", stale)
+        self.assertIn("`closed_at` may be null", stale)
+        self.assertNotIn("both merged AND closed", stale)
+        self.assertIn("CLOSE_LIFECYCLE", stale)
+        self.assertIn("pitcrew:stale-sweep:done:", stale)
+        self.assertIn("verify both", stale)
+        self.assertIn("built-in issue state is closed", stale)
+        self.assertIn("`$STATE_DONE` label is present", stale)
+
+        self.assertIn("GitLab merge request states are mutually distinct", gitlab)
+        self.assertIn("`state=merged`", gitlab)
+        self.assertIn("`closed_at` is normally null", gitlab)
+        self.assertIn("query `state=merged` and `state=closed` separately", gitlab)
+
     def test_secondary_roles_are_provider_neutral_and_getbill_safe(self):
         secondary = (
             "research-run",
