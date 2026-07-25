@@ -63,6 +63,7 @@ else
 fi
 CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
 REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
+MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")"
 [[ -n "$REPO" && -d "$REPO" ]] || {
   echo "pitcrew-codex: configured repository is unavailable: $REPO" >&2
   exit 2
@@ -71,7 +72,7 @@ REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT"
 PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. Fail closed when a configured provider or permission is unavailable."
 
 if "$DRY_RUN"; then
-  printf '%s\n' "cd=$REPO" "prompt=$PROMPT"
+  printf '%s\n' "cd=$REPO" "model=$MODEL" "prompt=$PROMPT"
   exit 0
 fi
 
@@ -79,6 +80,8 @@ CODEX_ARGS=(
   exec
   --cd "$REPO"
   --add-dir "$RUNTIME_ROOT/$PROJECT"
+  --model "$MODEL"
+  --json
 )
 
 if "$SCHEDULED"; then

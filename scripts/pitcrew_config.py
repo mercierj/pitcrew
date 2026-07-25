@@ -6,6 +6,8 @@ from collections.abc import Mapping
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -13,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from scripts.pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG
+    from scripts.pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG, resolve_model
 else:
-    from pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG
+    from pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG, resolve_model
 
 
 FORGES = {"github", "gitlab"}
@@ -207,6 +209,8 @@ def _write_exclusive_config(parent_fd: int, name: str, serialized: str) -> None:
         data = serialized.encode("utf-8")
         while data:
             written = os.write(descriptor, data)
+            if written == 0:
+                raise OSError("unable to write temporary config")
             data = data[written:]
     except FileExistsError as error:
         raise ConfigError(f"refusing to overwrite {name}") from error
@@ -385,6 +389,83 @@ def load_runtime_config(
     return dict(config)
 
 
+def _replace_runtime_config(parent_fd: int, serialized: str) -> None:
+    try:
+        target = os.stat("config.json", dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ConfigError("runtime config path must not be a symlink or missing") from error
+    if stat.S_ISLNK(target.st_mode):
+        raise ConfigError("runtime config path must not be a symlink or missing")
+
+    temporary_name: str | None = None
+    descriptor: int | None = None
+    try:
+        for _ in range(100):
+            candidate = f".config-{secrets.token_hex(16)}"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                temporary_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None or temporary_name is None:
+            raise OSError("unable to create temporary config")
+        data = serialized.encode("utf-8")
+        while data:
+            written = os.write(descriptor, data)
+            data = data[written:]
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.replace(
+            temporary_name,
+            "config.json",
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temporary_name = None
+        os.fsync(parent_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+
+
+def update_runtime_model(
+    project: str,
+    skill: str,
+    model: str,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    if skill not in DEFAULT_MODELS:
+        raise ConfigError(f"skill is unsupported: {skill}")
+    if model not in MODEL_CATALOG:
+        raise ConfigError(f"model is unsupported: {model}")
+    values = os.environ if env is None else env
+    config = load_runtime_config(project, values)
+    agents = dict(config.get("agents", {}))
+    agents[skill] = {"model": model}
+    updated = dict(config)
+    updated["agents"] = agents
+    validate(updated)
+    serialized = json.dumps(updated, indent=2) + "\n"
+    project_fd = _open_runtime_project_for_read(project, values)
+    try:
+        _replace_runtime_config(project_fd, serialized)
+    finally:
+        os.close(project_fd)
+
+
 def configured_repo_path(config: Mapping[str, Any], project: str) -> str:
     repositories = config["repos"]
     selected = next(
@@ -464,6 +545,9 @@ def main(argv: list[str] | None = None) -> int:
     migrate_parser.add_argument("--project", required=True)
     repo_parser = subparsers.add_parser("repo")
     repo_parser.add_argument("--project", required=True)
+    model_parser = subparsers.add_parser("model")
+    model_parser.add_argument("--project", required=True)
+    model_parser.add_argument("--skill", required=True)
     subparsers.add_parser("project")
     args = parser.parse_args(argv)
 
@@ -480,6 +564,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "repo":
         print(configured_repo_path(load_runtime_config(args.project), args.project))
+        return 0
+    if args.command == "model":
+        print(resolve_model(load_runtime_config(args.project), args.skill))
         return 0
     if args.command == "project":
         print(resolve_runtime_project())

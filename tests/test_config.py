@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from scripts.pitcrew_config import (
@@ -13,6 +14,7 @@ from scripts.pitcrew_config import (
     load_profile,
     migrate_legacy,
     runtime_root,
+    update_runtime_model,
     validate,
     write_project,
 )
@@ -23,6 +25,71 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def test_update_runtime_model_replaces_only_requested_agent_and_preserves_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/getbill.json", "getbill", env)
+            original = json.loads(destination.read_text(encoding="utf-8"))
+
+            update_runtime_model("getbill", "research-run", "gpt-5.6-luna", env)
+
+            updated = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual({"model": "gpt-5.6-luna"}, updated["agents"]["research-run"])
+            self.assertEqual(original["providers"], updated["providers"])
+            self.assertEqual(original["repos"], updated["repos"])
+            self.assertEqual(original["safety"], updated["safety"])
+
+    def test_update_runtime_model_writes_private_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/generic.json", "example", env)
+            destination.chmod(0o644)
+
+            update_runtime_model("example", "research-run", "gpt-5.6-luna", env)
+
+            self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+
+    def test_update_runtime_model_rejects_unknown_skill_or_model_without_changing_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/generic.json", "example", env)
+            original = destination.read_text(encoding="utf-8")
+
+            with self.assertRaisesRegex(ConfigError, "skill"):
+                update_runtime_model("example", "unknown-run", "gpt-5.6-luna", env)
+            with self.assertRaisesRegex(ConfigError, "model"):
+                update_runtime_model("example", "research-run", "invented", env)
+
+            self.assertEqual(original, destination.read_text(encoding="utf-8"))
+
+    def test_update_runtime_model_rejects_symlinked_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "pitcrew/example"
+            project.mkdir(parents=True)
+            target = root / "outside.json"
+            target.write_text("unchanged", encoding="utf-8")
+            (project / "config.json").symlink_to(target)
+
+            with self.assertRaisesRegex(ConfigError, "symlink"):
+                update_runtime_model(
+                    "example", "research-run", "gpt-5.6-luna", {"CODEX_HOME": temp}
+                )
+            self.assertEqual("unchanged", target.read_text(encoding="utf-8"))
+
+    def test_update_runtime_model_keeps_existing_config_and_cleans_temp_when_replace_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/generic.json", "example", env)
+            original = destination.read_text(encoding="utf-8")
+
+            with mock.patch("scripts.pitcrew_config.os.replace", side_effect=OSError("nope")):
+                with self.assertRaisesRegex(OSError, "nope"):
+                    update_runtime_model("example", "research-run", "gpt-5.6-luna", env)
+
+            self.assertEqual(original, destination.read_text(encoding="utf-8"))
+            self.assertEqual([], list(destination.parent.glob(".config-*")))
+
     def test_runtime_root_uses_codex_home(self):
         with tempfile.TemporaryDirectory() as temp:
             self.assertEqual(Path(temp) / "pitcrew", runtime_root({"CODEX_HOME": temp}))

@@ -13,6 +13,60 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CliTest(unittest.TestCase):
+    def test_model_command_prints_default_and_runtime_override(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root)}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+
+            default = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/pitcrew_config.py"), "model", "--project", "getbill", "--skill", "research-run"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, default.returncode, default.stderr)
+            self.assertEqual("gpt-5.6-terra\n", default.stdout)
+
+            config_path = root / "pitcrew/getbill/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["agents"] = {"research-run": {"model": "gpt-5.6-luna"}}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            override = subprocess.run(
+                [sys.executable, "-m", "scripts.pitcrew_config", "model", "--project", "getbill", "--skill", "research-run"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, override.returncode, override.stderr)
+            self.assertEqual("gpt-5.6-luna\n", override.stdout)
+
+    def test_runner_dry_run_prints_configured_model(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root)}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            config_path = root / "pitcrew/getbill/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["agents"] = {"research-run": {"model": "gpt-5.6-luna"}}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", "--dry-run", env=env
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("model=gpt-5.6-luna", result.stdout)
+
     def run_cli(self, *args, env=None):
         return subprocess.run(
             [str(ROOT / args[0]), *args[1:]],
@@ -120,6 +174,9 @@ class CliTest(unittest.TestCase):
 
             args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
             self.assertIn("--ephemeral", args)
+            self.assertIn("--model", args)
+            self.assertIn("gpt-5.6-terra", args)
+            self.assertIn("--json", args)
             self.assertIn("--sandbox", args)
             self.assertIn("workspace-write", args)
             self.assertIn("sandbox_workspace_write.network_access=true", args)
