@@ -1,4 +1,6 @@
 import {createNavigation} from "./navigation.mjs";
+import {createDetailPanel} from "./detail-panel.mjs";
+import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
 
 const POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
@@ -42,6 +44,19 @@ const elements = {
   gitlabState: document.querySelector("#gitlab-state"),
   mergeRequestList: document.querySelector("#merge-request-list"),
   mergeRequestsState: document.querySelector("#merge-requests-state"),
+  actionQueueCount: document.querySelector("#action-queue-count"),
+  actionQueueList: document.querySelector("#action-queue-list"),
+  actionQueueMore: document.querySelector("#action-queue-more"),
+  workflowBoard: document.querySelector("#workflow-board-content"),
+  workflowSearch: document.querySelector("#workflow-search"),
+  workflowRole: document.querySelector("#workflow-role"),
+  doneCount: document.querySelector("#done-count"),
+  doneList: document.querySelector("#done-list"),
+  crewHealth: document.querySelector("#crew-health"),
+  detailPanel: document.querySelector("#detail-panel"),
+  detailTitle: document.querySelector("#detail-title"),
+  detailContent: document.querySelector("#detail-content"),
+  detailClose: document.querySelector("#detail-close"),
   metrics: {
     active: document.querySelector("#metric-active"),
     stopped: document.querySelector("#metric-stopped"),
@@ -52,6 +67,16 @@ const elements = {
     cost7d: document.querySelector("#metric-cost-7d"),
   },
 };
+
+const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, work: {}};
+const detailController = createDetailPanel(
+  elements.detailPanel,
+  elements.detailTitle,
+  elements.detailContent,
+  elements.detailClose,
+);
+let currentActionQueue = [];
+let lastRoleWork = null;
 
 const healthLabels = {
   healthy: "Sain",
@@ -86,7 +111,11 @@ async function fetchJson(path, options = {}) {
   if (!response.ok) {
     throw new Error(`Requête refusée (${response.status})`);
   }
-  return response.json();
+  const payload = await response.json();
+  if (path.startsWith("/api/gitlab")) {
+    sources.work = payload;
+  }
+  return payload;
 }
 
 function setText(element, value) {
@@ -548,7 +577,7 @@ function renderDecision(payload) {
     elements.decisionBanner.hidden = true;
     return;
   }
-  elements.decisionBanner.hidden = false;
+  elements.decisionBanner.hidden = true;
   const ticket = document.createElement("p");
   ticket.className = "decision-ticket";
   const link = safeExternalLink(pending.ticket?.web_url, pending.ticket?.title || pending.ticket_id);
@@ -754,7 +783,27 @@ function renderGitLab(work) {
   });
 }
 
-async function launchTicketAgent(issue) {
+function renderTicketActionState(button, actions, target, agentAction) {
+  const state = ticketActionStates.get(target);
+  const pending = pendingTicketActions.has(target);
+  button.disabled = !agentAction.available || pending || !target;
+  button.textContent = pending ? "Lancement…" : agentAction.label || "Lancer l’agent";
+  button.setAttribute("aria-busy", pending ? "true" : "false");
+  let status = actions.querySelector(".ticket-agent-status");
+  if (!state) {
+    status?.remove();
+    return;
+  }
+  if (!status) {
+    status = document.createElement("span");
+    status.className = "ticket-agent-status";
+    actions.append(status);
+  }
+  status.className = `ticket-agent-status ticket-agent-status-${state.kind}`;
+  status.textContent = state.text;
+}
+
+async function launchTicketAgent(issue, button, actions) {
   const agentAction = issue?.agent_action;
   const target = typeof agentAction?.target === "string" ? agentAction.target : "";
   const skill = typeof agentAction?.skill === "string" ? agentAction.skill : "";
@@ -852,6 +901,144 @@ async function mergeMergeRequest(mergeRequest, work) {
     mergeSubmitting = false;
     renderMergeRequests(work);
   }
+}
+
+function workflowFilters() {
+  return {
+    query: elements.workflowSearch?.value || "",
+    role: elements.workflowRole?.value || "",
+  };
+}
+
+function syncWorkflowRoles(work) {
+  if (!elements.workflowRole) return;
+  const selected = elements.workflowRole.value;
+  const groups = work?.groups && typeof work.groups === "object" ? work.groups : {};
+  const roles = new Set();
+  Object.values(groups).forEach((issues) => {
+    (Array.isArray(issues) ? issues : []).forEach((issue) => {
+      const role = issue?.agent_action?.skill || issue?.route;
+      if (typeof role === "string" && role) {
+        roles.add(role);
+      }
+    });
+  });
+  if (selected) {
+    roles.add(selected);
+  }
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "Tous les rôles";
+  const options = [...roles].sort((left, right) => left.localeCompare(right, "fr"))
+    .map((role) => {
+      const option = document.createElement("option");
+      option.value = role;
+      option.textContent = role;
+      return option;
+    });
+  elements.workflowRole.replaceChildren(defaultOption, ...options);
+  elements.workflowRole.value = selected;
+}
+
+function actionForEntry(entry) {
+  const resource = entry?.resource && typeof entry.resource === "object"
+    ? entry.resource
+    : entry;
+  if (!resource || typeof resource !== "object") return [];
+
+  if (entry?.kind === "decision") {
+    return (Array.isArray(resource.choices) ? resource.choices : [])
+      .filter((answer) => typeof answer === "string" && answer)
+      .map((answer) => ({
+        label: answer,
+        disabled: decisionSubmitting,
+        run: () => submitDecision(resource, answer),
+      }));
+  }
+  if (entry?.kind === "proposal") {
+    return [
+      ["approve", "Approuver", "button button-primary"],
+      ["investigate", "Investiguer", "button button-quiet"],
+      ["reject", "Rejeter", "button button-danger"],
+    ].map(([decision, label, className]) => ({
+      label,
+      className,
+      disabled: proposalSubmitting,
+      run: () => decideProposal(resource, decision),
+    }));
+  }
+  if (entry?.kind === "merge-request") {
+    return [{
+      label: "Fusionner et supprimer la branche",
+      className: "button button-danger",
+      disabled: mergeSubmitting,
+      run: () => mergeMergeRequest(resource, sources.work),
+    }];
+  }
+  if (entry?.kind === "agent-failure") {
+    return [{
+      label: "Voir les agents",
+      run: () => {
+        detailController.close();
+        navigation.show("agents", {historyMode: "push"});
+      },
+    }];
+  }
+  const agentAction = resource.agent_action;
+  const target = typeof agentAction?.target === "string" ? agentAction.target : "";
+  if (
+    entry?.kind === "issue"
+    && agentAction?.available
+    && target
+  ) {
+    return [{
+      label: agentAction.label || "Lancer l’agent",
+      disabled: pendingTicketActions.has(target),
+      run: (button, actions) => launchTicketAgent(resource, button, actions),
+    }];
+  }
+  return [];
+}
+
+function openItem(entry) {
+  if (!entry) return;
+  detailController.open(renderItemDetail(entry, {forEntry: actionForEntry}));
+}
+
+function openAllActions(queue = currentActionQueue, returnFocusTo = null) {
+  const body = document.createElement("div");
+  body.className = "all-actions";
+  renderActionList(body, queue, openItem);
+  detailController.open({
+    heading: `Toutes les actions (${queue.length})`,
+    body,
+    returnFocusTo,
+  });
+}
+
+function renderPilotageView() {
+  if (sources.work !== lastRoleWork) {
+    syncWorkflowRoles(sources.work);
+    lastRoleWork = sources.work;
+  }
+  const rendered = renderPilotage(
+    {
+      actionQueueCount: elements.actionQueueCount,
+      actionQueueList: elements.actionQueueList,
+      actionQueueMore: elements.actionQueueMore,
+      workflowBoard: elements.workflowBoard,
+      doneCount: elements.doneCount,
+      doneList: elements.doneList,
+      crewHealth: elements.crewHealth,
+    },
+    sources,
+    {
+      filters: workflowFilters,
+      openItem,
+      openAllActions,
+    },
+  );
+  currentActionQueue = rendered.queue;
 }
 
 async function control(action, skill) {
@@ -1027,6 +1214,8 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
 elements.refreshButton.addEventListener("click", () => refresh({ manual: true }));
 elements.globalStopButton?.addEventListener("click", () => globalControl("stop-all"));
 elements.globalResumeButton?.addEventListener("click", () => globalControl("resume-all"));
+elements.workflowSearch?.addEventListener("input", renderPilotageView);
+elements.workflowRole?.addEventListener("change", renderPilotageView);
 elements.historyFilters.addEventListener("submit", (event) => {
   event.preventDefault();
   refresh();

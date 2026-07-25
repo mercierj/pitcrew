@@ -45,8 +45,9 @@
         <h1 id="pilotage-title" tabindex="-1">Pilotage</h1>
 
         <section id="action-queue" class="panel" aria-labelledby="action-queue-title">
-          <h2 id="action-queue-title">Actions à traiter</h2>
-          <p>La file d’actions sera affichée ici.</p>
+          <h2 id="action-queue-title">Actions à traiter <span id="action-queue-count">0</span></h2>
+          <div id="action-queue-list" aria-live="polite"></div>
+          <div id="action-queue-more"></div>
         </section>
 
         <section id="workflow-board" class="panel" aria-labelledby="workflow-board-title">
@@ -66,7 +67,7 @@
               </label>
             </div>
           </div>
-          <p>Le tableau de workflow sera affiché ici.</p>
+          <div id="workflow-board-content" class="work-grid" aria-live="polite"></div>
         </section>
 
         <section id="done-work" class="panel" aria-labelledby="done-work-title">
@@ -74,7 +75,7 @@
           <ol id="done-list"></ol>
         </section>
 
-        <section id="proposals" class="panel proposal-panel" aria-labelledby="proposals-title">
+        <section id="proposals" class="panel proposal-panel" aria-labelledby="proposals-title" hidden>
           <div class="section-heading">
             <div>
               <p class="eyebrow">Validation humaine</p>
@@ -96,7 +97,7 @@
           <div id="decision-content" aria-live="polite"></div>
         </section>
 
-        <section id="overview" class="panel overview" aria-labelledby="overview-title">
+        <section id="overview" class="panel overview" aria-labelledby="overview-title" hidden>
           <div class="section-heading">
             <div>
               <p class="eyebrow">Vue d’ensemble</p>
@@ -117,7 +118,7 @@
           <p id="overview-usage-note" class="usage-note" aria-live="polite"></p>
         </section>
 
-        <section id="gitlab-work" aria-labelledby="gitlab-title">
+        <section id="gitlab-work" aria-labelledby="gitlab-title" hidden>
           <div class="section-heading">
             <div>
               <p class="eyebrow">Synchronisation distante</p>

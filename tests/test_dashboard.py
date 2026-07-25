@@ -1992,6 +1992,67 @@ class DashboardAssetContractTest(unittest.TestCase):
             for path in self.dashboard.glob("*.mjs")
         }
 
+    def test_pilotage_modules_and_application_wiring_contract(self):
+        self.assertIn("pilotage.mjs", self.modules)
+        self.assertIn("detail-panel.mjs", self.modules)
+
+        pilotage = self.modules["pilotage.mjs"]
+        for token in (
+            "buildActionQueue",
+            "buildWorkflow",
+            "queue.slice(0, 3)",
+            "Voir toutes",
+            "ACTIVE_LIFECYCLES",
+            "textContent",
+            "createElement",
+        ):
+            self.assertIn(token, pilotage)
+        self.assertNotIn("innerHTML", pilotage)
+        self.assertNotIn("insertAdjacentHTML", pilotage)
+
+        detail_panel = self.modules["detail-panel.mjs"]
+        for token in (
+            "showModal",
+            'addEventListener("close"',
+            "previousFocus",
+            "previousFocus.focus()",
+            "event.target === dialog",
+        ):
+            self.assertIn(token, detail_panel)
+        self.assertNotIn("innerHTML", detail_panel)
+
+        for token in (
+            'from "./pilotage.mjs"',
+            'from "./detail-panel.mjs"',
+            "renderPilotage",
+            "renderPilotageView",
+            "openItem",
+            "openAllActions",
+            "workflowFilters",
+            "syncWorkflowRoles",
+            "lastRoleWork",
+            "sources.work !== lastRoleWork",
+            'body: JSON.stringify({ action: "answer-decision"',
+            'body: JSON.stringify({ action: "decide-proposal"',
+            'body: JSON.stringify({ action: "merge-merge-request"',
+            'body: JSON.stringify({ action: "launch-ticket-agent"',
+        ):
+            self.assertIn(token, self.javascript)
+
+        self.assertEqual(1, len(re.findall(r"<dialog\b", self.html)))
+        for identifier in (
+            "action-queue-list",
+            "workflow-board-content",
+            "done-list",
+            "crew-health",
+        ):
+            self.assertIn(f'id="{identifier}"', self.html)
+        for identifier in ("proposals", "decision-banner", "overview", "gitlab-work"):
+            self.assertRegex(
+                self.html,
+                rf'<section[^>]+id="{identifier}"[^>]+\bhidden\b',
+            )
+
     def test_html_has_application_shell_views_and_future_module_regions(self):
         for identifier in (
             "app-header",
