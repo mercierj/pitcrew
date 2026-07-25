@@ -12,6 +12,11 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from scripts.pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG
+else:
+    from pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG
+
 
 FORGES = {"github", "gitlab"}
 TRACKERS = {"linear", "github", "gitlab", "none"}
@@ -127,6 +132,16 @@ def validate(config: Mapping[str, Any]) -> None:
     ):
         if safety.get(key, False) is not False:
             raise ConfigError(f"safety.{key} must default to false")
+    agents = config.get("agents", {})
+    if not isinstance(agents, Mapping):
+        raise ConfigError("agents must be an object")
+    for skill, entry in agents.items():
+        if skill not in DEFAULT_MODELS:
+            raise ConfigError(f"agents.{skill} is unsupported")
+        if not isinstance(entry, Mapping):
+            raise ConfigError(f"agents.{skill} must be an object")
+        if set(entry) != {"model"} or entry.get("model") not in MODEL_CATALOG:
+            raise ConfigError(f"agents.{skill}.model is unsupported")
 
 
 def write_project(

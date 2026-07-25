@@ -172,6 +172,23 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "config must be an object"):
             validate([])
 
+    def test_agents_are_optional_but_overrides_must_be_known(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        validate(profile)
+        profile["agents"] = {"research-run": {"model": "gpt-5.6-terra"}}
+        validate(profile)
+
+        for agents, message in (
+            ([], "agents must be an object"),
+            ({"unknown-run": {"model": "gpt-5.6-terra"}}, "agents.unknown-run"),
+            ({"research-run": []}, "agents.research-run"),
+            ({"research-run": {"model": "invented"}}, "agents.research-run.model"),
+        ):
+            with self.subTest(agents=agents):
+                invalid = {**profile, "agents": agents}
+                with self.assertRaisesRegex(ConfigError, message):
+                    validate(invalid)
+
     def test_repositories_require_non_empty_name_and_path(self):
         valid = {
             "schema_version": 1,
