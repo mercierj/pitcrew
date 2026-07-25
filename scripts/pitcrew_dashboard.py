@@ -6,12 +6,13 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from scripts.pitcrew_config import ConfigError, validate
+from scripts.pitcrew_config import ConfigError, update_runtime_model, validate
 from scripts.pitcrew_history import HistoryStore, classify_record
 try:
     from scripts.pitcrew_models import (
@@ -20,6 +21,7 @@ try:
         aggregate_usage,
         public_catalog,
         resolve_model,
+        MODEL_CATALOG,
     )
 except ModuleNotFoundError:
     from pitcrew_models import (
@@ -28,6 +30,7 @@ except ModuleNotFoundError:
         aggregate_usage,
         public_catalog,
         resolve_model,
+        MODEL_CATALOG,
     )
 
 
@@ -103,6 +106,7 @@ class DashboardService:
         self._gitlab_cached_at: datetime | None = None
         self._last_successful_refresh: str | None = None
         self._schedule_cache: list[dict] | None = None
+        self._control_lock = threading.RLock()
 
     def _load_config(self) -> dict:
         try:
@@ -416,31 +420,12 @@ class DashboardService:
                         related.add(url)
         return sorted(related)
 
-    def control(self, action: str, skill: str) -> dict:
-        if action not in CONTROL_ACTIONS:
-            raise DashboardError(f"unknown action: {action}")
-        self._enabled_entry(skill)
-
-        if action == "trigger":
-            try:
-                process = subprocess.Popen(
-                    [str(RUNNER), skill, self.project, "--scheduled"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            except OSError as error:
-                raise DashboardError(
-                    _redacted_error(str(error), "failed to trigger agent")
-                ) from error
-            return {"accepted": True, "pid": process.pid}
-
-        scheduler_action = "stop" if action == "stop" else "install"
+    def _scheduler_control(self, action: str, skill: str) -> None:
         result = self._run(
             [
                 "python3",
                 str(SCHEDULER),
-                scheduler_action,
+                action,
                 "--project",
                 self.project,
                 "--skill",
@@ -451,4 +436,48 @@ class DashboardService:
             raise DashboardError(
                 _redacted_error(result.stderr, f"failed to {action} agent")
             )
-        return {"accepted": True}
+        self._schedule_cache = None
+
+    def _trigger(self, skill: str) -> int:
+        try:
+            process = subprocess.Popen(
+                [str(RUNNER), skill, self.project, "--scheduled"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise DashboardError(
+                _redacted_error(str(error), "failed to trigger agent")
+            ) from error
+        return process.pid
+
+    def control(self, action: str, skill: str) -> dict:
+        with self._control_lock:
+            if action not in CONTROL_ACTIONS:
+                raise DashboardError(f"unknown action: {action}")
+            self._enabled_entry(skill)
+            if action == "trigger":
+                return {"accepted": True, "pid": self._trigger(skill)}
+            self._scheduler_control("stop" if action == "stop" else "install", skill)
+            return {"accepted": True}
+
+    def change_model(self, skill: str, model: str) -> dict:
+        with self._control_lock:
+            self._enabled_entry(skill)
+            if not isinstance(model, str) or model not in MODEL_CATALOG:
+                raise DashboardError("unsupported model")
+            self._scheduler_control("stop", skill)
+            try:
+                update_runtime_model(self.project, skill, model)
+                self.config = self._load_config()
+            except (ConfigError, OSError) as error:
+                raise DashboardError(
+                    _redacted_error(str(error), "failed to update agent model")
+                ) from error
+            self._scheduler_control("install", skill)
+            return {
+                "accepted": True,
+                "pid": self._trigger(skill),
+                "model": model,
+            }

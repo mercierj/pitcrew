@@ -746,6 +746,123 @@ class DashboardServiceTest(unittest.TestCase):
                 kwargs,
             )
 
+    def test_change_model_stops_persists_installs_and_triggers_in_order(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        process = mock.Mock(pid=9753)
+        calls = []
+
+        def persist(project, skill, model):
+            calls.append(("persist", project, skill, model))
+
+        original_run = service._run
+
+        def tracked_run(args):
+            if args[2] in {"stop", "install"}:
+                calls.append((args[2],))
+            return original_run(args)
+
+        service._run = tracked_run
+        with (
+            mock.patch(
+                "scripts.pitcrew_dashboard.update_runtime_model",
+                side_effect=persist,
+            ),
+            mock.patch(
+                "scripts.pitcrew_dashboard.subprocess.Popen",
+                return_value=process,
+            ) as starter,
+        ):
+            result = service.change_model("research-run", "gpt-5.6-sol")
+
+        self.assertEqual(
+            [
+                ("stop",),
+                ("persist", "getbill", "research-run", "gpt-5.6-sol"),
+                ("install",),
+            ],
+            calls,
+        )
+        starter.assert_called_once_with(
+            [
+                str(ROOT / "bin/pitcrew-codex.sh"),
+                "research-run",
+                "getbill",
+                "--scheduled",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.assertEqual(
+            {"accepted": True, "pid": 9753, "model": "gpt-5.6-sol"},
+            result,
+        )
+
+    def test_change_model_rejects_unknown_disabled_and_unsupported_before_mutation(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        with mock.patch("scripts.pitcrew_dashboard.update_runtime_model") as persist:
+            for skill, model in (
+                ("unknown-run", "gpt-5.6-sol"),
+                ("qa-run", "gpt-5.6-sol"),
+                ("research-run", "not-a-model"),
+            ):
+                with self.subTest(skill=skill, model=model):
+                    with self.assertRaises(DashboardError):
+                        service.change_model(skill, model)
+        persist.assert_not_called()
+        self.assertFalse(any("stop" in args for args, _ in runner.calls))
+        self.assertFalse(any("install" in args for args, _ in runner.calls))
+
+    def test_change_model_stops_at_each_failure_boundary_without_rollback(self):
+        service = self.service(FakeRunner())
+        original_config = dict(service.config)
+
+        with mock.patch.object(
+            service,
+            "_enabled_entry",
+            return_value={"skill": "research-run", "enabled": True},
+        ), mock.patch.object(service, "_scheduler_control") as scheduler, mock.patch(
+            "scripts.pitcrew_dashboard.update_runtime_model"
+        ) as persist, mock.patch.object(service, "_trigger") as trigger:
+            scheduler.side_effect = DashboardError("Authorization: Basic secret")
+            with self.assertRaises(DashboardError):
+                service.change_model("research-run", "gpt-5.6-sol")
+            persist.assert_not_called()
+            trigger.assert_not_called()
+
+            scheduler.reset_mock(side_effect=True)
+            persist.side_effect = OSError("Authorization: Basic secret")
+            with self.assertRaises(DashboardError) as raised:
+                service.change_model("research-run", "gpt-5.6-sol")
+            self.assertIn("Authorization: [REDACTED]", str(raised.exception))
+            self.assertEqual(original_config, service.config)
+            self.assertEqual([mock.call("stop", "research-run")], scheduler.call_args_list)
+            trigger.assert_not_called()
+
+            scheduler.reset_mock()
+            persist.reset_mock(side_effect=True)
+            updated = dict(original_config)
+            updated["agents"] = {"research-run": {"model": "gpt-5.6-sol"}}
+            with mock.patch.object(service, "_load_config", return_value=updated):
+                scheduler.side_effect = (None, DashboardError("install failed"))
+                with self.assertRaises(DashboardError):
+                    service.change_model("research-run", "gpt-5.6-sol")
+            self.assertEqual(updated, service.config)
+            trigger.assert_not_called()
+
+            scheduler.reset_mock(side_effect=True)
+            trigger.side_effect = DashboardError("trigger failed")
+            with mock.patch.object(service, "_load_config", return_value=updated):
+                with self.assertRaises(DashboardError):
+                    service.change_model("research-run", "gpt-5.6-sol")
+            self.assertEqual(updated, service.config)
+            self.assertEqual(
+                [mock.call("stop", "research-run"), mock.call("install", "research-run")],
+                scheduler.call_args_list,
+            )
+
     def test_local_command_oserrors_are_scrubbed_and_bounded(self):
         raw_error = "Authorization: Basic local-secret\n" + "x" * 3000
 
@@ -802,6 +919,12 @@ class FakeDashboardService:
             raise DashboardError("disabled role: qa-run")
         self.accepted_controls.append((action, skill))
         return {"accepted": True, "pid": 9876}
+
+    def change_model(self, skill, model):
+        self.calls.append(("change_model", skill, model))
+        if skill not in ENABLED_SKILLS or model != "gpt-5.6-sol":
+            raise DashboardError("action rejected")
+        return {"accepted": True, "pid": 6789, "model": model}
 
 
 class DashboardEntryPointTest(unittest.TestCase):
@@ -1009,6 +1132,86 @@ class DashboardHttpTest(unittest.TestCase):
             [("trigger", "research-run")],
             self.service.accepted_controls,
         )
+
+    def test_post_change_model_accepts_exact_request_and_forwards_model(self):
+        body = json.dumps(
+            {
+                "action": "change-model",
+                "skill": "research-run",
+                "model": "gpt-5.6-sol",
+            }
+        ).encode()
+
+        status, headers, payload = self.request(
+            "POST",
+            "/api/actions",
+            body,
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+
+        self.assertEqual(202, status)
+        self.assertEqual(
+            {"accepted": True, "pid": 6789, "model": "gpt-5.6-sol"},
+            json.loads(payload),
+        )
+        self.assertEqual(
+            [("change_model", "research-run", "gpt-5.6-sol")],
+            self.service.calls,
+        )
+        self.assert_security_headers(headers)
+
+    def test_post_change_model_rejects_malformed_and_boundary_requests(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Pitcrew-Session": self.token,
+        }
+        cases = (
+            ({"action": "change-model", "skill": "research-run"}, headers, 400),
+            (
+                {"action": "change-model", "skill": "research-run", "model": ""},
+                headers,
+                400,
+            ),
+            (
+                {"action": "change-model", "skill": "research-run", "model": 1},
+                headers,
+                400,
+            ),
+            (
+                {
+                    "action": "change-model",
+                    "skill": "research-run",
+                    "model": "gpt-5.6-sol",
+                    "extra": True,
+                },
+                headers,
+                400,
+            ),
+            (
+                {"action": "change-model", "skill": "research-run", "model": "gpt-5.6-sol"},
+                {"Content-Type": "application/json"},
+                403,
+            ),
+            (
+                {"action": "change-model", "skill": "research-run", "model": "gpt-5.6-sol"},
+                {**headers, "Origin": "https://evil.example"},
+                403,
+            ),
+        )
+        for request, request_headers, expected in cases:
+            with self.subTest(request=request):
+                status, response_headers, _ = self.request(
+                    "POST",
+                    "/api/actions",
+                    json.dumps(request).encode(),
+                    request_headers,
+                )
+                self.assertEqual(expected, status)
+                self.assert_security_headers(response_headers)
+        self.assertEqual([], self.service.calls)
 
     def test_host_and_origin_boundary(self):
         status, _, _ = self.request("GET", "/api/status")

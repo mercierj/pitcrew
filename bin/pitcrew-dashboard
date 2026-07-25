@@ -200,18 +200,36 @@ def create_server(
             except (json.JSONDecodeError, UnicodeDecodeError):
                 self._send_json(400, {"error": "invalid request"})
                 return
+            if not isinstance(request, dict):
+                self._send_json(400, {"error": "invalid request"})
+                return
+            action = request.get("action")
+            skill = request.get("skill")
             if (
-                not isinstance(request, dict)
-                or set(request) != {"action", "skill"}
-                or not isinstance(request["action"], str)
-                or not isinstance(request["skill"], str)
-                or not request["action"]
-                or not request["skill"]
+                not isinstance(action, str)
+                or not isinstance(skill, str)
+                or not action
+                or not skill
             ):
                 self._send_json(400, {"error": "invalid request"})
                 return
+            if action == "change-model":
+                model = request.get("model")
+                if (
+                    set(request) != {"action", "skill", "model"}
+                    or not isinstance(model, str)
+                    or not model
+                ):
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+            elif set(request) != {"action", "skill"}:
+                self._send_json(400, {"error": "invalid request"})
+                return
             try:
-                result = service.control(request["action"], request["skill"])
+                if action == "change-model":
+                    result = service.change_model(skill, model)
+                else:
+                    result = service.control(action, skill)
             except DashboardError:
                 self._send_json(403, {"error": "action rejected"})
                 return
