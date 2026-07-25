@@ -1,0 +1,38 @@
+{
+  "name": "pitcrew",
+  "version": "0.2.0+codex.20260724211031",
+  "description": "Codex-native development crew for recurring research, implementation, review, validation, and delivery workflows.",
+  "author": {
+    "name": "Felix Carrard and contributors",
+    "url": "https://github.com/fcarrar"
+  },
+  "homepage": "https://github.com/mercierj/pitcrew",
+  "repository": "https://github.com/mercierj/pitcrew",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "automation",
+    "code-review",
+    "validation",
+    "delivery"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Pitcrew",
+    "shortDescription": "A Codex crew for continuous repository work",
+    "longDescription": "Run focused research, implementation, review, validation, operations, and release workflows with explicit safety gates and project profiles.",
+    "developerName": "Pitcrew contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Repository research",
+      "Issue and merge-request workflows",
+      "Code review and validation",
+      "Guarded release preparation"
+    ],
+    "defaultPrompt": [
+      "Use Pitcrew to research one high-confidence improvement.",
+      "Use Pitcrew to review the next eligible change.",
+      "Use Pitcrew to validate the GetBill project configuration."
+    ]
+  }
+}

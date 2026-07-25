@@ -1,119 +1,131 @@
-#!/bin/bash
-# pitcrew Codex installer — wire pitcrew into the OpenAI Codex CLI.
-#
-# RUN THIS FROM INSIDE THE pitcrew CLONE. It does NOT touch your project repos.
-#
-# Same skill bodies as the Claude Code install — only the adapter differs:
-#   1. Symlinks each skill (skills/<slug>/SKILL.md) → ~/.codex/prompts/<slug>.md
-#      (Codex custom prompts → `/research-run` etc. work in the Codex TUI).
-#   2. Seeds the SHARED runtime config at ~/.claude/agent-loop/<project>/ — the same
-#      dir the Claude install uses, so one config drives both harnesses. (The "claude"
-#      in the path is just the directory name; it's harness-neutral. Override with
-#      $PITCREW_HOME if you want a different location — see docs/CODEX.md.)
-#   3. Codex has no `/loop`. Schedule the skills via cron + bin/pitcrew-codex.sh
-#      (this script prints a ready-to-paste crontab; full guide in docs/CODEX.md).
-#
-# Usage (from the repo root or its bin/ dir):
-#   ./bin/install-codex.sh [project-name] [--no-wizard]
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-NO_WIZARD=0
-PROJECT=""
-for arg in "$@"; do
-  case "$arg" in
-    --no-wizard) NO_WIZARD=1 ;;
-    -*) echo "Unknown flag: $arg" >&2; exit 2 ;;
-    *) [ -z "$PROJECT" ] && PROJECT="$arg" ;;
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+PROJECT="example"
+PROJECT_SET=0
+PROFILE="generic"
+DRY_RUN=0
+
+while (($#)); do
+  case "$1" in
+    --profile)
+      [[ $# -ge 2 ]] || { echo "--profile requires generic or getbill" >&2; exit 2; }
+      PROFILE="$2"
+      shift 2
+      ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --*) echo "Unknown argument: $1" >&2; exit 2 ;;
+    *)
+      [[ "$PROJECT_SET" == 0 ]] || { echo "Unexpected project argument: $1" >&2; exit 2; }
+      PROJECT="$1"
+      PROJECT_SET=1
+      shift
+      ;;
   esac
 done
-PROJECT="${PROJECT:-example}"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROMPTS_DIR="$HOME/.codex/prompts"
-PROJECT_DIR="${PITCREW_HOME:-$HOME/.claude/agent-loop}/$PROJECT"
-DEFAULT_FILE="${PITCREW_HOME:-$HOME/.claude/agent-loop}/default.txt"
 
-SKILLS=(
-  research-run qa-run implementer-run reviewer-run validator-run unblock
-  investigate-run stale-sweep ops-run releaser-run manager-run coverage-run
-  dev-verify-run
-)
+case "$PROFILE" in
+  generic|getbill) ;;
+  *) echo "Unsupported profile: $PROFILE" >&2; exit 2 ;;
+esac
 
-echo "=== pitcrew Codex installer ==="
-echo "  This wires pitcrew (this repo) into the Codex CLI. Your project repos are"
-echo "  untouched — they're only referenced by path in the config."
-echo
-echo "  pitcrew repo:  $REPO_ROOT"
-echo "  prompts dir:   $PROMPTS_DIR    (Codex custom prompts → slash commands)"
-echo "  project:       $PROJECT"
-echo "  runtime dir:   $PROJECT_DIR    (shared with the Claude install)"
-echo
+MARKETPLACE="$HOME/.agents/plugins/marketplace.json"
+PLUGIN_LINK="$HOME/plugins/pitcrew"
+CONFIG="${CODEX_HOME:-$HOME/.codex}/pitcrew/$PROJECT/config.json"
 
-[ -d "$REPO_ROOT/skills" ] && [ -d "$REPO_ROOT/references" ] || {
-  echo "ERROR: not a pitcrew checkout (missing skills/ or references/). Run from inside the repo."; exit 1; }
-command -v jq >/dev/null 2>&1 || { echo "ERROR: jq not found. Install: brew install jq / apt-get install jq"; exit 1; }
-command -v codex >/dev/null 2>&1 || echo "  NOTE: 'codex' CLI not found on PATH — install it before scheduling loops (https://github.com/openai/codex)."
-echo
-
-# Step 1: symlink skills → Codex custom prompts
-echo "[1/3] Symlinking skills into Codex prompts..."
-mkdir -p "$PROMPTS_DIR"
-linked=0
-for slug in "${SKILLS[@]}"; do
-  src="$REPO_ROOT/skills/$slug/SKILL.md"
-  dst="$PROMPTS_DIR/$slug.md"
-  [ -f "$src" ] || { echo "  ! skipped $slug (no SKILL.md)"; continue; }
-  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then
-    echo "  = already linked: $slug"
-  else
-    rm -f "$dst"; ln -s "$src" "$dst"; echo "  + $slug.md -> skills/$slug/SKILL.md"
-  fi
-  linked=$((linked+1))
-done
-echo "  linked $linked skills as Codex prompts"
-echo
-
-# Step 2: shared runtime config (reuse the harness-agnostic wizard)
-echo "[2/3] Configuring project '$PROJECT' (shared runtime)..."
-mkdir -p "$PROJECT_DIR/state"
-if [ -f "$PROJECT_DIR/config.json" ]; then
-  echo "  = config.json already exists — leaving it. Re-run: ./bin/configure.sh $PROJECT"
-elif [ "$NO_WIZARD" = 1 ] || [ ! -t 0 ]; then
-  cp "$REPO_ROOT/references/config.example.json" "$PROJECT_DIR/config.json"
-  echo "  + copied references/config.example.json (wizard skipped). Edit: $PROJECT_DIR/config.json"
-else
-  "$REPO_ROOT/bin/configure.sh" "$PROJECT" || {
-    echo "  (wizard exited early — copied the example to edit by hand)"
-    [ -f "$PROJECT_DIR/config.json" ] || cp "$REPO_ROOT/references/config.example.json" "$PROJECT_DIR/config.json"; }
+if [[ "$DRY_RUN" == 1 ]]; then
+  printf '%s\n' \
+    "plugin_source=$REPO_ROOT" \
+    "plugin_link=$PLUGIN_LINK" \
+    "marketplace=$MARKETPLACE" \
+    "marketplace_source=./plugins/pitcrew" \
+    "runtime_config=$CONFIG" \
+    "profile=$PROFILE"
+  exit 0
 fi
-for doc in TOPOLOGY LINEAR-ACCESS DIRECTED-TARGET; do
-  cp -f "$REPO_ROOT/references/$doc.md" "$PROJECT_DIR/$doc.md"
-done
-[ -f "$PROJECT_DIR/lessons.md" ] || printf '# Agent-Loop Lessons (project: %s)\n\nPer-operator corrections the skills read each fire. Never committed.\n' "$PROJECT" > "$PROJECT_DIR/lessons.md"
-echo "$PROJECT" > "$DEFAULT_FILE"
-echo "  = runtime ready: $PROJECT_DIR"
-echo
 
-# Step 3: scheduling (Codex has no /loop → cron)
-echo "[3/3] Scheduling — Codex has no /loop, so use cron + bin/pitcrew-codex.sh."
-echo
-echo "  Paste into \`crontab -e\` (adjust cadences; logs to ~/.codex/logs/)."
-echo "  Linear-coupled skills need network, so widen their sandbox:"
-echo "  ----------------------------------------------------------------------"
-RUNNER="$REPO_ROOT/bin/pitcrew-codex.sh"
-NET="CODEX_SANDBOX=danger-full-access"
-cat <<CRON
-  */30 *  * * *  $RUNNER research-run $PROJECT              >> ~/.codex/logs/research-run.log 2>&1
-  0    */2 * * *  $RUNNER qa-run $PROJECT                    >> ~/.codex/logs/qa-run.log 2>&1
-  */15 *  * * *  $NET $RUNNER implementer-run $PROJECT   >> ~/.codex/logs/implementer-run.log 2>&1
-  */15 *  * * *  $NET $RUNNER reviewer-run $PROJECT      >> ~/.codex/logs/reviewer-run.log 2>&1
-  0    *  * * *  $NET $RUNNER manager-run $PROJECT       >> ~/.codex/logs/manager-run.log 2>&1
-CRON
-echo "  ----------------------------------------------------------------------"
-echo
-echo "=== Install complete ==="
-echo "  • research-run + qa-run need no Linear MCP (they write ledgers) — run as-is."
-echo "  • Linear-coupled skills: add a Linear MCP entry to ~/.codex/config.toml"
-echo "    (see references/codex-config.example.toml). The binding block already detects it."
-echo "    Run those with CODEX_SANDBOX=danger-full-access (they need network). See docs/CODEX.md."
-echo "  • Smoke one pass now:   ./bin/pitcrew-codex.sh research-run $PROJECT"
+python3 -m unittest tests.test_plugin_contract -v
+
+mkdir -p "$(dirname "$PLUGIN_LINK")" "$(dirname "$MARKETPLACE")"
+if [[ -e "$PLUGIN_LINK" || -L "$PLUGIN_LINK" ]]; then
+  [[ -L "$PLUGIN_LINK" && "$(readlink "$PLUGIN_LINK")" == "$REPO_ROOT" ]] || {
+    echo "Refusing to replace existing plugin path: $PLUGIN_LINK" >&2
+    exit 2
+  }
+else
+  ln -s "$REPO_ROOT" "$PLUGIN_LINK"
+fi
+
+MARKETPLACE_NAME="$(
+  python3 - "$MARKETPLACE" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.exists():
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+else:
+    payload = {
+        "name": "personal",
+        "interface": {"displayName": "Personal"},
+        "plugins": [],
+    }
+
+name = payload.get("name")
+if not isinstance(name, str) or not name:
+    raise SystemExit(f"{path} must contain a non-empty name")
+interface = payload.setdefault("interface", {})
+if not isinstance(interface, dict):
+    raise SystemExit(f"{path} interface must be an object")
+interface.setdefault("displayName", "Personal")
+plugins = payload.setdefault("plugins", [])
+if not isinstance(plugins, list):
+    raise SystemExit(f"{path} plugins must be an array")
+
+entry = {
+    "name": "pitcrew",
+    "source": {"source": "local", "path": "./plugins/pitcrew"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Developer Tools",
+}
+if not all(isinstance(item, dict) for item in plugins):
+    raise SystemExit(f"{path} plugin entries must be objects")
+matches = [index for index, item in enumerate(plugins) if item.get("name") == "pitcrew"]
+if len(matches) > 1:
+    raise SystemExit(f"{path} contains duplicate pitcrew entries")
+if matches:
+    plugins[matches[0]] = entry
+else:
+    plugins.append(entry)
+
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, temp_name = tempfile.mkstemp(prefix=".marketplace-", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    os.replace(temp_name, path)
+finally:
+    if os.path.exists(temp_name):
+        os.unlink(temp_name)
+print(name)
+PY
+)"
+
+if [[ ! -f "$CONFIG" ]]; then
+  "$REPO_ROOT/bin/configure.sh" "$PROJECT" --profile "$PROFILE"
+else
+  echo "Preserving existing runtime config: $CONFIG"
+fi
+
+echo "Installed local plugin source: $PLUGIN_LINK"
+echo "Marketplace: $MARKETPLACE"
+echo "Refresh with: codex plugin add pitcrew@$MARKETPLACE_NAME"
+echo "Start a new Codex thread after refreshing the plugin."

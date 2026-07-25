@@ -1,165 +1,39 @@
 {
-  "_comment": "Per-project config consumed by the agent-loop skills (research-run, qa-run, implementer-run, reviewer-run, validator-run, unblock, investigate-run, stale-sweep). Save this filled-in as ~/.claude/agent-loop/<project>/config.json. The skills read $1 (project arg) or fall back to the name in ~/.claude/agent-loop/default.txt.",
-
-  "project_name": "example-project",
-
-  "linear": {
-    "_comment": "Set use=false if this project doesn't use Linear (e.g. side projects with just GitHub Issues). Skills will degrade gracefully.",
-    "use": true,
-    "workspace_slug": "example",
-    "team_name": "Example",
-    "team_id": "",
-    "_team_id_comment": "The team's UUID. The LINEAR BINDING block in every skill confirms it's authed to the right workspace by checking list_teams contains this id. Get it once via mcp__linear-server__list_teams. Required when linear.use=true.",
-    "ticket_prefix": "EX",
-    "assignee_email": "you@example.com",
-    "labels": {
-      "quick_win": "quick-win",
-      "bug": "Bug",
-      "improvement": "Improvement"
-    },
-    "label_ids": {
-      "_comment": "Optional. If omitted, skills look up by name on first run and cache. Looking up by ID is cheaper.",
-      "quick_win": "",
-      "bug": "",
-      "improvement": ""
-    },
-    "agent_backlog_project": {
-      "_comment": "Optional dedicated project for agent-generated tickets, keeps main backlog clean. Set name/id to '' to file directly into the team backlog.",
-      "name": "Agent Backlog",
-      "id": ""
-    }
+  "_comment": "Copy through bin/configure.sh; runtime belongs under ${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/config.json.",
+  "schema_version": 1,
+  "project_name": "example",
+  "providers": {
+    "forge": "github",
+    "tracker": "linear"
   },
-
-  "github": {
-    "reviewer_login": "your-github-username",
-    "org": "your-github-org"
-  },
-
-  "releaser": {
-    "_comment": "releaser-run. default_scope: 'agent-only' (default — only auto-release commits whose PR closed an agent-labeled agent-done ticket; never auto-ship your own merges) or 'all'. Per-repo release.scope overrides. Directed releases (/releaser-run <project> --release <repo>[@<ref>], or a [release-request] ticket) bypass this and ship what you name, through all gates.",
-    "default_scope": "agent-only"
-  },
-
-  "dev_verify": {
-    "_comment": "dev-verify-run: post-deploy verifier. After a merged PR is confirmed LIVE on dev (repos[].health.version_url/dev_url, else settle_delay), runs the test-flow flows for the changed capabilities against dev and writes failures to findings_ledger -> manager `verify` bucket. Reuses validator's diff->capability planning + qa's flow-runner. Omit if you don't run dev-verify-run.",
-    "settle_delay_seconds": 600,
-    "max_prs_per_fire": 3,
-    "findings_ledger": ""
-  },
-
-  "coverage": {
-    "_comment": "coverage-run. Finds capability×surface cells with no flow and opens grounded flow PRs to the test-flow repo (paced). Uses qa.test_flow_repo + researcher.architecture_repo (capability docs) + the api-client types for grounding.",
-    "max_new_flows_per_fire": 3
-  },
-
-  "manager": {
-    "_comment": "manager-run intake/grooming — the single paced gate from findings sources into the issue tracker. PER-SOURCE BUCKETS: each source gets its own Linear label (its bucket) and its own depth, so audit / qa / research never starve each other. Each sources[] entry: {name, findings_json, format(audit-v1|qa-v1|research-v1), label(default=name; audit defaults to audit_label), target_depth(default below), investigate_wip(default below), report_md(optional)}. target_queue_depth/investigate_wip below are the FALLBACK per-source defaults. risky_categories_regex routes critical/high + security/auth/money findings to investigate-first.",
-    "sources": [
-      { "name": "audit",    "findings_json": "~/Documents/projects/<audit>/data/final_result.json", "format": "audit-v1", "label": "audit", "report_md": "~/Documents/projects/<audit>/REPORT.md" },
-      { "name": "qa",       "findings_json": "~/.claude/agent-loop/<project>/findings/qa-findings.json",       "format": "qa-v1",       "label": "qa",       "target_depth": 5, "investigate_wip": 3 },
-      { "name": "research", "findings_json": "~/.claude/agent-loop/<project>/findings/research-findings.json", "format": "research-v1", "label": "research", "target_depth": 5, "investigate_wip": 3 },
-      { "name": "verify",   "findings_json": "~/.claude/agent-loop/<project>/findings/verify-findings.json",   "format": "qa-v1",       "label": "verify",   "target_depth": 4, "investigate_wip": 2 }
-    ],
-    "target_queue_depth": 5,
-    "investigate_wip": 3,
-    "audit_label": "audit",
-    "risky_categories_regex": "IDOR|access.?control|auth|identity|spoof|takeover|currency|money|price|unit.?math|injection|secret|token|SSRF|XSS|CSRF|PII"
-  },
-
-  "backend": {
-    "_comment": "Resilience layer (see references/LINEAR-ACCESS.md). mode='linear' (default): Linear is the source of truth, skills detect whichever Linear MCP binding is live (mcp__linear-server__* OR mcp__claude_ai_Linear__*) and degrade to a read-only board cache when none is. mode='local' (a full machine-local board, no Linear) is reserved/not built.",
-    "mode": "linear",
-    "cache_dir": "board-cache"
-  },
-
-  "slack": {
-    "_comment": "All optional. Empty webhook URL = silently skip notifications (the run never fails on missing Slack).",
-    "qa_webhook_url": "",
-    "quickwins_webhook_url": "",
-    "user_mention": "",
-    "timezone": "Europe/Paris"
-  },
-
   "repos": [
     {
-      "name": "example-frontend",
-      "path": "~/Documents/example-frontend",
-      "default_branch": "main",
-      "lang": "ts",
-      "tags": ["widgets", "ui"]
-    },
-    {
-      "name": "example-backend",
-      "path": "~/Documents/example-backend",
-      "default_branch": "main",
-      "lang": "go",
-      "tags": ["api", "bff"],
-      "contributor_skill": "example-backend-contributor",
-      "health": {
-        "_comment": "ops-run watches these. dev_url/prod_url GET-probed (expect 2xx). critical_routes appended to the base host (expect non-5xx). Omit the block on repos with no running service.",
-        "dev_url": "https://api.dev.example.com/health",
-        "prod_url": "https://api.example.com/health",
-        "critical_routes": [],
-        "anti_flap_rechecks": 3,
-        "recheck_delay_seconds": 20
-      },
-      "release": {
-        "_comment": "releaser-run. autonomy: off|prepare|dev|full. 'full' (auto dev->prod+rollback) requires smoke AND rollback set, else it downgrades to dev. mechanism is a class hint; the repo's own CLAUDE.md deploy section is the source of truth.",
-        "autonomy": "prepare",
-        "mechanism": "deploy-pr",
-        "dev_pr_pattern": "deploy/dev-*",
-        "prod_pr_pattern": "deploy/prod/v*",
-        "migration_check": "",
-        "migration": "",
-        "smoke": "",
-        "rollback": "",
-        "scope": "",
-        "depends_on": [],
-        "train": "",
-        "settle_timeout_fires": 8
-      }
-    },
-    {
-      "name": "example-worker",
-      "path": "~/Documents/example-worker",
-      "default_branch": "main",
-      "lang": "go",
-      "tags": ["worker", "jobs"]
-    },
-    {
-      "name": "example-docs",
-      "path": "~/Documents/example-docs",
-      "default_branch": "main",
-      "lang": "md",
-      "tags": ["docs"]
-    },
-    {
-      "name": "example-test-flow",
-      "path": "~/Documents/example-test-flow",
-      "default_branch": "main",
-      "lang": "md",
-      "tags": ["test-flow", "e2e"]
+      "name": "example-app",
+      "path": "/absolute/path/to/example-app"
     }
   ],
-  "_repos_contributor_skill_note": "Optional per-repo `contributor_skill`: the name of a Claude skill carrying repo-specific conventions (test commands, architecture, migration patterns). The implementer invokes it before writing code in that repo. If omitted, the implementer falls back to scanning available skills by repo name.",
-
-  "qa": {
-    "_comment": "Which repo holds the test-flow markdown contracts. qa-run records findings to `findings_ledger` (default ~/.claude/agent-loop/<project>/findings/qa-findings.json) instead of filing Linear tickets — /manager-run tickets them paced. Omit the whole `qa` block if this project doesn't run qa-run.",
-    "test_flow_repo": "example-test-flow",
-    "findings_ledger": ""
+  "release": {
+    "autonomy": "off"
   },
-
-  "researcher": {
-    "_comment": "research-run no longer files tickets directly — it records findings to `findings_ledger` (default ~/.claude/agent-loop/<project>/findings/research-findings.json) which /manager-run reads and paces into the tracker. Add the same path as a `research` source in manager.sources[]. architecture_repo/path enable the optional `architecture` research mode (dropped if empty).",
-    "modes": ["hygiene", "hardening", "doc-sync", "architecture"],
-    "findings_ledger": "",
-    "architecture_repo": "",
-    "architecture_path": ""
+  "agents": {
+    "research-run": {"model": "gpt-5.6-terra"},
+    "manager-run": {"model": "gpt-5.6-luna"},
+    "implementer-run": {"model": "gpt-5.6-sol"},
+    "reviewer-run": {"model": "gpt-5.6-sol"},
+    "validator-run": {"model": "gpt-5.6-terra"},
+    "investigate-run": {"model": "gpt-5.6-sol"},
+    "stale-sweep": {"model": "gpt-5.6-luna"},
+    "qa-run": {"model": "gpt-5.6-terra"},
+    "coverage-run": {"model": "gpt-5.6-terra"},
+    "dev-verify-run": {"model": "gpt-5.6-terra"},
+    "ops-run": {"model": "gpt-5.6-luna"},
+    "unblock": {"model": "gpt-5.6-sol"},
+    "releaser-run": {"model": "gpt-5.6-terra"}
   },
-
-  "loop": {
-    "_comment": "Pacing for /loop dynamic mode. Skills use these defaults if config omits them.",
-    "fast_wakeup_seconds": 120,
-    "slow_heartbeat_seconds": 1500
+  "safety": {
+    "confirm_each_remote_action": [],
+    "allow_database_writes": false,
+    "allow_destructive_git": false,
+    "allow_secret_reads": false
   }
 }

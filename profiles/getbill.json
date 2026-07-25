@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "project_name": "getbill",
+  "providers": {"forge": "gitlab", "tracker": "gitlab"},
+  "gitlab": {
+    "host": "gitlab.com",
+    "user": "joachim28",
+    "owner": "getbill1",
+    "project_path": "getbill1/getbill",
+    "project_id": 59043683,
+    "tracker": {
+      "assignee_username": "joachim28",
+      "ticket_prefix": "getbill1/getbill#",
+      "labels": {
+        "agent": "pitcrew-agent",
+        "investigate": "pitcrew-route::investigate",
+        "quick_win": "pitcrew-size::quick-win",
+        "bug": "pitcrew-type::bug",
+        "improvement": "pitcrew-type::improvement"
+      },
+      "states": {
+        "todo": "pitcrew-state::todo",
+        "processing": "pitcrew-state::processing",
+        "review": "pitcrew-state::review",
+        "blocked": "pitcrew-state::blocked",
+        "done": "pitcrew-state::done"
+      }
+    }
+  },
+  "repos": [
+    {
+      "name": "getbill",
+      "path": "/Users/jo/Prog/getbill",
+      "default_branch": "develop",
+      "lang": "php",
+      "tags": ["symfony", "stimulus", "vite", "mysql"]
+    }
+  ],
+  "researcher": {
+    "findings_ledger": "/Users/jo/.codex/pitcrew/getbill/findings/research-findings.json"
+  },
+  "manager": {
+    "target_queue_depth": 3,
+    "investigate_wip": 1,
+    "risky_categories_regex": "IDOR|access.?control|auth|identity|spoof|takeover|currency|money|price|unit.?math|injection|secret|token|SSRF|XSS|CSRF|PII|security|webhook|signature|bypass|encryption|crypto|tenant",
+    "sources": [
+      {
+        "name": "research",
+        "format": "research-v1",
+        "label": "pitcrew-source::research",
+        "findings_json": "/Users/jo/.codex/pitcrew/getbill/findings/research-findings.json",
+        "target_depth": 3,
+        "investigate_wip": 1
+      }
+    ]
+  },
+  "release": {"autonomy": "off"},
+  "agents": {
+    "research-run": {"model": "gpt-5.6-terra"},
+    "manager-run": {"model": "gpt-5.6-luna"},
+    "implementer-run": {"model": "gpt-5.6-sol"},
+    "reviewer-run": {"model": "gpt-5.6-sol"},
+    "validator-run": {"model": "gpt-5.6-terra"},
+    "investigate-run": {"model": "gpt-5.6-sol"},
+    "stale-sweep": {"model": "gpt-5.6-luna"},
+    "qa-run": {"model": "gpt-5.6-terra"},
+    "coverage-run": {"model": "gpt-5.6-terra"},
+    "dev-verify-run": {"model": "gpt-5.6-terra"},
+    "ops-run": {"model": "gpt-5.6-luna"},
+    "unblock": {"model": "gpt-5.6-sol"},
+    "releaser-run": {"model": "gpt-5.6-terra"}
+  },
+  "project": {
+    "instructions": ["AGENTS.md"],
+    "architecture_index": "graphify-out/wiki/index.md",
+    "architecture_report": "graphify-out/GRAPH_REPORT.md",
+    "references": {
+      "security": ".claude/SECURITY.md",
+      "accessibility": ".claude/ACCESSIBILITY.md",
+      "performance": ".claude/PERFORMANCE.md",
+      "seo": ".claude/SEO.md",
+      "schema": ".claude/SCHEMA.md",
+      "infrastructure": ".claude/docs/infrastructure.md",
+      "modals": ".claude/docs/modal-system.md",
+      "background_jobs": ".claude/docs/background-jobs.md"
+    },
+    "commands": {
+      "test": "php bin/phpunit",
+      "build": "npm run build",
+      "graph_refresh": "bash scripts/rebuild-graphify.sh",
+      "schema_dump": "php bin/console app:dump-schema"
+    },
+    "preferred_skills": ["getbill", "rtk", "playwright", "verify"]
+  },
+  "safety": {
+    "confirm_each_remote_action": ["prod", "preprod"],
+    "allow_database_writes": false,
+    "allow_destructive_git": false,
+    "allow_secret_reads": false,
+    "stage_only_owned_files": true,
+    "worktree_on_dirty_checkout": false
+  }
+}

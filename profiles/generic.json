@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "project_name": "example",
+  "providers": {"forge": "github", "tracker": "linear"},
+  "repos": [],
+  "release": {"autonomy": "off"},
+  "agents": {
+    "research-run": {"model": "gpt-5.6-terra"},
+    "manager-run": {"model": "gpt-5.6-luna"},
+    "implementer-run": {"model": "gpt-5.6-sol"},
+    "reviewer-run": {"model": "gpt-5.6-sol"},
+    "validator-run": {"model": "gpt-5.6-terra"},
+    "investigate-run": {"model": "gpt-5.6-sol"},
+    "stale-sweep": {"model": "gpt-5.6-luna"},
+    "qa-run": {"model": "gpt-5.6-terra"},
+    "coverage-run": {"model": "gpt-5.6-terra"},
+    "dev-verify-run": {"model": "gpt-5.6-terra"},
+    "ops-run": {"model": "gpt-5.6-luna"},
+    "unblock": {"model": "gpt-5.6-sol"},
+    "releaser-run": {"model": "gpt-5.6-terra"}
+  },
+  "safety": {
+    "confirm_each_remote_action": [],
+    "allow_database_writes": false,
+    "allow_destructive_git": false,
+    "allow_secret_reads": false
+  }
+}

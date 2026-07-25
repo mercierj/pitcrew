@@ -1,91 +1,143 @@
-# Running pitcrew on OpenAI Codex
+# Running Pitcrew on Codex
 
-pitcrew's skills are **harness-agnostic** — the body of each `skills/<slug>/SKILL.md` is
-natural-language workflow + `bash`/`gh`/`git`/`jq` + a config-driven `STEP −1` block, none of
-which is Claude-specific. The **same skill files** drive both Claude Code and Codex; only the
-*adapter* differs, and that adapter is built in:
-
-| | Claude Code | Codex |
-|---|---|---|
-| Install skills | `bin/install.sh` → `~/.claude/commands/` | `bin/install-codex.sh` → `~/.codex/prompts/` |
-| Invoke | `/research-run` (skill) | `/research-run` (Codex custom prompt) or headless `codex exec` |
-| Schedule the loop | `/loop 30min /research-run` | cron → `bin/pitcrew-codex.sh` |
-| Find the Linear tools | binding block detects `mcp__linear-server__*` / `mcp__claude_ai_Linear__*` | **same binding block** detects the `linear` MCP server from `~/.codex/config.toml` (by capability — see below) |
-| Ask a human (`unblock`) | `AskUserQuestion` tool | **built-in fallback**: the same question as plain text (see `unblock` STEP 6) |
-| Runtime config + state | `~/.claude/agent-loop/<project>/` | **same dir** (shared) |
+Pitcrew is installed as a native Codex plugin. Skills are discovered under the
+`pitcrew` namespace, runtime state belongs to Codex, and every invocation performs
+one bounded pass.
 
 ## Install
 
+From the fork checkout:
+
 ```bash
-cd pitcrew
-./bin/install-codex.sh my-project          # symlinks 12 prompts + seeds shared config
+./bin/install-codex.sh getbill --profile getbill
 ```
 
-Runs the same config wizard as the Claude install and writes the **shared** runtime dir
-`~/.claude/agent-loop/<project>/` (override with `PITCREW_HOME`). If you already ran
-`./bin/install.sh`, the config is reused — one config, both harnesses.
+The installer updates only the `pitcrew` entry in
+`$HOME/.agents/plugins/marketplace.json`, links this checkout as the local plugin
+source, validates the manifest, and preserves existing runtime configuration.
+Run the exact `Refresh with:` command printed by the installer; it includes the
+actual configured marketplace name. Start a new Codex thread after adding or
+refreshing the plugin.
 
-## Linear & MCP (`config.toml`)
+Available profiles:
 
-`research-run` and `qa-run` write local ledgers and need **no** tracker — they run on Codex as-is.
-The other ten coordinate through Linear. Wire it once:
-
-1. Add the Linear MCP server to `~/.codex/config.toml` (see
-   [`references/codex-config.example.toml`](../references/codex-config.example.toml)):
-   ```toml
-   [mcp_servers.linear]
-   command = "npx"
-   args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
-   ```
-2. That's it — **no skill edit needed.** The `LINEAR BINDING` block in every skill now resolves
-   `<LINEAR>` **by capability**: it picks whichever available tool family exposes
-   `list_teams`/`get_issue`/`save_issue`/… , so it finds the Codex `linear` server the same way it
-   finds Claude's. (See `references/LINEAR-ACCESS.md` §1.)
-
-## Schedule the loops (cron, since Codex has no `/loop`)
-
-`bin/pitcrew-codex.sh <skill> [project]` runs one headless pass. Point cron at it:
-
-```cron
-# ledger producers — no network needed, default sandbox is fine
-*/30 *  * * *  /path/to/pitcrew/bin/pitcrew-codex.sh research-run my-project   >> ~/.codex/logs/research-run.log 2>&1
-0    */2 * * *  /path/to/pitcrew/bin/pitcrew-codex.sh qa-run my-project         >> ~/.codex/logs/qa-run.log 2>&1
-
-# Linear-coupled skills — need network (gh/curl + the Linear MCP), so widen the sandbox
-*/15 *  * * *  CODEX_SANDBOX=danger-full-access /path/to/pitcrew/bin/pitcrew-codex.sh implementer-run my-project >> ~/.codex/logs/implementer-run.log 2>&1
-*/15 *  * * *  CODEX_SANDBOX=danger-full-access /path/to/pitcrew/bin/pitcrew-codex.sh reviewer-run my-project    >> ~/.codex/logs/reviewer-run.log 2>&1
-0    *  * * *  CODEX_SANDBOX=danger-full-access /path/to/pitcrew/bin/pitcrew-codex.sh manager-run my-project     >> ~/.codex/logs/manager-run.log 2>&1
-*/15 *  * * *  CODEX_SANDBOX=danger-full-access /path/to/pitcrew/bin/pitcrew-codex.sh dev-verify-run my-project  >> ~/.codex/logs/dev-verify-run.log 2>&1  # gh + curl to dev; Linear-free
+```bash
+./bin/configure.sh example --profile generic
+./bin/configure.sh getbill --profile getbill
 ```
 
-`pitcrew-codex.sh` invokes `codex exec` with the skill body on **stdin** (the skill's `---`
-frontmatter would otherwise be parsed as a CLI flag), and an `--add-dir` for every `repos[].path`
-plus the runtime dir so file ops are allowed.
+The GetBill profile selects `/Users/jo/Prog/getbill`, GitLab forge/tracker adapters,
+the project `AGENTS.md`, Graphify references, and release autonomy `off`.
 
-Env overrides: `CODEX_BIN` (path to the codex CLI — e.g. the app-bundled
-`/Applications/Codex.app/Contents/Resources/codex` if it's not on `PATH`), `PITCREW_HOME`,
-`CODEX_SANDBOX` (`read-only` | `workspace-write` | `danger-full-access`).
+## Invoke
 
-## Sandbox & network
+In a Codex thread:
 
-`workspace-write` (the runner default) lets the agent write the configured repos + the runtime
-dir but **disables network**. That's correct for the ledger producers. The Linear-coupled skills
-also reach the network (`gh`, curl, the Linear MCP), so run those with
-`CODEX_SANDBOX=danger-full-access`, or keep the write-sandbox and enable network for it via a Codex
-profile (see `references/codex-config.example.toml` and your Codex version's sandbox docs).
+```text
+$pitcrew:research-run
+```
 
-## What's built in vs. what's yours to set
+Ask for project `getbill` and one bounded pass. For headless inspection:
 
-- **Built in:** harness-agnostic Linear detection (all 10 Linear-coupled skills + LINEAR-ACCESS.md);
-  the `unblock` plain-text question fallback; the Codex installer, headless runner, and cron template.
-- **Yours to set, once:** the `~/.codex/config.toml` Linear MCP entry, the cron lines, and the
-  sandbox/network choice above. The shared runtime dir keeps the `claude` name unless you set
-  `PITCREW_HOME`.
+```bash
+./bin/pitcrew-codex.sh research-run getbill --dry-run
+```
 
-## Spike status (validated 2026-06-23)
+The runner validates the project with `scripts/pitcrew_config.py`, rejects
+symlinked or malformed runtime components, and passes repository/runtime access
+through `--add-dir`. It preserves the caller's sandbox and approval policy.
 
-On `codex-cli 0.140`: the **unmodified** `research-run/SKILL.md` symlinks into `~/.codex/prompts/`
-and `codex exec` ingested the full skill body (via stdin) + the project directive and began the
-pass — confirming the thesis end to end. (The validation run was cut short only by a Codex account
-usage limit, not by anything in pitcrew.) Re-run `./bin/pitcrew-codex.sh research-run <project>`
-once quota is available to see the ledger written.
+## Scheduled tasks
+
+A Codex scheduled task owns cadence. The skill never reschedules itself. Use prompts
+like:
+
+```text
+Use $pitcrew:research-run for project getbill. Perform exactly one bounded pass,
+respect AGENTS.md, and return a structured no-op when nothing is eligible.
+```
+
+```text
+Use $pitcrew:reviewer-run for project getbill. Perform exactly one bounded,
+review-oriented pass and preserve all GetBill approval gates.
+```
+
+Start with research and review, observe several runs, then enable other roles only
+when their provider permissions and expected side effects are understood. Release
+scheduling is disabled for GetBill. Every prod or preprod action requires a new
+explicit approval and remote actions must not be chained.
+
+See [scheduled task guidance](../references/SCHEDULED-TASKS.md).
+
+## Providers and network access
+
+Provider selection is configuration, not tool-name inference:
+
+```json
+{
+  "providers": {
+    "forge": "gitlab",
+    "tracker": "gitlab"
+  }
+}
+```
+
+GitHub maps generic changes to pull requests; GitLab maps them to merge requests.
+Linear is optional and is used only when `providers.tracker` is `linear`. If a
+configured provider, identity, workspace, owner/group, repository, or operation
+cannot be validated, Pitcrew fails closed with a structured no-op. It never falls
+back to another account or provider.
+
+Use supported Codex `sandbox_mode` and `approval_policy` settings in your normal
+configuration. Network/provider access remains optional and should be granted by
+the caller only for a pass that needs it. Pitcrew does not request a broader sandbox
+from inside a skill.
+
+See [provider selection](../references/PROVIDERS.md) and the
+[Codex config example](../references/codex-config.example.toml).
+
+## Runtime and migration
+
+Runtime files are stored at:
+
+```text
+${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/
+```
+
+An existing upstream runtime can be migrated explicitly:
+
+```bash
+python3 scripts/pitcrew_config.py migrate --project getbill
+```
+
+Migration never silently replaces an existing destination. The canonical runtime
+contract is [CODEX-RUNTIME.md](../references/CODEX-RUNTIME.md).
+
+## GetBill operating boundary
+
+For GetBill, Pitcrew must:
+
+- re-read `/Users/jo/Prog/getbill/AGENTS.md`;
+- preserve unrelated working-tree changes and stage only owned files;
+- read the required security, accessibility, performance, SEO, schema, or
+  infrastructure reference before changing that area;
+- refresh Graphify after code changes;
+- ask before every prod or preprod action;
+- ask before migrations, database writes, mutating console commands, or rollback;
+- never read secret files.
+
+These rules are enforced by the profile and
+[GetBill reference](../references/profiles/getbill.md), not by widening permissions.
+
+## Troubleshooting
+
+Validate configuration and inspect a dry run:
+
+```bash
+python3 scripts/pitcrew_config.py validate profiles/getbill.json
+./bin/pitcrew-codex.sh reviewer-run getbill --dry-run
+```
+
+If discovery is stale, re-run the installer's printed `Refresh with:` command and
+start a new thread. If a provider is unavailable, correct its configured
+authentication rather than switching providers implicitly.

@@ -1,177 +1,125 @@
-# agent-loop SETUP
+# Project setup
 
-Bootstrap a new project's config from scratch.
+Pitcrew reads one validated project configuration from
+`${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/config.json`.
 
-> **Future automation (planned, not implemented):** turn the steps below into an interactive `/agent-loop-init <project>` skill that walks you through the fields, validates as it goes (probes Linear for label IDs, checks repo paths exist), and writes the config for you. For now, do it by hand — it's ~5 minutes the first time, and the manual flow surfaces every decision explicitly which is useful while the schema is still evolving.
-
-## Prerequisites
-
-- `gh` authenticated as the GitHub identity that authors PRs.
-- Linear MCP server connected in Claude Code (if you want implementer/researcher).
-- A Slack webhook URL ready (optional — paste empty `""` if you don't want Slack notifications).
-
-## 1. Pick a project name
-
-Short, lowercase, no spaces. This is the folder name under `~/.claude/agent-loop/`. Examples: `example`, `life-tracker`, `acme-freelance`.
-
-## 2. Create the config
+## Create a project
 
 ```bash
-mkdir -p ~/.claude/agent-loop/<project>/state
-cp /path/to/pitcrew/references/config.example.json ~/.claude/agent-loop/<project>/config.json
-$EDITOR ~/.claude/agent-loop/<project>/config.json
+./bin/configure.sh example --profile generic
+./bin/configure.sh getbill --profile getbill
 ```
 
-## 3. Fill it in
+Use the generic profile for a new integration. Use the GetBill profile for
+`/Users/jo/Prog/getbill`; it supplies GitLab routing, project references, and
+strict approval gates without enabling release autonomy.
 
-### Required for everything
+Inspect one pass before enabling scheduled work:
 
-| Field | What it is | Example |
-|---|---|---|
-| `project_name` | Same as the folder name | `"example"` |
-| `github.reviewer_login` | Your GitHub username (whose PRs the reviewer agent will scan, and whose review verdicts the implementer gate looks for) | `"your-username"` |
-| `github.org` | The GitHub org/owner for your repos | `"your-org"` |
-| `repos` | Array of every repo the agents may operate on | see below |
+```bash
+./bin/pitcrew-codex.sh research-run getbill --dry-run
+```
 
-Each repo entry:
+The equivalent discovered skill is `$pitcrew:research-run`.
+
+## Required fields
 
 ```json
 {
-  "name": "example-frontend",                                 // short logical name used everywhere
-  "path": "~/Documents/example-frontend",                     // local clone path (~ expanded at runtime)
-  "default_branch": "master",                          // master | main | etc.
-  "lang": "ts",                                        // ts | go | py | etc. — drives which static-analysis tools researcher tries
-  "tags": ["widgets", "ui"]                            // free-form labels used in routing rules
+  "schema_version": 1,
+  "project_name": "example",
+  "providers": {
+    "forge": "github",
+    "tracker": "linear"
+  },
+  "repos": [
+    {
+      "name": "example-app",
+      "path": "/absolute/path/to/example-app",
+      "default_branch": "main",
+      "lang": "ts",
+      "tags": ["web"]
+    }
+  ],
+  "release": {"autonomy": "off"}
 }
 ```
 
-### Required for `implementer-run` (Linear integration)
+- `project_name` is a safe single path component.
+- `providers.forge` is `github` or `gitlab`.
+- `providers.tracker` is `linear`, `github`, `gitlab`, or `none`.
+- `repos[].path` must be a non-empty path without control characters; the runner
+  requires it to resolve to an available directory before invoking Codex.
+- `release.autonomy` defaults to `off`.
 
-> `research-run` and `qa-run` no longer write Linear directly — they record findings to local
-> ledgers that `/manager-run` reads and paces into the tracker. So they need **no** Linear binding;
-> only `/manager-run` (and the skills that act on tickets) do.
+Provider-specific identities, teams, owners/groups, repositories, labels, and
+states may be added beneath provider/role configuration as required. A skill must
+return a structured no-op when its required capability is absent; it must never
+guess or fall back to another provider.
 
-| Field | What it is |
-|---|---|
-| `linear.use` | `true` |
-| `linear.workspace_slug` | The slug in your Linear URL (`https://linear.app/<slug>/...`) |
-| `linear.team_name` | The team your tickets live under (e.g. `"Example"`) |
-| `linear.team_id` | The team's UUID — the LINEAR BINDING block in every skill confirms it's talking to the right workspace by checking this. Get it once via `mcp__linear-server__list_teams`. |
-| `linear.ticket_prefix` | The ID prefix (e.g. `"EX"` → tickets are EX-123) |
-| `linear.assignee_email` | Your Linear identity email — the agents assign tickets to this address so the loop can find them |
-| `linear.labels` | The label *names* for `quick-win`, `Bug`, `Improvement` |
-| `linear.label_ids` | (Optional) Label UUIDs. Save one MCP call per fire if filled. Get them once via `mcp__linear-server__list_issue_labels`. |
-| `linear.agent_backlog_project.name` | (Optional) Name of a Linear project where agent-filed tickets land. Leave `""` to file directly to team backlog. |
-| `linear.agent_backlog_project.id` | (Optional) Project UUID. |
+## Optional role configuration
 
-### Required for `qa-run`
+Role blocks such as `qa`, `researcher`, `manager`, `coverage`, `dev_verify`,
+`slack`, repository `health`, and repository `release` enable their corresponding
+skills. Omit a block to make the role exit cleanly when it has nothing configured.
 
-| Field | What it is |
-|---|---|
-| `qa.test_flow_repo` | The `repos[].name` of the repo holding `flows/**/*.md` test contracts |
+Paths for findings and state should remain under the selected Codex runtime or an
+explicit project-owned directory. Store no credentials in checked-in examples.
 
-The runner reads `<test_flow_repo>/.env` for env-specific URLs (`<UPPERCASE_PROJECT>_DEV_*`). Adjust the convention in the runner if your project uses a different env var prefix.
+## Safety configuration
 
-### Required for `research-run` mode `architecture`
+```json
+{
+  "release": {"autonomy": "off"},
+  "safety": {
+    "confirm_each_remote_action": ["prod", "preprod"],
+    "allow_database_writes": false,
+    "allow_destructive_git": false,
+    "allow_secret_reads": false,
+    "stage_only_owned_files": true,
+    "worktree_on_dirty_checkout": false
+  }
+}
+```
 
-| Field | What it is |
-|---|---|
-| `researcher.architecture_repo` | Logical repo name of a docs-only repo holding cross-service architecture markdown |
-| `researcher.architecture_path` | Local path to it (may live outside `repos[]`) |
+These values narrow a workflow; they never override repository `AGENTS.md` or a
+caller approval policy. Pitcrew must still ask before every action covered by
+repository policy.
 
-Omit both if you don't have a cross-service architecture doc — `architecture` mode is dropped automatically.
+## Provider setup
 
-### Required for `manager-run`
+Read [PROVIDERS.md](PROVIDERS.md), then the selected provider reference:
 
-`manager-run` is the single paced gate that turns findings ledgers into tickets. Configure
-`manager.sources[]` — one entry per findings source (`audit`, `qa`, `research`). Each is its own
-**bucket** with its own Linear label and depth, so no source starves another:
+- [GitHub with optional Linear tracker](providers/github-linear.md)
+- [GitLab forge and/or tracker](providers/gitlab.md)
 
-| Field (per source) | What it is |
-|---|---|
-| `name` | Source id (`audit` / `qa` / `research`). |
-| `findings_json` | Path to that source's ledger (qa/research ledgers live under `~/.claude/agent-loop/<project>/findings/`). |
-| `format` | `audit-v1` \| `qa-v1` \| `research-v1` — tells the manager how to normalize. |
-| `label` | The source's bucket label (default = `name`). Every ticket from this source carries it. |
-| `target_depth` / `investigate_wip` | (Optional) Per-source caps; fall back to `manager.target_queue_depth` / `manager.investigate_wip`. |
+[LINEAR-ACCESS.md](LINEAR-ACCESS.md) applies only when
+`providers.tracker=linear`. Tracker `none` means tracker-dependent roles return a
+structured no-op.
 
-### Optional everywhere
+## Migration
 
-- `slack.qa_webhook_url`, `slack.quickwins_webhook_url` — keep `""` to silence notifications.
-- `slack.user_mention` — `<@U…>` to ping yourself when there are PRs awaiting your `go`.
-- `slack.timezone` — IANA tz used for human-readable timestamps in Slack. DST-aware.
-- `loop.fast_wakeup_seconds`, `loop.slow_heartbeat_seconds` — tuning for `/loop` dynamic pacing.
-
-## 4. Set the default project (optional)
+Import an upstream runtime explicitly:
 
 ```bash
-echo "<project>" > ~/.claude/agent-loop/default.txt
+python3 scripts/pitcrew_config.py migrate --project example
 ```
 
-After this, running `/research-run` with no args uses this project. Pass an explicit arg to override: `/research-run other-project`.
-
-## 5. First run + launch the loops
-
-Smoke one skill first to confirm the config is valid:
+Migration refuses unsafe or existing destinations. Validate afterward:
 
 ```bash
-/research-run <project>     # validates config, runs one cell, exits with a summary
+python3 scripts/pitcrew_config.py validate \
+  "${CODEX_HOME:-$HOME/.codex}/pitcrew/example/config.json"
 ```
 
-If validation fails it prints the missing fields + the exact JSON path to fix. Then launch the
-loops you want (each on its own cadence; omit any you don't use):
+## Scheduled execution
 
-```
-/loop 15min /implementer-run
-/loop 15min /reviewer-run
-/loop 30min /research-run
-/loop 2hours /qa-run            # records findings to a ledger; /manager-run tickets them
-/loop 15min /validator-run
-/loop 6h    /stale-sweep
-/loop 30min /unblock
-/loop 30min /investigate-run
-/loop 10min /ops-run            # needs repos[].health
-/loop 15min /releaser-run       # needs repos[].release (starts at autonomy:"prepare")
-/loop 1h    /manager-run        # needs manager.sources[]
-/loop 12h   /coverage-run       # needs qa.test_flow_repo + an architecture repo
-/loop 15min /dev-verify-run    # needs qa.test_flow_repo + an architecture repo + repos[].health
+A task prompt must name one project, invoke one namespaced skill, and request one
+bounded pass:
+
+```text
+Use $pitcrew:reviewer-run for project getbill. Perform one bounded pass.
 ```
 
-Per-skill config requirements: `repos[].health` (ops), `repos[].release` (releaser),
-`manager.sources[]` (manager), `qa.test_flow_repo` (qa + coverage), `backend` (Linear-binding
-resilience — defaults are fine). All optional blocks are documented in `config.example.json`.
-
-> **After editing any skill, restart its loop** — a running `/loop` can stay pinned to the skill
-> version it launched with. (Learned the hard way 2026-06-23.)
-
-If validation fails, the skill prints the missing fields and the exact JSON path to fix, then exits without doing any work. Fix, run again.
-
-## Switching projects mid-session
-
-If you're working on Example and want to fire a one-off `research-run` against `life-tracker`:
-
-```
-/research-run life-tracker
-```
-
-The skill loads `life-tracker`'s config for that one fire only. `default.txt` is not touched.
-
-## On a new machine
-
-```bash
-# Recreate the folder layout — actual configs are NEVER committed
-mkdir -p ~/.claude/agent-loop
-echo "example" > ~/.claude/agent-loop/default.txt
-
-# Per project, copy the example and fill in the real values
-mkdir -p ~/.claude/agent-loop/example/state
-cp pitcrew/references/config.example.json ~/.claude/agent-loop/example/config.json
-$EDITOR ~/.claude/agent-loop/example/config.json
-# Paste webhook URLs and label IDs from your password manager / Linear UI
-```
-
-## Security
-
-- `~/.claude/agent-loop/*/config.json` contain Slack webhook URLs and team-internal Linear identifiers. **Never commit them.** They live under `~/.claude/`, outside this repo, so they're never in version control.
-- Only the placeholder `config.example.json` lives in version control.
-- If a webhook leaks, regenerate it in Slack > Incoming Webhooks; no other rotation needed.
+Start with research/review tasks and leave `$pitcrew:releaser-run` unscheduled for
+GetBill. See [SCHEDULED-TASKS.md](SCHEDULED-TASKS.md).

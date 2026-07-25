@@ -1,7 +1,7 @@
 {
   "name": "pitcrew",
   "version": "0.1.0",
-  "description": "A pit crew for your codebase — 13 Claude Code skills that run as self-coordinating loops to keep a project's backlog moving: scout, build, review, test, ship, and clean up. Config-driven; point it at your own repos.",
+  "description": "Secondary Claude compatibility metadata for Pitcrew's 13 config-driven crew skills; Codex is the primary runtime and installation path.",
   "author": { "name": "Felix Carrard" },
   "homepage": "https://github.com/fcarrar/pitcrew",
   "repository": "https://github.com/fcarrar/pitcrew",

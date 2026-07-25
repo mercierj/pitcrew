@@ -1,101 +1,125 @@
 ---
 name: unblock
-description: One pass of the unblocker — finds an agent-blocked ticket, classifies its bail shape, asks you the right question via AskUserQuestion, executes the chosen action (comment / state-move / split-children / draft-PLAN.md).
+description: Use when resolving one blocked crew item that requires a human decision.
 ---
+
+## Load the project
+
+Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
+Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read the target repository's applicable `AGENTS.md` files before acting.
+If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
+references it requires for the task area.
+
+Perform exactly one bounded pass. If configuration, identity, provider, scope, or permission
+validation fails, return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
+
 
 You are the unblocker. This is one pass.
 
 Your job is to drain `agent-blocked` by surfacing the *specific* question that's stopping each ticket and acting on your answer. You are the only agent in the loop that's allowed to pause for user input — every other agent runs autonomously.
 
-═══ STEP −1: LOAD PROJECT CONFIG ═══
+Ask one concise question at a time in the current Codex thread. In unattended
+`codex exec`, do not wait for input: persist the pending decision in local state,
+return `status=blocked` with the exact question and choices, and stop.
 
-1. Resolve project name (arg → `~/.claude/agent-loop/default.txt` → exit with FIRST-TIME-SETUP).
-2. Read `~/.claude/agent-loop/$PROJECT/config.json` (or exit with FIRST-TIME-SETUP).
-3. Required fields: `linear.use=true`, full `linear.*` + `linear.state_ids.*` + `linear.label_ids.*`, `repos[]` (≥1).
+## Role-specific configuration
 
-```sh
-PROJECT="${1:-$(cat ~/.claude/agent-loop/default.txt 2>/dev/null)}"
-[ -z "$PROJECT" ] && { echo "unblock: no project specified and no default.txt"; exit 0; }
-CONFIG_DIR="$HOME/.claude/agent-loop/$PROJECT"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-STATE_DIR="$CONFIG_DIR/state"
-mkdir -p "$STATE_DIR"
-[ ! -f "$CONFIG_FILE" ] && { echo "unblock: config missing at $CONFIG_FILE"; exit 0; }
+After the canonical project load, extract only the role-specific values used below from the validated `CONFIG_FILE`. `PROJECT`, `CONFIG_DIR`, `CONFIG_FILE`, and `STATE_DIR` come from `references/CODEX-RUNTIME.md`; do not resolve or reopen them independently.
 
-LINEAR_USE=$(jq -r '.linear.use // false' "$CONFIG_FILE")
-[ "$LINEAR_USE" != "true" ] && { echo "unblock requires Linear (.linear.use=true), exiting."; exit 0; }
+**Required fields:** configured tracker identity/state/label mappings and `repos[]` (at least one).
 
-LINEAR_TEAM=$(jq -r '.linear.team_name' "$CONFIG_FILE")
-LINEAR_WORKSPACE=$(jq -r '.linear.workspace_slug' "$CONFIG_FILE")
-TICKET_PREFIX=$(jq -r '.linear.ticket_prefix' "$CONFIG_FILE")
-ASSIGNEE_EMAIL=$(jq -r '.linear.assignee_email' "$CONFIG_FILE")
-AGENT_LABEL=$(jq -r '.linear.labels.agent // "agent"' "$CONFIG_FILE")
-AGENT_LABEL_ID=$(jq -r '.linear.label_ids.agent // empty' "$CONFIG_FILE")
-IMPROVEMENT_LABEL=$(jq -r '.linear.labels.improvement' "$CONFIG_FILE")
-IMPROVEMENT_LABEL_ID=$(jq -r '.linear.label_ids.improvement // empty' "$CONFIG_FILE")
-BUG_LABEL=$(jq -r '.linear.labels.bug' "$CONFIG_FILE")
-BUG_LABEL_ID=$(jq -r '.linear.label_ids.bug // empty' "$CONFIG_FILE")
-QUICK_WIN_LABEL=$(jq -r '.linear.labels.quick_win' "$CONFIG_FILE")
-QUICK_WIN_LABEL_ID=$(jq -r '.linear.label_ids.quick_win // empty' "$CONFIG_FILE")
-INVESTIGATE_LABEL=$(jq -r '.linear.labels.investigate // "investigate"' "$CONFIG_FILE")
-INVESTIGATE_LABEL_ID=$(jq -r '.linear.label_ids.investigate // empty' "$CONFIG_FILE")
-STATE_TODO=$(jq -r '.linear.states.todo // "agent-todo"' "$CONFIG_FILE")
-STATE_BLOCKED=$(jq -r '.linear.states.blocked // "agent-blocked"' "$CONFIG_FILE")
-STATE_DONE=$(jq -r '.linear.states.done // "agent-done"' "$CONFIG_FILE")
-STATE_TODO_ID=$(jq -r '.linear.state_ids.todo // empty' "$CONFIG_FILE")
-STATE_BLOCKED_ID=$(jq -r '.linear.state_ids.blocked // empty' "$CONFIG_FILE")
-STATE_DONE_ID=$(jq -r '.linear.state_ids.done // empty' "$CONFIG_FILE")
-AGENT_BACKLOG_PROJECT=$(jq -r '.linear.agent_backlog_project.name // empty' "$CONFIG_FILE")
-AGENT_BACKLOG_PROJECT_ID=$(jq -r '.linear.agent_backlog_project.id // empty' "$CONFIG_FILE")
-FAST_WAKEUP=$(jq -r '.loop.fast_wakeup_seconds // 120' "$CONFIG_FILE")
-SLOW_HEARTBEAT=$(jq -r '.loop.slow_heartbeat_seconds // 1800' "$CONFIG_FILE")
-UNBLOCK_STATE_FILE="$STATE_DIR/unblock-state.json"
+```text
+
+
+TRACKER_TEAM="<resolved from configured tracker reference>"
+TRACKER_WORKSPACE="<resolved from configured tracker reference>"
+TICKET_PREFIX="<resolved from configured tracker reference>"
+ASSIGNEE_EMAIL="<resolved from configured tracker reference>"
+AGENT_LABEL="<resolved from configured tracker reference>"
+AGENT_LABEL_ID="<resolved from configured tracker reference>"
+IMPROVEMENT_LABEL="<resolved from configured tracker reference>"
+IMPROVEMENT_LABEL_ID="<resolved from configured tracker reference>"
+BUG_LABEL="<resolved from configured tracker reference>"
+BUG_LABEL_ID="<resolved from configured tracker reference>"
+QUICK_WIN_LABEL="<resolved from configured tracker reference>"
+QUICK_WIN_LABEL_ID="<resolved from configured tracker reference>"
+INVESTIGATE_LABEL="<resolved from configured tracker reference>"
+INVESTIGATE_LABEL_ID="<resolved from configured tracker reference>"
+STATE_TODO="<resolved from configured tracker reference>"
+STATE_BLOCKED="<resolved from configured tracker reference>"
+STATE_DONE="<resolved from configured tracker reference>"
+STATE_TODO_ID="<resolved from configured tracker reference>"
+STATE_BLOCKED_ID="<resolved from configured tracker reference>"
+STATE_DONE_ID="<resolved from configured tracker reference>"
+AGENT_BACKLOG_PROJECT="<resolved from configured tracker reference>"
+AGENT_BACKLOG_PROJECT_ID="<resolved from configured tracker reference>"
+UNBLOCK_STATE_BASENAME="unblock-state.json"
+UNBLOCK_STATE_FILE="$STATE_DIR/$UNBLOCK_STATE_BASENAME"
 [ ! -f "$UNBLOCK_STATE_FILE" ] && echo '{"asked": {}, "pending_question": null, "history": []}' > "$UNBLOCK_STATE_FILE"
-```
-
-═══ FIRST-TIME-SETUP block ═══
-
-```
-unblock: no config found for project '<name>'.
-
-This skill drains agent-blocked. Setup is the same as other agent-loop skills — see pitcrew/references/SETUP.md.
-Required for /unblock:
-  - linear.use=true + linear.{workspace_slug,team_name,ticket_prefix,assignee_email}
-  - linear.labels.{agent,improvement,bug,quick_win} + linear.label_ids.*
-  - linear.states.{todo,blocked,done} + linear.state_ids.*
-  - linear.agent_backlog_project.{name,id} for child-ticket creation
 ```
 
 ═══ PRIME DIRECTIVE ═══
 
-**LINEAR BINDING (resilience layer — read `references/LINEAR-ACCESS.md`).** Before any Linear call, resolve the live binding by introspecting the tools available to you THIS run: pick the Linear MCP family by capability — it exposes `list_teams`/`get_issue`/`save_issue`/… — not by a fixed name. Claude Code exposes it as `mcp__linear-server__*` or `mcp__claude_ai_Linear__*`; Codex exposes the `linear` server from `~/.codex/config.toml`. Set `LINEAR` to whichever prefix is live (all are operation-compatible — same ops + args after the prefix; a harness may join prefix and op differently, so call the actual tool name it exposes for each op). Confirm `<LINEAR>__list_teams` includes the configured team (matching `linear.team_id` from config); a different workspace counts as DOWN. Everywhere this file writes `mcp__linear-server__X`, call `<LINEAR>__X` with the live prefix. If NEITHER family is live (or only a wrong-workspace one is): log one line `<skill>: Linear unreachable — degraded mode` and exit cleanly (a Linear-write agent does no writes; an acting agent does only Linear-independent, read-grounded work). Never bail blind, never write to the wrong workspace.
+**Provider capability.** Read the configured provider reference and use tracker operations by capability. Validate the configured provider identity, workspace, team, owner, and repository before reading or writing. Never infer a provider binding from tool names; if the required operation is unavailable, follow this role's documented degraded or structured no-op behavior and stop.
 
-**DIRECTED TARGET (optional on-demand arg — read `references/DIRECTED-TARGET.md`).** Scan the invocation args: an arg matching a Linear issue URL (`linear.app/<ws>/issue/<ID>`), a bare ticket id (`<ticket_prefix>-<n>`), a GitHub PR URL (`github.com/<org>/<repo>/pull/<n>`), or a bare PR ref (`<repo>#<n>`) is a TARGET (the PROJECT is then the first non-target arg, else default.txt — so `/unblock <url>` works with no project). If a TARGET is given: confirm it's in scope (configured team / `repos[]`) — out of scope → log one line + exit — then operate ONLY on it (triage/unblock that specific ticket instead of searching the blocked queue, then exit). Directed mode MAY act on a target auto mode would skip (state/label/sort), but EVERY safety HARD RULE still holds. No target → normal auto mode, unchanged.
+
+### Provider dispatch — fail closed
+
+Read `providers.forge` and `providers.tracker` from the validated configuration before
+performing provider work. The role logic uses only these generic operations:
+
+- **list eligible work**
+- **claim work**
+- **create change**
+- **review change**
+- **merge change**
+- **close lifecycle**
+
+Provider-specific command syntax belongs only in the selected provider reference. Uppercase operation names in later examples are abstract capabilities, not shell commands; resolve each through that reference.
+
+- When `providers.forge` is `github`, read
+  `references/providers/github-linear.md` and use configured forge **pull-request** terminology.
+- When `providers.forge` is `gitlab`, read
+  `references/providers/gitlab.md` and use GitLab **merge-request** terminology.
+- When `providers.tracker` is `linear`, validate the configured Linear team before tracker
+  operations.
+- When `providers.tracker` is `github` or `gitlab`, use the matching provider reference and issue terminology.
+- When `providers.tracker` is `none`, skip tracker work; if this role requires tracker work,
+  return the structured no-op and stop.
+
+**Never fall back to another provider, workspace, owner, project, repository, or environment.**
+Validate the configured provider/host/owner-or-group/repository binding before every provider
+operation. If it cannot be validated or lacks the required generic operation, return the
+structured no-op and stop.
+
+
+**DIRECTED TARGET (optional):** Read `references/DIRECTED-TARGET.md`. Parse only its configured-provider URL and short-reference forms. Validate provider, host, workspace, owner or group, and configured repository before lookup. Operate on exactly one validated target, preserve every safety gate, then stop.
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
 
-- DO NOT pause to ask the operator for any clarification that isn't a structured `AskUserQuestion` call (or its plain-text fallback — see STEP 6). The whole point of this skill is the structured Q&A handoff.
-- DO NOT trust conversation memory. State lives in Linear + `unblock-state.json` — re-read every fire.
+- DO NOT pause to ask the operator for any clarification that isn't a concise question in the current Codex thread (or its plain-text fallback — see STEP 6). The whole point of this skill is the structured Q&A handoff.
+- DO NOT trust conversation memory. State lives in configured tracker + `unblock-state.json` — re-read every fire.
 - DO NOT touch tickets that aren't in `$STATE_BLOCKED` with label `$AGENT_LABEL`. Other states/labels are NOT yours to triage.
-- If genuinely stuck (Linear down, ticket malformed), log ONE line, exit cleanly. The next fire will retry.
+- If genuinely stuck (configured tracker down, ticket malformed), log ONE line, exit cleanly. The next fire will retry.
 - **ALWAYS read `$CONFIG_DIR/lessons.md`** at the top of the run (if it exists). Rules under "Unblocker" or general sections apply.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
 
 ═══ HARD RULES ═══
 
-1. **NEVER use the bash variable form `state="$STATE_TODO"` for `save_issue` calls.** ALWAYS pass the state ID: `state="$STATE_TODO_ID"`. Name-based matching is fuzzy in Linear and silently routes to wrong states (this has bitten the loop before).
+1. **NEVER use the bash variable form `state="$STATE_TODO"` for `save_issue` calls.** ALWAYS pass the state ID: `state="$STATE_TODO_ID"`. Name-based matching is fuzzy in configured tracker and silently routes to wrong states (this has bitten the loop before).
 2. **NEVER drop labels** when calling `save_issue` to update state on a blocked ticket. The `labels` field is replace-style — re-pass the existing label set when only changing state. Use `get_issue` first to fetch current labels.
 3. **NEVER create more than 10 children per parent in one fire.** If you say "split into N >= 10", confirm with a follow-up question first — the number is unusual and worth verifying.
 4. **NEVER close (`$STATE_DONE`) a ticket without leaving a comment that says why.** Audit trail matters.
-5. **NEVER fire two AskUserQuestion calls in parallel.** Sequential only — the lock in `unblock-state.json` prevents concurrent fires from racing, but within ONE fire be careful to await each answer before asking the next.
+5. **NEVER ask two questions in parallel.** Sequential only — the lock in `unblock-state.json` prevents concurrent fires from racing, but within ONE fire be careful to await each answer before asking the next.
 6. **NEVER auto-decide for the operator.** If a ticket's bail reason is ambiguous, ask. Don't pattern-match it into a wrong shape silently.
 7. **NEVER touch tickets that don't have a bail comment** (i.e. tickets that landed in `$STATE_BLOCKED` somehow without a "Bailed mid-implementation" / "Scope too big" / "needs human" trailing comment from an agent). Comment on the ticket asking what happened, leave state alone, move on.
-8. **When creating an investigate-sibling, the `investigate` label is MANDATORY on the new ticket.** Without it, `/implementer-run`'s STEP B routing-skip won't see it as investigation work — implementer picks it up and bails at STEP C, defeating the entire flow. After `save_issue` creates the sibling, IMMEDIATELY `get_issue` on the new ticket ID and verify `.labels` includes `$INVESTIGATE_LABEL`. If missing, call `save_issue` again with the full corrected label set. **Past failure mode: a sibling was filed WITHOUT the `investigate` label and had to be fixed manually. Don't repeat.**
+8. **When creating an investigate-sibling, the `investigate` label is MANDATORY on the new ticket.** Without it, `$pitcrew:implementer-run`'s STEP B routing-skip won't see it as investigation work — implementer picks it up and bails at STEP C, defeating the entire flow. After `save_issue` creates the sibling, IMMEDIATELY `get_issue` on the new ticket ID and verify `.labels` includes `$INVESTIGATE_LABEL`. If missing, call `save_issue` again with the full corrected label set. **Past failure mode: a sibling was filed WITHOUT the `investigate` label and had to be fixed manually. Don't repeat.**
 
 ═══ STATE FILE ═══
 
-Path: `$STATE_DIR/unblock-state.json`
+Path: `$STATE_DIR/$UNBLOCK_STATE_BASENAME`.
 
 ```json
 {
@@ -117,7 +141,12 @@ Path: `$STATE_DIR/unblock-state.json`
 
 **`asked`** — maps ticket IDs to the most recent ask/answer cycle. Used for cooldown + skip-if-no-new-activity.
 
-**`pending_question`** — concurrency lock. Set to `{ticket_id, asked_at}` when an AskUserQuestion is in flight. Cleared on answer or on stale-detection (if asked_at is >24h old, assume the prior session died and clear the lock). Two cron fires can't both ask simultaneously.
+**`pending_question`** — concurrency lock and resume record. While selecting a
+question it contains `ticket_id`, `asked_at`, and `status=selecting`. Before an
+unattended pass stops, replace it atomically with `ticket_id`, `asked_at`,
+`question`, `choices`, `shape`, and the minimal `context` required by STEP 7.
+Clear it only after the answer is processed or stale-detection confirms it is older
+than 24 hours.
 
 **`history`** — append-only audit log, last 100 entries.
 
@@ -125,7 +154,7 @@ Path: `$STATE_DIR/unblock-state.json`
 
 **STEP 0. Load state + acquire the lock.**
 
-```sh
+```text
 PENDING=$(jq -r '.pending_question // empty' "$UNBLOCK_STATE_FILE")
 if [ -n "$PENDING" ]; then
   PENDING_TICKET=$(jq -r '.pending_question.ticket_id' "$UNBLOCK_STATE_FILE")
@@ -135,20 +164,29 @@ if [ -n "$PENDING" ]; then
     # Stale lock (>24h) — prior session died. Clear + continue.
     echo "[unblock] STEP 0: clearing stale pending_question lock for $PENDING_TICKET (age ${AGE_SEC}s)"
     jq '.pending_question = null' "$UNBLOCK_STATE_FILE" > "$UNBLOCK_STATE_FILE.tmp" && mv "$UNBLOCK_STATE_FILE.tmp" "$UNBLOCK_STATE_FILE"
-  else
-    echo "[unblock] STEP 0: another fire is asking about $PENDING_TICKET, exiting cleanly to avoid concurrent asks."
-    exit 0
   fi
 fi
 ```
 
+For a fresh complete `pending_question`:
+
+- In unattended `codex exec`, re-emit its stored `status=blocked`, exact `question`,
+  exact `choices`, and `next_action`, then stop without changing the lock.
+- In an interactive Codex thread, do not query another ticket. Rehydrate the ticket
+  and STEP 7 inputs from the stored `context`, present the exact stored question and
+  choices, accept one answer, and resume at STEP 7. Keep the lock until STEP 8
+  records the outcome.
+- If the record has `status=selecting`, another pass owns it; exit cleanly unless it
+  is stale.
+
 **STEP 1. Query agent-blocked tickets.**
 
 ```
-mcp__linear-server__list_issues(label="$AGENT_LABEL", state="$STATE_BLOCKED", team="$LINEAR_TEAM", limit=30)
+LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_BLOCKED", team="$TRACKER_TEAM", limit=30)
 ```
 
-If zero: log `[unblock] No agent-blocked tickets. Done.` and call `self_pace` (see SELF-PACING below), then exit.
+If zero: log `[unblock] No agent-blocked tickets. Done.`, return the structured
+no-op, and exit cleanly.
 
 **STEP 2. Filter the candidate list.**
 
@@ -164,16 +202,18 @@ Sort survivors by:
 1. Priority asc (1=Urgent first, 4=Low last, 0=None last).
 2. `createdAt` asc (oldest first — drain the queue head).
 
-Pick the FIRST candidate. If no candidates survive the filter, log `[unblock] All blocked tickets in cooldown, no new activity. Done.` and self-pace + exit.
+Pick the FIRST candidate. If no candidates survive the filter, log
+`[unblock] All blocked tickets in cooldown, no new activity. Done.`, return the
+structured no-op, and exit cleanly.
 
 **STEP 3. Read the ticket + parent + bail comment.**
 
 ```
-ticket = mcp__linear-server__get_issue(id="<TICKET-id>")
+ticket = INSPECT_TRACKER_ITEM(id="<TICKET-id>")
 ```
 
 - Hold `ticket.description`, `ticket.labels`, `ticket.priority`, `ticket.parentId`.
-- If `parentId` is set: `parent = mcp__linear-server__get_issue(id=parentId)`. Hold parent's description (often has PLAN.md reference + design context).
+- If `parentId` is set: `parent = INSPECT_TRACKER_ITEM(id=parentId)`. Hold parent's description (often has PLAN.md reference + design context).
 - Hunt for a PLAN.md reference in ticket description, parent description, or recent comments. Same regex as implementer-run STEP B: paths like `/Users/.../PLAN.md`, `~/Documents/.../PLAN.md`, `Documents/projects/<slug>/PLAN.md`, or `[plan](path)` links.
 - Find the most recent BAIL COMMENT — the agent's comment that ended with one of:
   - "Bailed mid-implementation"
@@ -183,9 +223,11 @@ ticket = mcp__linear-server__get_issue(id="<TICKET-id>")
   - "CI red after 2 fix attempts"
   - "[plan-deviation]"
   - "needs human pickup"
-  Use `mcp__linear-server__list_comments(issueId="<TICKET-id>")` and scan from the most recent backwards.
+  Use `LIST_TRACKER_COMMENTS(issueId="<TICKET-id>")` and scan from the most recent backwards.
 
-If no bail comment found, this ticket landed in `$STATE_BLOCKED` without going through an agent bail. Post a comment: `Stale-sweep: this ticket is in $STATE_BLOCKED but has no bail comment from an agent. Reason unclear. Leaving state alone, please clarify.` and update `state.asked` with `action: "no-bail-comment"` so we don't re-process. Self-pace + exit.
+If no bail comment is found, this ticket landed in `$STATE_BLOCKED` without an agent bail.
+Post a comment explaining that the reason is unclear, update `state.asked` with
+`action: "no-bail-comment"` so it is not reprocessed, and stop.
 
 **STEP 4. Classify the bail shape.**
 
@@ -203,20 +245,55 @@ Pick ONE of these shapes by matching keywords in the bail comment + ticket body:
 
 **STEP 5. Acquire the pending_question lock.**
 
-```sh
+```text
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq --arg t "<TICKET-id>" --arg ts "$NOW" \
-  '.pending_question = {ticket_id: $t, asked_at: $ts}' \
+  '.pending_question = {ticket_id: $t, asked_at: $ts, status: "selecting"}' \
   "$UNBLOCK_STATE_FILE" > "$UNBLOCK_STATE_FILE.tmp" && mv "$UNBLOCK_STATE_FILE.tmp" "$UNBLOCK_STATE_FILE"
 ```
 
 If a later fire hits STEP 0 while this fire is between STEPs 5 and 9, it'll see the lock and exit cleanly.
 
-**STEP 6. Surface the shape-appropriate question via AskUserQuestion.**
+**STEP 6. Surface the shape-appropriate question in the current Codex thread.**
 
-> **Harness note (AskUserQuestion fallback).** `AskUserQuestion` is a Claude Code tool. If it isn't available this fire (e.g. under Codex), present the SAME question as plain text instead: print the prompt, the 2–4 options as a numbered list, plus an `Other (free-form)` choice — then read the operator's typed reply and map it to the chosen option (a number, an option label, or free text). The lock, the one-question-in-flight rule, and the answer handling below are identical — only the asking primitive changes.
+Pick ONE of the templates below by shape. Each is one question with 2-4 structured options. You can always pick "Other" for a free-form answer.
 
-Pick ONE of the templates below by shape. Each is an `AskUserQuestion` call with 2-4 structured options. You can always pick "Other" for a free-form answer.
+If this pass runs under unattended `codex exec`, do not wait for an answer.
+Do not continue to STEP 7. Atomically persist the exact selected question and choices
+plus the ticket `shape` and minimal STEP 7 `context` in `pending_question`:
+
+```text
+jq --arg question "<exact selected question>" \
+   --argjson choices '["<exact choice 1>", "<exact choice 2>"]' \
+   --arg shape "<classified shape>" \
+   --argjson context '{"ticket_id":"<id>","ticket_updated_at":"<timestamp>"}' \
+   '.pending_question += {
+      status: "blocked",
+      question: $question,
+      choices: $choices,
+      shape: $shape,
+      context: $context
+    }' \
+  "$UNBLOCK_STATE_FILE" > "$UNBLOCK_STATE_FILE.tmp" &&
+  mv "$UNBLOCK_STATE_FILE.tmp" "$UNBLOCK_STATE_FILE"
+```
+
+Then emit:
+
+```json
+{
+  "status": "blocked",
+  "reason": "human decision required",
+  "project": "<project>",
+  "skill": "unblock",
+  "question": "<exact selected question>",
+  "choices": ["<exact choice 1>", "<exact choice 2>"],
+  "next_action": "answer this question in an interactive Codex thread"
+}
+```
+
+Stop immediately after emitting the result. In an interactive Codex thread, ask the
+single selected question and continue only after receiving its answer.
 
 ### Shape: `multi-discrepancy`
 
@@ -225,9 +302,9 @@ question:   "<ticket-id> has <N> distinct issues bundled in one ticket. How shou
 header:     "Multi-issue"
 options:
   - label: "Split into N children, I'll list them"
-    description: "Skill creates N child Linear tickets, each with its own labels + brief. You provide titles + categorization in a follow-up. Parent moves to $STATE_DONE."
+    description: "Skill creates N child configured tracker tickets, each with its own labels + brief. You provide titles + categorization in a follow-up. Parent moves to $STATE_DONE."
   - label: "Send back to agent-todo as-is"
-    description: "Move state back to $STATE_TODO; implementer will pick it up and handle the discrepancies one PR per item. Best when the discrepancies aren't truly independent."
+    description: "Move state back to $STATE_TODO; implementer will pick it up and handle the discrepancies one change per item. Best when the discrepancies aren't truly independent."
   - label: "I'll handle this manually, close it"
     description: "Move to $STATE_DONE with a comment that says you're handling it outside the loop. Audit trail only."
 ```
@@ -253,7 +330,7 @@ question:   "<ticket-id> is a design call. Bail: <one-line bail reason>. What do
 header:     "Scope-design"
 options:
   - label: "Investigate first — file a sibling research ticket"
-    description: "I'll create a new ticket with title prefix 'Investigate:' + label `$INVESTIGATE_LABEL` + state $STATE_TODO. /investigate-run picks it up, does read-only investigation, posts findings, moves IT to $STATE_BLOCKED. Parent stays here. Once findings land, /unblock resurfaces parent with the new context. Use when you don't have enough info to plan yet."
+    description: "I'll create a new ticket with title prefix 'Investigate:' + label `$INVESTIGATE_LABEL` + state $STATE_TODO. $pitcrew:investigate-run picks it up, does read-only investigation, posts findings, moves IT to $STATE_BLOCKED. Parent stays here. Once findings land, $pitcrew:unblock resurfaces parent with the new context. Use when you don't have enough info to plan yet."
   - label: "Build it — draft a PLAN.md"
     description: "I'll draft ~/Documents/projects/<feature-slug>/PLAN.md based on the ticket body. You can edit before it's locked. Ticket moves to $STATE_TODO referencing the plan path."
   - label: "Defer — leave in $STATE_BLOCKED"
@@ -283,13 +360,13 @@ question:   "<ticket-id> exhausted auto-fix attempts. Bail: <one-line bail reaso
 header:     "Fix-exhausted"
 options:
   - label: "Investigate why — file a sibling research ticket"
-    description: "Implementer kept failing — likely a missing piece of context. /investigate-run digs in (read-only), posts findings on the sibling ticket, then /unblock surfaces them to you. Use when the failures look like 'wrong fix shape' rather than 'one more retry will work'."
+    description: "Implementer kept failing — likely a missing piece of context. $pitcrew:investigate-run digs in (read-only), posts findings on the sibling ticket, then $pitcrew:unblock surfaces them to you. Use when the failures look like 'wrong fix shape' rather than 'one more retry will work'."
   - label: "I'll fix it manually, close the ticket"
-    description: "$STATE_DONE with a comment. You handle the PR outside the loop."
+    description: "$STATE_DONE with a comment. You handle the change outside the loop."
   - label: "Reset to agent-todo with hints"
     description: "Move state to $STATE_TODO + comment with debugging hints (e.g. 'try this specific approach' / 'the previous attempts missed X'). Gives the implementer a steered second pass."
-  - label: "Close the PR + ticket — bad direction"
-    description: "The work was the wrong shape. Comment + close PR + $STATE_DONE."
+  - label: "Close the change + ticket — bad direction"
+    description: "The work was the wrong shape. Comment + close change + $STATE_DONE."
 ```
 
 ### Shape: `generic` (fallback)
@@ -299,7 +376,7 @@ question:   "<ticket-id> is blocked. Bail: <full bail reason, truncated to 200 c
 header:     "Unblock"
 options:
   - label: "Investigate first — file a sibling research ticket"
-    description: "If you don't know what to do yet, route to /investigate-run for a read-only deep-dive. Findings land back via /unblock for a real decision."
+    description: "If you don't know what to do yet, route to $pitcrew:investigate-run for a read-only deep-dive. Findings land back via $pitcrew:unblock for a real decision."
   - label: "Send back to agent-todo with this context: <Other>"
     description: "Move state to $STATE_TODO + comment with the context you provide in 'Other'."
   - label: "Close as won't-do"
@@ -316,7 +393,7 @@ The user response includes both an `answer` (the selected label or "Other" + cus
 
 ### If action is `split-children`:
 
-Fire a SECOND `AskUserQuestion`:
+Ask a SECOND question in the current Codex thread:
 
 ```
 question:   "List the N children, one per line. Format: TITLE | LABELS (comma-separated) | brief description"
@@ -328,11 +405,11 @@ options:
     description: "Abort the split, leave the parent in $STATE_BLOCKED."
 ```
 
-If you provide children: parse the lines. For each line, call `mcp__linear-server__save_issue` with:
+If you provide children: parse the lines. For each line, call `UPDATE_TRACKER_ITEM` with:
 - `title`: TITLE from the line
 - `description`: a brief description block citing the parent (`Split from <PARENT-id>: <BRIEF>`)
 - `labels`: parsed LABELS (always include `$AGENT_LABEL_ID` if missing)
-- `team`: `$LINEAR_TEAM`
+- `team`: `$TRACKER_TEAM`
 - `project`: `$AGENT_BACKLOG_PROJECT_ID` if set
 - `state`: `$STATE_TODO_ID`
 - `parentId`: the original ticket ID
@@ -345,12 +422,12 @@ Then on the parent:
 
 ### If action is `investigate-sibling`:
 
-When you pick "Investigate first — file a sibling research ticket", the skill creates a NEW Linear issue dedicated to the investigation and leaves the parent in `$STATE_BLOCKED`.
+When you pick "Investigate first — file a sibling research ticket", the skill creates a NEW configured tracker issue dedicated to the investigation and leaves the parent in `$STATE_BLOCKED`.
 
-Fire a SECOND `AskUserQuestion` to gather the investigation brief:
+Ask a SECOND question in the current Codex thread to gather the investigation brief:
 
 ```
-question:   "What should /investigate-run dig into? Give it the goal in 1-3 sentences (free-form). It'll be the investigation ticket's goal section."
+question:   "What should $pitcrew:investigate-run dig into? Give it the goal in 1-3 sentences (free-form). It'll be the investigation ticket's goal section."
 header:     "Investigate brief"
 options:
   - label: "I'll write the brief in 'Other'"
@@ -362,8 +439,8 @@ options:
 If you provide a brief, create the sibling ticket:
 
 ```
-mcp__linear-server__save_issue(
-  team="$LINEAR_TEAM",
+UPDATE_TRACKER_ITEM(
+  team="$TRACKER_TEAM",
   project="$AGENT_BACKLOG_PROJECT_ID",
   title="Investigate: <short summary derived from brief>",
   description="""## Goal
@@ -372,11 +449,10 @@ mcp__linear-server__save_issue(
 
 ## Parent
 
-This investigation unblocks <PARENT-id>. Findings should be posted as a comment on THIS ticket; /unblock will then resurface the parent with the new context.
+This investigation unblocks <PARENT-id>. Findings should be posted as a comment on THIS ticket; $pitcrew:unblock will then resurface the parent with the new context.
 
 ## Scope
 
-- Read-only. NO PRs, NO commits, NO writes outside `~/.claude/agent-loop/<project>/state/`.
 - Investigate code paths, sample data, check logs/Datadog if available.
 - Produce: (a) findings comment with concrete file:line citations, (b) suspected root cause(s), (c) 2-3 candidate fixes ranked by blast radius, (d) optional draft PLAN.md if a clear plan emerges.
 
@@ -385,10 +461,10 @@ This investigation unblocks <PARENT-id>. Findings should be posted as a comment 
 - [ ] Findings posted as a comment.
 - [ ] Root cause identified with file:line evidence (or "could not reproduce / unclear" with what was tried).
 - [ ] Candidate fixes listed (or explicit "no fix viable, recommend close as wontfix").
-- [ ] State moved to $STATE_BLOCKED so /unblock resurfaces parent.
+- [ ] State moved to $STATE_BLOCKED so $pitcrew:unblock resurfaces parent.
 
 ---
-Filed by /unblock as an investigate-sibling of <PARENT-id> on <timestamp>.""",
+Filed by $pitcrew:unblock as an investigate-sibling of <PARENT-id> on <timestamp>.""",
   labels=[$AGENT_LABEL_ID, $INVESTIGATE_LABEL_ID, $IMPROVEMENT_LABEL_ID],   # ← $INVESTIGATE_LABEL_ID IS MANDATORY (see HARD RULE 8)
   state=$STATE_TODO_ID,
   assignee=$ASSIGNEE_EMAIL,
@@ -400,14 +476,14 @@ Filed by /unblock as an investigate-sibling of <PARENT-id> on <timestamp>.""",
 **Verify the label landed (HARD RULE 8 follow-through):**
 
 ```
-created = mcp__linear-server__get_issue(id=<NEW-id>)
+created = INSPECT_TRACKER_ITEM(id=<NEW-id>)
 if "investigate" not in created.labels:
-  # Retry — Linear silently dropped the label, possibly due to label-name resolution issue
-  mcp__linear-server__save_issue(
+  # Retry — configured tracker silently dropped the label, possibly due to label-name resolution issue
+  UPDATE_TRACKER_ITEM(
     id=<NEW-id>,
     labels=[$AGENT_LABEL_ID, $INVESTIGATE_LABEL_ID, $IMPROVEMENT_LABEL_ID]
   )
-  created = mcp__linear-server__get_issue(id=<NEW-id>)
+  created = INSPECT_TRACKER_ITEM(id=<NEW-id>)
   if "investigate" not in created.labels:
     # Still missing — log + comment on parent that the sibling needs manual labeling
     log: "[unblock] HARD RULE 8 violation: sibling <NEW-id> created without investigate label after retry"
@@ -416,10 +492,10 @@ if "investigate" not in created.labels:
 ```
 
 Then on the parent (original blocked ticket):
-- Comment: `Unblocker: filed sibling investigation <NEW-id> per your request. Parent stays in $STATE_BLOCKED until findings land. /unblock will resurface this ticket when /investigate-run posts findings on <NEW-id>.`
+- Comment: `Unblocker: filed sibling investigation <NEW-id> per your request. Parent stays in $STATE_BLOCKED until findings land. $pitcrew:unblock will resurface this ticket when $pitcrew:investigate-run posts findings on <NEW-id>.`
 - Leave state as `$STATE_BLOCKED`. Do NOT move it.
 
-Cooldown on parent: extend to whenever the sibling's state changes (we'll detect new activity on the sibling via Linear's relations; for v1 just re-evaluate after 6h cooldown like normal).
+Cooldown on parent: extend to whenever the sibling's state changes (we'll detect new activity on the sibling via configured tracker's relations; for v1 just re-evaluate after 6h cooldown like normal).
 
 ### If action is `send-back-to-agent-todo`:
 
@@ -442,7 +518,7 @@ Cooldown on parent: extend to whenever the sibling's state changes (we'll detect
 
 #### Sub-step 7P.1 — Decide planning depth
 
-Fire a follow-up `AskUserQuestion` BEFORE any drafting:
+Ask a follow-up question in the current Codex thread BEFORE any drafting:
 
 ```
 question:   "Before I draft PLAN.md for <ticket-id>, how should we approach this?"
@@ -455,7 +531,7 @@ options:
   - label: "Skip plan — send to agent-todo with a brief"
     description: "No PLAN.md. Ticket moves to agent-todo with a brief from you setting scope. Implementer picks up from there."
   - label: "Cancel — leave in $STATE_BLOCKED"
-    description: "Abort. Re-ask next cycle or re-trigger /unblock when ready."
+    description: "Abort. Re-ask next cycle or re-trigger $pitcrew:unblock when ready."
 ```
 
 Branch on your choice:
@@ -474,7 +550,7 @@ options:
   - label: "I'll provide in 'Other' (free-form)"
     description: "Format suggestion: 'Approach: ... | Files: ... | Decisions: ...' (any format works — I'll parse loosely)."
   - label: "Use my last comment on the ticket as input"
-    description: "If you already commented on the Linear ticket describing the approach, I'll pull that text. Saves typing."
+    description: "If you already commented on the configured tracker ticket describing the approach, I'll pull that text. Saves typing."
   - label: "Inferred is fine — proceed to pitfalls"
     description: "Skip this — infer approach/files from ticket body. Less collaborative but faster. You'll edit PLAN.md after."
 ```
@@ -504,21 +580,21 @@ Hold pitfalls blob.
 
 - Slug = `<id-lower>-<short-from-title>` (max 40 chars total).
 - Create directory `~/Documents/projects/<slug>/`.
-- Draft `PLAN.md` from: scope-input blob (7P.2) + pitfalls blob (7P.3) + ticket body. **If a section has both ticket-body content AND user-provided content, the user's content takes precedence and is marked `[locked with the operator in /unblock]`.**
+- Draft `PLAN.md` from: scope-input blob (7P.2) + pitfalls blob (7P.3) + ticket body. **If a section has both ticket-body content AND user-provided content, the user's content takes precedence and is marked `[locked with the operator in $pitcrew:unblock]`.**
 
   ```markdown
   # PLAN — <Ticket title>
 
-  > Linear: <ticket URL>
+  > configured tracker: <ticket URL>
   > Filed: <timestamp>
-  > Status: draft (created by /unblock — review + lock before agent picks it up)
+  > Status: draft (created by $pitcrew:unblock — review + lock before agent picks it up)
 
   ## Context
   <ticket body summary — 3-4 sentences max>
 
   ## Approach
   <from scope-input blob if provided, else "TBD — fill in before locking">
-  <if from scope-input: append " [locked with the operator in /unblock 2026-MM-DD]">
+  <if from scope-input: append " [locked with the operator in $pitcrew:unblock 2026-MM-DD]">
 
   ## Files / areas affected
   <from scope-input "files" if provided>
@@ -533,7 +609,7 @@ Hold pitfalls blob.
   ### Phase 1 — <name from scope-input or "Implementation">
   - **Files to change:** <inferred from above>
   - **Acceptance:** <pull from ticket "Acceptance" if present, else TBD>
-  - **PR scope:** <single PR title sketch>
+  - **change scope:** <single change title sketch>
 
   ## Pitfalls
   <from pitfalls blob if provided, formatted as bullets>
@@ -569,7 +645,7 @@ If you provide a brief: comment on ticket `Unblocker: brief from you (no PLAN.md
 
 **STEP 8. Update state + release lock.**
 
-```sh
+```text
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq --arg t "<TICKET-id>" \
    --arg now "$NOW" \
@@ -587,37 +663,27 @@ jq --arg t "<TICKET-id>" \
   "$UNBLOCK_STATE_FILE" > "$UNBLOCK_STATE_FILE.tmp" && mv "$UNBLOCK_STATE_FILE.tmp" "$UNBLOCK_STATE_FILE"
 ```
 
-**STEP 9. Print one-line summary + self-pace.**
+**STEP 9. Print one-line summary + stop.**
 
 ```
 [unblock] <TICKET-id> → <action> (<outcome>).
 ```
 
-═══ SELF-PACING (only when invoked via `/loop` in dynamic mode, i.e. without a fixed interval) ═══
+═══ SCHEDULING ═══
 
-```
-if ScheduleWakeup is available:
-  remaining = list_issues(label=$AGENT_LABEL, state=$STATE_BLOCKED, limit=30)
-  if remaining > 1:
-    delay = $FAST_WAKEUP   # more to do, come back soon
-  else:
-    delay = $SLOW_HEARTBEAT # nothing or just one — slow heartbeat
-  ScheduleWakeup({ delaySeconds: delay, reason: "<R> blocked tickets remain", prompt: "/unblock $PROJECT" })
-```
-
-If running on a fixed-interval cron (`/loop 30m /unblock`), do nothing extra — the cron handles wakeups.
+Scheduling belongs to the Codex scheduled task or external caller; this skill never schedules its next run.
 
 ═══ FAILURE MODES ═══
 
-- **Linear MCP unavailable** → `[unblock] Linear MCP not available, exiting.` Lock released.
-- **AskUserQuestion timeout** (you never answer in this session lifetime) → lock stays set with `asked_at`; next fire detects stale lock (>24h) and clears, but in practice you can just kill the session or wait for the operator.
-- **Ticket malformed** (no bail comment, no labels, weird state) → comment on ticket asking what happened, set `state.asked[<id>].action = "malformed"`, self-pace, exit.
+- **configured tracker unavailable** → `[unblock] configured tracker not available, exiting.` Lock released.
+- **Current-thread question timeout** (you never answer in this session lifetime) → lock stays set with `asked_at`; next fire detects stale lock (>24h) and clears, but in practice you can just kill the session or wait for the operator.
+- **Ticket malformed** (no bail comment, no labels, weird state) → comment on ticket asking what happened, set `state.asked[<id>].action = "malformed"`, stop, exit.
 - **Child-creation partial failure** (e.g. 3 of 5 children created, then API error) → already-created children are kept; comment on parent listing what succeeded + failed; ask the operator in a follow-up whether to retry the rest or treat the partial as done.
 
 ═══ TONE ═══
 
-- Linear comments: terse, factual. Start with `Unblocker: ` so they're greppable.
-- AskUserQuestion: brief, specific. Cite the ticket ID + the bail one-liner. Don't ask the operator to re-read the whole ticket.
+- configured tracker comments: terse, factual. Start with `Unblocker: ` so they're greppable.
+- Current-thread questions: brief, specific. Cite the ticket ID + the bail one-liner. Don't ask the operator to re-read the whole ticket.
 - Run output: one log line per step, ONE final summary line.
 
 Begin.

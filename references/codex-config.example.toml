@@ -1,27 +1,20 @@
-# pitcrew × Codex — example ~/.codex/config.toml additions
-#
-# MERGE these into your existing ~/.codex/config.toml (don't overwrite the file).
-# Only the Linear-coupled skills need this; research-run / qa-run write local ledgers
-# and run with no MCP at all.
+# Merge only the settings you need into your existing Codex configuration.
+# Pitcrew preserves these caller-owned policies and never widens them.
 
-# ── Linear MCP server ────────────────────────────────────────────────────────
-# Gives the skills their `<LINEAR>` tool family. Codex talks to MCP servers over
-# stdio, so we bridge Linear's remote MCP with `mcp-remote`. First run triggers the
-# Linear OAuth flow in your browser; after that it's cached.
-[mcp_servers.linear]
-command = "npx"
-args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
 
-# ── Network during headless passes ───────────────────────────────────────────
-# `bin/pitcrew-codex.sh` defaults to the `workspace-write` sandbox, which blocks
-# network — fine for research/qa, but the Linear-coupled skills also shell out to
-# `gh`/curl. Give those passes network one of two ways:
+# Provider connectors are optional. Configure Linear only for projects whose
+# config.json sets providers.tracker = "linear".
 #
-#   (a) per-run, blunt:   CODEX_SANDBOX=danger-full-access pitcrew-codex.sh implementer-run <proj>
-#   (b) keep the sandbox, allow network for it (preferred) — consult your Codex
-#       version's sandbox docs for the exact key, then run with that profile:
-#         CODEX_PROFILE=pitcrew pitcrew-codex.sh implementer-run <proj>
+# [mcp_servers.linear]
+# command = "npx"
+# args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+
+# Prefer a dedicated profile for scheduled Pitcrew passes so its permissions are
+# explicit and reviewable. Keep network access scoped to roles that require a
+# configured remote provider.
 #
 # [profiles.pitcrew]
-#   # sandbox / network settings for unattended runs — see `codex` docs for the
-#   # exact keys on your version (they have changed across releases).
+# sandbox_mode = "workspace-write"
+# approval_policy = "on-request"
