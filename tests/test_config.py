@@ -182,6 +182,11 @@ class ConfigTest(unittest.TestCase):
             ([], "agents must be an object"),
             ({"unknown-run": {"model": "gpt-5.6-terra"}}, "agents.unknown-run"),
             ({"research-run": []}, "agents.research-run"),
+            ({"research-run": {}}, "agents.research-run.model is unsupported"),
+            (
+                {"research-run": {"model": "gpt-5.6-terra", "extra": True}},
+                "agents.research-run.model is unsupported",
+            ),
             ({"research-run": {"model": "invented"}}, "agents.research-run.model"),
         ):
             with self.subTest(agents=agents):

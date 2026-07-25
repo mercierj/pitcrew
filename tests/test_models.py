@@ -13,21 +13,21 @@ class ModelCatalogTest(unittest.TestCase):
     def test_every_role_has_a_supported_default(self):
         self.assertEqual(
             {
-                "research-run",
-                "manager-run",
-                "implementer-run",
-                "reviewer-run",
-                "validator-run",
-                "investigate-run",
-                "stale-sweep",
-                "qa-run",
-                "coverage-run",
-                "dev-verify-run",
-                "ops-run",
-                "unblock",
-                "releaser-run",
+                "research-run": "gpt-5.6-terra",
+                "manager-run": "gpt-5.6-luna",
+                "implementer-run": "gpt-5.6-sol",
+                "reviewer-run": "gpt-5.6-sol",
+                "validator-run": "gpt-5.6-terra",
+                "investigate-run": "gpt-5.6-sol",
+                "stale-sweep": "gpt-5.6-luna",
+                "qa-run": "gpt-5.6-terra",
+                "coverage-run": "gpt-5.6-terra",
+                "dev-verify-run": "gpt-5.6-terra",
+                "ops-run": "gpt-5.6-luna",
+                "unblock": "gpt-5.6-sol",
+                "releaser-run": "gpt-5.6-terra",
             },
-            set(DEFAULT_MODELS),
+            DEFAULT_MODELS,
         )
         self.assertTrue(set(DEFAULT_MODELS.values()) <= set(MODEL_CATALOG))
 
@@ -40,6 +40,10 @@ class ModelCatalogTest(unittest.TestCase):
             ),
         )
         self.assertEqual("gpt-5.6-sol", resolve_model({}, "implementer-run"))
+
+    def test_unknown_role_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown role: unknown-run"):
+            resolve_model({}, "unknown-run")
 
     def test_cost_uses_all_four_token_categories(self):
         usage = {
