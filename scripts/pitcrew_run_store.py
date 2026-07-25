@@ -396,7 +396,7 @@ class RunStore:
     def request_cancel(self, project: str) -> list[dict[str, Any]]:
         project = self._public(project, "project"); connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE"); connection.execute("UPDATE runs SET cancel_requested=1 WHERE project=? AND state IN ('queued','running')", (project,)); rows = connection.execute("SELECT * FROM runs WHERE project=? AND state IN ('queued','running') ORDER BY queue_sequence", (project,)).fetchall(); connection.commit(); return [self._row(row) for row in rows]  # type: ignore[misc]
+            connection.execute("BEGIN IMMEDIATE"); connection.execute("UPDATE runs SET cancel_requested=1 WHERE project=? AND state='running'", (project,)); rows = connection.execute("SELECT * FROM runs WHERE project=? AND state='running' ORDER BY queue_sequence", (project,)).fetchall(); connection.commit(); return [self._row(row) for row in rows]  # type: ignore[misc]
         except sqlite3.Error as error: connection.rollback(); raise RunStoreError("database operation failed") from error
         finally: connection.close()
 

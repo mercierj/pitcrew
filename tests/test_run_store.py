@@ -226,14 +226,15 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual(0, self.store.get(first["run_id"])["queue_position"])
         self.assertEqual(1, self.store.get(second["run_id"])["queue_position"])
 
-    def test_request_cancel_marks_active_runs(self):
+    def test_request_cancel_marks_running_runs_only(self):
         running = self.enqueue("T-running")
         self.store.claim_ready(project="demo", capacities={"implementer-run": 1})
         queued = self.enqueue("T-queued")
         cancelled = self.store.request_cancel("demo")
-        self.assertEqual({queued["run_id"], running["run_id"]}, {run["run_id"] for run in cancelled})
+        self.assertEqual({running["run_id"]}, {run["run_id"] for run in cancelled})
         self.assertTrue(all(run["cancel_requested"] for run in cancelled))
         self.assertEqual("queued", self.store.get(queued["run_id"])["state"])
+        self.assertFalse(self.store.get(queued["run_id"])["cancel_requested"])
         self.assertEqual("running", self.store.get(running["run_id"])["state"])
 
     def test_snapshot_has_deterministic_runs_positions_and_capacity_counts(self):

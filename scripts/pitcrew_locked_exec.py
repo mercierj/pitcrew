@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pitcrew_history import HistoryStore
+from pitcrew_run_store import RunStateError, RunStore, RunStoreError
 
 
 MAX_SUMMARY_BYTES = 64 * 1024
@@ -32,6 +33,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--summary-file", required=True, type=Path)
     result.add_argument("--history-file", required=True, type=Path)
     result.add_argument("--live-file", type=Path)
+    result.add_argument("--run-db", type=Path)
+    result.add_argument("--run-id")
+    result.add_argument("--heartbeat-seconds", type=float, default=2)
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
 
@@ -126,7 +130,7 @@ def parse_usage_event(line: bytes) -> dict[str, int] | None:
     return normalize_usage(event.get("usage"))
 
 
-def drain_child_output(child: subprocess.Popen[str]) -> dict[str, int] | None:
+def drain_child_output(child: subprocess.Popen[str], tick=None, heartbeat_seconds: float = 2) -> dict[str, int] | None:
     if child.stdout is None:
         return None
     descriptor = child.stdout.fileno()
@@ -178,7 +182,11 @@ def drain_child_output(child: subprocess.Popen[str]) -> dict[str, int] | None:
 
     with selectors.DefaultSelector() as selector:
         selector.register(descriptor, selectors.EVENT_READ)
+        next_heartbeat = time.monotonic() + heartbeat_seconds
         while child.poll() is None:
+            if tick is not None and time.monotonic() >= next_heartbeat:
+                tick()
+                next_heartbeat = time.monotonic() + heartbeat_seconds
             if selector.select(timeout=0.1):
                 drain_available()
         deadline = time.monotonic() + 0.1
@@ -192,7 +200,12 @@ def drain_child_output(child: subprocess.Popen[str]) -> dict[str, int] | None:
 
 
 def main() -> int:
-    args = parser().parse_args()
+    argument_parser = parser()
+    args = argument_parser.parse_args()
+    if bool(args.run_db) != bool(args.run_id):
+        argument_parser.error("--run-db and --run-id must be used together")
+    if args.heartbeat_seconds <= 0:
+        argument_parser.error("--heartbeat-seconds must be positive")
     command = args.command
     if command[:1] == ["--"]:
         command = command[1:]
@@ -200,6 +213,19 @@ def main() -> int:
         print("pitcrew lock: command is required", file=sys.stderr)
         return 2
 
+    coordinated_store = None
+    coordinated_run = None
+    if args.run_db:
+        try:
+            coordinated_store = RunStore(args.run_db)
+            coordinated_run = coordinated_store.get(args.run_id)
+            if (coordinated_run is None or coordinated_run["project"] != args.project
+                    or coordinated_run["skill"] != args.skill or coordinated_run["state"] != "running"):
+                print("pitcrew lock: coordinated run is unavailable", file=sys.stderr)
+                return 2
+        except RunStoreError:
+            print("pitcrew lock: coordinated run is unavailable", file=sys.stderr)
+            return 2
     started_at = utc_now()
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
@@ -210,7 +236,7 @@ def main() -> int:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            reason = f"{args.skill} already running"
+            reason = f"run {args.run_id} already running" if args.run_id else f"{args.skill} already running"
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,
@@ -248,9 +274,21 @@ def main() -> int:
                 "started_at": started_at,
                 "pid": os.getpid(),
                 "phase": "Exécution du passage courant",
+                **({"run_id": args.run_id} if args.run_id else {}),
             },
         )
         try:
+            if coordinated_store is not None:
+                try:
+                    if coordinated_run is not None and coordinated_run["pid"] is None:
+                        coordinated_store.mark_pid(args.run_id, os.getpid())
+                except RunStateError:
+                    clear_live_status(args.live_file)
+                    return 0
+                except RunStoreError:
+                    clear_live_status(args.live_file)
+                    print("pitcrew lock: run store is unavailable", file=sys.stderr)
+                    return 2
             args.summary_file.unlink(missing_ok=True)
             os.set_inheritable(descriptor, True)
             child = subprocess.Popen(
@@ -260,9 +298,19 @@ def main() -> int:
                 encoding="utf-8",
                 errors="replace",
                 pass_fds=(descriptor,),
+                start_new_session=True,
             )
         except OSError:
             clear_live_status(args.live_file)
+            if coordinated_store is not None:
+                try:
+                    coordinated_store.finish(args.run_id, state="failed", error_code="spawn_failed", error_message="worker could not be started")
+                except RunStateError:
+                    pass
+                except RunStoreError:
+                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, "model": args.model, "started_at": started_at, "finished_at": utc_now(), "duration_ms": 0, "outcome": "failed", "exit_code": None, "summary": NO_SUMMARY})
+                    print("pitcrew lock: run store is unavailable", file=sys.stderr)
+                    return 2
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,
@@ -284,14 +332,36 @@ def main() -> int:
 
         def forward(signum: int, _frame: object) -> None:
             if child.poll() is None:
-                child.send_signal(signum)
+                try:
+                    os.killpg(child.pid, signum)
+                except OSError:
+                    pass
 
         previous = {
             signum: signal.signal(signum, forward)
             for signum in (signal.SIGINT, signal.SIGTERM)
         }
         try:
-            usage = drain_child_output(child)
+            def heartbeat() -> None:
+                if coordinated_store is not None:
+                    coordinated_store.heartbeat(args.run_id, "Exécution du passage courant")
+            try:
+                usage = drain_child_output(child, heartbeat if coordinated_store is not None else None, args.heartbeat_seconds)
+            except RunStoreError:
+                if child.poll() is None:
+                    try: os.killpg(child.pid, signal.SIGTERM)
+                    except OSError: pass
+                try: child.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    try: os.killpg(child.pid, signal.SIGKILL)
+                    except OSError: pass
+                    child.wait()
+                if coordinated_store is not None:
+                    try: coordinated_store.finish(args.run_id, state="failed", error_code="store_unavailable", error_message="run store is unavailable")
+                    except (RunStateError, RunStoreError): pass
+                clear_live_status(args.live_file)
+                print("pitcrew lock: run store is unavailable", file=sys.stderr)
+                return 2
             return_code = child.wait()
         finally:
             for signum, handler in previous.items():
@@ -305,6 +375,19 @@ def main() -> int:
             outcome = "failed"
         try:
             write_fallback_summary(args.summary_file, return_code)
+            if coordinated_store is not None:
+                try:
+                    if return_code == 0:
+                        coordinated_store.finish(args.run_id, state="succeeded")
+                    else:
+                        coordinated_store.finish(args.run_id, state="failed", error_code="interrupted" if return_code < 0 else "command_failed", error_message="worker command did not complete")
+                except RunStateError:
+                    pass
+                except RunStoreError:
+                    clear_live_status(args.live_file)
+                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, "model": args.model, "started_at": started_at, "finished_at": utc_now(), "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000, "outcome": "failed", "exit_code": return_code, "summary": read_summary(args.summary_file)})
+                    print("pitcrew lock: run store is unavailable", file=sys.stderr)
+                    return 2
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,

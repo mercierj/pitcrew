@@ -6,10 +6,199 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class CoordinatedLockedExecTest(unittest.TestCase):
+    def test_coordinated_spawn_failure_with_store_failure_is_safe(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+            class Store:
+                def __init__(self, path): pass
+                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": None}
+                def mark_pid(self, *args): return {}
+                def finish(self, *args, **kwargs): raise helper.RunStoreError("down")
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                history = mock.Mock()
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", "missing"]
+                stderr = __import__("io").StringIO()
+                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch.object(helper.subprocess, "Popen", side_effect=OSError()), mock.patch("sys.stderr", stderr):
+                    self.assertEqual(2, helper.main())
+                self.assertIn("run store is unavailable", stderr.getvalue()); history.append.assert_called()
+        finally:
+            sys.path.remove(scripts_path)
+
+    def test_coordinated_terminal_finish_store_failure_is_safe(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+            class Store:
+                def __init__(self, path): pass
+                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": None}
+                def mark_pid(self, *args): return {}
+                def finish(self, *args, **kwargs): raise helper.RunStoreError("down")
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                history = mock.Mock(); stderr = __import__("io").StringIO()
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", sys.executable, "-c", "pass"]
+                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch("sys.stderr", stderr):
+                    self.assertEqual(2, helper.main())
+                self.assertIn("run store is unavailable", stderr.getvalue()); history.append.assert_called()
+        finally:
+            sys.path.remove(scripts_path)
+    def helper(self, root, run, command, *extra):
+        return subprocess.run([
+            sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "run.lock"),
+            "--project", "demo", "--skill", "qa-run", "--model", "test", "--summary-file", str(root / "summary"),
+            "--history-file", str(root / "history"), "--run-db", str(root / "private" / "runs.sqlite"),
+            "--run-id", run["run_id"], *extra, "--", *command], cwd=ROOT, text=True, capture_output=True, check=False)
+
+    def test_coordinated_success_finishes_run_and_clears_live(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            store = RunStore(root / "private" / "runs.sqlite")
+            run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="ABC-1")
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            live = root / "live.json"
+            result = self.helper(root, run, [sys.executable, "-c", "raise SystemExit(0)"], "--live-file", str(live))
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("succeeded", store.get(run["run_id"])["state"])
+            self.assertFalse(live.exists())
+
+    def test_coordinated_failure_and_launch_error_finalize_run(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
+            failed = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one")
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            self.assertEqual(7, self.helper(root, failed, [sys.executable, "-c", "raise SystemExit(7)"]).returncode)
+            self.assertEqual(("failed", "command_failed"), (store.get(failed["run_id"])["state"], store.get(failed["run_id"])["error_code"]))
+            missing = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two")
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            self.assertEqual(127, self.helper(root, missing, ["/missing-executable"]).returncode)
+            self.assertEqual(("failed", "spawn_failed"), (store.get(missing["run_id"])["state"], store.get(missing["run_id"])["error_code"]))
+
+    def test_coordinated_does_not_replace_dispatcher_pid(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
+            run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one")
+            store.claim_ready(project="demo", capacities={"qa-run": 1}); store.mark_pid(run["run_id"], 4321)
+            self.assertEqual(0, self.helper(root, run, [sys.executable, "-c", "raise SystemExit(0)"]).returncode)
+            self.assertEqual(4321, store.get(run["run_id"])["pid"])
+
+    def test_coordinated_flag_pairing_and_heartbeat_are_validated(self):
+        helper = ROOT / "scripts/pitcrew_locked_exec.py"
+        base = [sys.executable, str(helper), "--lock-file", "/tmp/x", "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", "/tmp/a", "--history-file", "/tmp/b"]
+        self.assertEqual(2, subprocess.run([*base, "--run-id", "x", "--", "true"], cwd=ROOT, capture_output=True).returncode)
+        self.assertEqual(2, subprocess.run([*base, "--run-db", "/tmp/runs.sqlite", "--", "true"], cwd=ROOT, capture_output=True).returncode)
+        self.assertEqual(2, subprocess.run([*base, "--heartbeat-seconds", "0", "--", "true"], cwd=ROOT, capture_output=True).returncode)
+
+    def test_coordinated_silent_child_heartbeats_and_signal_is_interrupted(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
+            run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
+            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
+            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + 2
+            while not live.exists() and time.monotonic() < deadline: time.sleep(.01)
+            self.assertEqual(run["run_id"], json.loads(live.read_text())["run_id"])
+            initial = store.get(run["run_id"])["heartbeat_at"]; time.sleep(.12)
+            self.assertGreater(store.get(run["run_id"])["heartbeat_at"], initial)
+            _, _ = process.communicate(timeout=2); self.assertEqual(0, process.returncode); self.assertFalse(live.exists())
+
+    def test_coordinated_terminal_race_and_interrupted_do_not_overwrite(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
+            run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
+            self.assertNotEqual(0, self.helper(root, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"]).returncode)
+            self.assertEqual("interrupted", store.get(run["run_id"])["error_code"])
+            race = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two"); store.claim_ready(project="demo", capacities={"qa-run": 1})
+            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
+            time.sleep(.05); store.finish(race["run_id"], state="cancelled"); process.communicate(timeout=2)
+            self.assertEqual("cancelled", store.get(race["run_id"])["state"])
+
+    def test_same_run_lock_is_noop_while_distinct_locks_overlap(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
+            one = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); two = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two")
+            store.claim_ready(project="demo", capacities={"qa-run": 2})
+            common = ["--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--run-db", str(root / "private" / "runs.sqlite")]
+            command = [sys.executable, "-c", "import time; time.sleep(.25)"]
+            first = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--", *command], cwd=ROOT, stdout=subprocess.PIPE, text=True)
+            time.sleep(.05)
+            duplicate = subprocess.run([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--", *command], cwd=ROOT, text=True, capture_output=True)
+            self.assertEqual("noop", json.loads(duplicate.stdout)["status"]); self.assertEqual("running", store.get(one["run_id"])["state"])
+            second = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "two.lock"), *common, "--run-id", two["run_id"], "--", *command], cwd=ROOT)
+            first.communicate(timeout=2); second.communicate(timeout=2)
+            self.assertEqual(0, first.returncode); self.assertEqual(0, second.returncode)
+
+    def test_coordinated_store_failure_during_heartbeat_kills_child(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); db = root / "private" / "runs.sqlite"
+            store = RunStore(db)
+            run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one")
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            live, pidfile, backup = root / "live", root / "child.pid", db.with_name("runs.backup.sqlite")
+            child = f"from pathlib import Path; import os,time; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(10)"
+            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
+            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 2
+                while (not pidfile.exists() or not live.exists()) and time.monotonic() < deadline: time.sleep(.01)
+                self.assertTrue(pidfile.exists()); self.assertTrue(live.exists())
+                db.rename(backup); db.symlink_to(root / "missing.sqlite")
+                stdout, stderr = process.communicate(timeout=3)
+                self.assertEqual(2, process.returncode, stdout + stderr); self.assertIn("run store is unavailable", stderr); self.assertFalse(live.exists())
+                child_pid = int(pidfile.read_text()); deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    try: os.kill(child_pid, 0)
+                    except ProcessLookupError: break
+                    time.sleep(.02)
+                else: self.fail("child remains alive after run store failure")
+            finally:
+                if process.poll() is None:
+                    process.kill(); process.communicate(timeout=2)
+                if db.is_symlink(): db.unlink()
+                if backup.exists(): backup.rename(db)
+            restored = RunStore(db, pid_alive=lambda _: False)
+            self.assertEqual("failed", restored.reconcile("demo")[0]["state"])
+
+    def test_helper_sigterm_kills_child_process_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve(); pids = root / "pids"
+            code = f"import subprocess,sys,os,time; from pathlib import Path; c=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)']); Path({str(pids)!r}).write_text(f'{{os.getpid()}} {{c.pid}}'); time.sleep(10)"
+            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--", sys.executable, "-c", code]
+            helper = subprocess.Popen(command, cwd=ROOT)
+            try:
+                deadline = time.monotonic() + 2
+                while not pids.exists() and time.monotonic() < deadline: time.sleep(.01)
+                self.assertTrue(pids.exists()); child, grandchild = map(int, pids.read_text().split())
+                helper.terminate(); helper.wait(timeout=3)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    alive = []
+                    for pid in (child, grandchild):
+                        try: os.kill(pid, 0); alive.append(pid)
+                        except ProcessLookupError: pass
+                    if not alive: break
+                    time.sleep(.02)
+                self.assertEqual([], alive)
+            finally:
+                if helper.poll() is None: helper.kill(); helper.wait(timeout=2)
 
 
 class CliTest(unittest.TestCase):
