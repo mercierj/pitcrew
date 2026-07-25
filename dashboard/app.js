@@ -12,9 +12,13 @@ const dateFormatter = new Intl.DateTimeFormat("fr-FR", {
 const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   refreshState: document.querySelector("#refresh-state"),
+  globalStopButton: document.querySelector("#global-stop-button"),
+  globalResumeButton: document.querySelector("#global-resume-button"),
+  globalState: document.querySelector("#global-state"),
   operationalStatus: document.querySelector("#operational-status"),
   globalBanner: document.querySelector("#global-banner"),
   overviewUsageNote: document.querySelector("#overview-usage-note"),
+  liveAgentGrid: document.querySelector("#live-agent-grid"),
   agentGrid: document.querySelector("#agent-grid"),
   disabledList: document.querySelector("#disabled-list"),
   disabledCount: document.querySelector("#disabled-count"),
@@ -169,7 +173,7 @@ function modelLabel(modelCatalog, model) {
   return typeof entry?.label === "string" && entry.label ? `${model} · ${entry.label}` : model || "Indisponible";
 }
 
-function createModelControl(agent, modelCatalog) {
+function createModelControl(agent, modelCatalog, globalStopped) {
   const wrapper = document.createElement("div");
   wrapper.className = "agent-model";
   const skill = typeof agent.skill === "string" ? agent.skill : "";
@@ -191,7 +195,7 @@ function createModelControl(agent, modelCatalog) {
     select.append(option);
   });
   select.value = typeof agent.configured_model === "string" ? agent.configured_model : "";
-  select.disabled = pendingSkills.has(skill) || !select.value;
+  select.disabled = globalStopped || pendingSkills.has(skill) || !select.value;
   const previous = select.value;
   select.addEventListener("change", () => changeModel(skill, select.value, previous, select));
   const latest = document.createElement("p");
@@ -229,7 +233,19 @@ function renderOverview(snapshot) {
   setText(elements.overviewUsageNote, usageNote(usage));
 
   elements.globalBanner.className = "banner";
-  if (values.failed > 0) {
+  const globalStopped = snapshot?.global_state === "stopped";
+  elements.globalState?.classList.toggle("global-state-blocked", globalStopped);
+  setText(elements.globalState, globalStopped ? "Exécutions bloquées" : "État global : en fonctionnement");
+  if (elements.globalStopButton) {
+    elements.globalStopButton.hidden = globalStopped;
+  }
+  if (elements.globalResumeButton) {
+    elements.globalResumeButton.hidden = !globalStopped;
+  }
+  if (globalStopped) {
+    elements.globalBanner.classList.add("banner-error");
+    setText(elements.globalBanner, "Exécutions bloquées : aucun nouvel agent ne sera lancé.");
+  } else if (values.failed > 0) {
     elements.globalBanner.classList.add("banner-error");
     setText(elements.globalBanner, `${values.failed} agent(s) nécessitent une intervention.`);
   } else if (values.warning > 0) {
@@ -241,15 +257,76 @@ function renderOverview(snapshot) {
   }
 }
 
-function createActionButton(action, skill, label) {
+function createActionButton(action, skill, label, globalStopped) {
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.skill = skill;
   button.className = action === "trigger" ? "button button-primary" : "button button-quiet";
   button.textContent = label;
-  button.disabled = pendingSkills.has(skill);
+  button.disabled = globalStopped || pendingSkills.has(skill);
   button.addEventListener("click", () => control(action, skill));
   return button;
+}
+
+function formatElapsed(value) {
+  if (!value) {
+    return "Durée indisponible";
+  }
+  const started = new Date(value).getTime();
+  if (!Number.isFinite(started)) {
+    return "Durée indisponible";
+  }
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} min ${seconds % 60} s`;
+}
+
+function renderLiveAgents(snapshot) {
+  const agents = (Array.isArray(snapshot?.agents) ? snapshot.agents : [])
+    .filter((agent) => agent.running)
+    .sort((left, right) => String(left.skill).localeCompare(String(right.skill)));
+  elements.liveAgentGrid.replaceChildren();
+  if (agents.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "Aucun agent ne travaille actuellement.";
+    elements.liveAgentGrid.append(empty);
+    return;
+  }
+  agents.forEach((agent) => {
+    const status = agent.live_status;
+    const card = document.createElement("article");
+    card.className = "live-agent-card";
+    const heading = document.createElement("div");
+    heading.className = "agent-heading";
+    const title = document.createElement("h3");
+    title.textContent = agent.skill || "Agent sans nom";
+    heading.append(title, makeBadge("healthy"));
+
+    const phase = document.createElement("p");
+    phase.className = "live-agent-phase";
+    phase.textContent = status?.phase || "Exécution du passage courant";
+
+    const facts = document.createElement("dl");
+    facts.className = "live-agent-facts";
+    [
+      ["Depuis", formatDate(status?.started_at)],
+      ["Durée", formatElapsed(status?.started_at)],
+      ["Modèle", modelLabel(snapshot?.model_catalog, status?.model || agent.configured_model)],
+      ["PID", status?.pid || agent.pid || "Indisponible"],
+    ].forEach(([label, value]) => {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const detail = document.createElement("dd");
+      detail.textContent = value;
+      facts.append(term, detail);
+    });
+    card.append(heading, phase, facts);
+    elements.liveAgentGrid.append(card);
+  });
 }
 
 function syncSkillButtons(skill) {
@@ -262,6 +339,7 @@ function syncSkillButtons(skill) {
 
 function renderAgents(snapshot) {
   const agents = Array.isArray(snapshot?.agents) ? snapshot.agents : [];
+  const globalStopped = snapshot?.global_state === "stopped";
   elements.agentGrid.replaceChildren();
 
   if (agents.length === 0) {
@@ -304,14 +382,14 @@ function renderAgents(snapshot) {
     const actions = document.createElement("div");
     actions.className = "agent-actions";
     actions.append(
-      createActionButton("trigger", agent.skill, "Déclencher"),
-      createActionButton("restart", agent.skill, "Réinstaller"),
-      createActionButton("stop", agent.skill, "Arrêter"),
+      createActionButton("trigger", agent.skill, "Déclencher", globalStopped),
+      createActionButton("restart", agent.skill, "Réinstaller", globalStopped),
+      createActionButton("stop", agent.skill, "Arrêter", globalStopped),
     );
     card.append(
       heading,
       facts,
-      createModelControl(agent, snapshot?.model_catalog),
+      createModelControl(agent, snapshot?.model_catalog, globalStopped),
       summary,
       renderUsage("Dernier passage", agent.latest_usage),
       renderUsage("Usage · 7 jours", agent.usage_7d),
@@ -515,6 +593,36 @@ async function control(action, skill) {
   }
 }
 
+async function globalControl(action) {
+  const isStop = action === "stop-all";
+  const message = isStop
+    ? "Arrêter tous les agents et bloquer les futures exécutions ?"
+    : "Réactiver les agents et les exécutions planifiées ?";
+  if (!window.confirm(message)) {
+    return;
+  }
+  if (elements.globalStopButton) elements.globalStopButton.disabled = true;
+  if (elements.globalResumeButton) elements.globalResumeButton.disabled = true;
+  setText(elements.operationalStatus, isStop ? "Arrêt global en cours." : "Réactivation des agents en cours.");
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Pitcrew-Session": sessionToken,
+      },
+      body: JSON.stringify({ action }),
+    });
+    setText(elements.operationalStatus, isStop ? "Exécutions bloquées." : "Agents réactivés.");
+    await refresh({ manual: true });
+  } catch {
+    setText(elements.operationalStatus, "Impossible de modifier l’état global.");
+  } finally {
+    if (elements.globalStopButton) elements.globalStopButton.disabled = false;
+    if (elements.globalResumeButton) elements.globalResumeButton.disabled = false;
+  }
+}
+
 function restoreModelSelect(select, previous) {
   if (select && typeof previous === "string") {
     select.value = previous;
@@ -586,6 +694,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         fetchJson(historyPath()),
       ]);
       renderOverview(snapshot);
+      renderLiveAgents(snapshot);
       renderAgents(snapshot);
       renderHistory(history, snapshot?.model_catalog);
 
@@ -619,6 +728,8 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
 }
 
 elements.refreshButton.addEventListener("click", () => refresh({ manual: true }));
+elements.globalStopButton?.addEventListener("click", () => globalControl("stop-all"));
+elements.globalResumeButton?.addEventListener("click", () => globalControl("resume-all"));
 elements.historyFilters.addEventListener("submit", (event) => {
   event.preventDefault();
   refresh();

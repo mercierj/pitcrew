@@ -1654,6 +1654,10 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn(".textContent", self.javascript)
         self.assertNotIn("innerHTML", self.javascript)
         self.assertNotIn("insertAdjacentHTML", self.javascript)
+        for identifier in ("global-actions", "global-stop-button", "global-resume-button"):
+            self.assertIn(f'id="{identifier}"', self.html)
+        self.assertIn("Arrêter tous les agents et bloquer les futures exécutions ?", self.javascript)
+        self.assertIn('body: JSON.stringify({ action })', self.javascript)
         for function_name in (
             "fetchJson",
             "renderOverview",
@@ -1692,7 +1696,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn('button.dataset.skill = skill;', self.javascript)
         self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertIn(
-            "button.disabled = pendingSkills.has(skill);",
+            "button.disabled = globalStopped || pendingSkills.has(skill);",
             self.javascript,
         )
         control_source = self.javascript.split(
@@ -1731,6 +1735,8 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertRegex(self.styles, r"@media\s*\(max-width:\s*\d+px\)")
         self.assertIn("--warning", self.styles)
         self.assertIn("--error", self.styles)
+        self.assertIn(".button-danger", self.styles)
+        self.assertIn(".global-state-blocked", self.styles)
         self.assertIn("text-align: left", self.styles)
 
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):

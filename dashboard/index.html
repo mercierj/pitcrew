@@ -17,6 +17,11 @@
     <div class="refresh-panel">
       <p id="refresh-state">Connexion au service local…</p>
       <button id="refresh-button" class="button button-primary" type="button">Actualiser maintenant</button>
+      <div id="global-actions" class="global-actions" aria-live="polite">
+        <span id="global-state" class="global-state">État global : en fonctionnement</span>
+        <button id="global-stop-button" class="button button-danger" type="button">Tout arrêter</button>
+        <button id="global-resume-button" class="button button-primary" type="button" hidden>Réactiver les agents</button>
+      </div>
     </div>
   </header>
 
@@ -42,6 +47,17 @@
         <article class="metric"><span>Coût estimé · 7 jours</span><strong id="metric-cost-7d">—</strong></article>
       </div>
       <p id="overview-usage-note" class="usage-note" aria-live="polite"></p>
+    </section>
+
+    <section id="live-agents" class="panel live-panel" aria-labelledby="live-agents-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Temps réel</p>
+          <h2 id="live-agents-title">Agents en cours</h2>
+        </div>
+        <p class="section-note">État local · actualisé toutes les 10 secondes</p>
+      </div>
+      <div id="live-agent-grid" class="live-agent-grid" aria-live="polite"></div>
     </section>
 
     <section id="agents" aria-labelledby="agents-title">
