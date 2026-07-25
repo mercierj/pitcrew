@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import stat
 import uuid
@@ -197,6 +198,32 @@ class RunStore:
         if not value or len(value) > limit: raise RunStoreError(f"{field} is invalid")
         return value
 
+    @classmethod
+    def _public_error(cls, value: Any) -> str:
+        cls._public(value, "error_message", 2048)
+        scrubbed = re.sub(
+            r"(?im)(\bAuthorization\s*:\s*)[^\r\n]+",
+            r"\1[REDACTED]",
+            value,
+        )
+        scrubbed = re.sub(
+            (
+                r'(?i)("?\b(?:token|authorization|password|secret)\b"?\s*'
+                r'(?:=|:)\s*)(?:Bearer\s+)?(?:"[^"]*"|\'[^\']*\'|[^\s,}]+)'
+            ),
+            r"\1[REDACTED]",
+            scrubbed,
+        )
+        return " ".join(scrubbed.split())
+
+    @staticmethod
+    def _is_active_dedupe_conflict(error: sqlite3.IntegrityError) -> bool:
+        return (
+            getattr(error, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
+            and str(error)
+            == "UNIQUE constraint failed: runs.project, runs.dedupe_key"
+        )
+
     @staticmethod
     def _row(row: sqlite3.Row | None, created: bool | None = None) -> dict[str, Any] | None:
         if row is None: return None
@@ -232,10 +259,12 @@ class RunStore:
             connection.execute("INSERT INTO runs(run_id,project,skill,source,target,dedupe_key,state,queue_sequence,created_at,phase,predecessor_run_id) VALUES(?,?,?,?,?,?, 'queued',?,?, 'En attente',?)", (run_id, project, skill, source, target, key, sequence, timestamp, predecessor_run_id))
             row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
             connection.commit(); return self._row(row, True)  # type: ignore[return-value]
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as error:
             connection.rollback()
+            if not self._is_active_dedupe_conflict(error):
+                raise RunStoreError("database operation failed") from error
             if attempt >= 2:
-                raise RunConflict("active run conflict")
+                raise RunConflict("active run conflict") from error
             # Retry the entire admission in a fresh transaction: the winner may
             # have become terminal before we reacquire the write lock.
             connection.close()
@@ -252,7 +281,7 @@ class RunStore:
             if result is not None:
                 result["queue_position"] = 0
                 if result["state"] == "queued":
-                    result["queue_position"] = connection.execute("SELECT COUNT(*) FROM runs WHERE project=? AND skill=? AND state='queued' AND queue_sequence<=?", (result["project"], result["skill"], result["queue_sequence"])).fetchone()[0]
+                    result["queue_position"] = connection.execute("SELECT COUNT(*) FROM runs WHERE project=? AND skill=? AND state='queued' AND queue_sequence<?", (result["project"], result["skill"], result["queue_sequence"])).fetchone()[0]
             return result
         except sqlite3.Error as error:
             raise RunStoreError("database operation failed") from error
@@ -275,7 +304,20 @@ class RunStore:
             if row["target"] is not None: raise RunStateError("run already has a target")
             owner = connection.execute("SELECT run_id FROM runs WHERE project=? AND dedupe_key=? AND state IN ('queued','running')", (row["project"], key)).fetchone()
             if owner: raise RunConflict(f"target is owned by {owner['run_id']}")
-            connection.execute("UPDATE runs SET target=?, dedupe_key=? WHERE run_id=?", (target, key, run_id)); row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone(); connection.commit(); return self._row(row)  # type: ignore[return-value]
+            try:
+                changed = connection.execute(
+                    "UPDATE runs SET target=?, dedupe_key=? WHERE run_id=? AND target IS NULL AND state IN ('queued','running')",
+                    (target, key, run_id),
+                ).rowcount
+            except sqlite3.IntegrityError as error:
+                if not self._is_active_dedupe_conflict(error):
+                    raise RunStoreError("database operation failed") from error
+                owner = connection.execute("SELECT run_id FROM runs WHERE project=? AND dedupe_key=? AND state IN ('queued','running')", (row["project"], key)).fetchone()
+                if owner is None:
+                    raise RunStoreError("database operation failed") from error
+                raise RunConflict(f"target is owned by {owner['run_id']}") from error
+            if changed != 1: raise RunStateError("run is not active or already has a target")
+            row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone(); connection.commit(); return self._row(row)  # type: ignore[return-value]
         except RunStoreError:
             connection.rollback(); raise
         except sqlite3.Error as error:
@@ -311,6 +353,9 @@ class RunStore:
     def heartbeat(self, run_id: str, phase: str) -> dict[str, Any]:
         return self._update_running(run_id, "heartbeat_at=?, phase=?", (self._timestamp(), self._public(phase, "phase")))
 
+    def update_phase(self, run_id: str, phase: str) -> dict[str, Any]:
+        return self._update_running(run_id, "phase=?", (self._public(phase, "phase"),))
+
     def _update_running(self, run_id: str, expression: str, values: tuple[Any, ...]) -> dict[str, Any]:
         connection = self._connect()
         try:
@@ -326,7 +371,7 @@ class RunStore:
     def finish(self, run_id: str, *, state: str, error_code: str | None = None, error_message: str | None = None) -> dict[str, Any]:
         if state not in TERMINAL_STATES: raise RunStateError("finish state must be terminal")
         if error_code is not None: error_code = self._public(error_code, "error_code")
-        if error_message is not None: error_message = self._public(error_message, "error_message", 2048)
+        if error_message is not None: error_message = self._public_error(error_message)
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE"); timestamp = self._timestamp()
@@ -383,9 +428,15 @@ class RunStore:
             connection.close()
         queued_positions: dict[str, int] = {}; output = []
         for run in runs:
-            copy = dict(run)
-            if copy["state"] == "queued": queued_positions[copy["skill"]] = queued_positions.get(copy["skill"], 0) + 1; copy["queue_position"] = queued_positions[copy["skill"]]
-            else: copy["queue_position"] = 0
+            copy = {
+                field: run[field]
+                for field in ("run_id", "project", "skill", "target", "state")
+            }
+            if copy["state"] == "queued":
+                copy["queue_position"] = queued_positions.get(copy["skill"], 0)
+                queued_positions[copy["skill"]] = copy["queue_position"] + 1
+            else:
+                copy["queue_position"] = 0
             output.append(copy)
         skills = set(capacities) | {run["skill"] for run in runs}; capacity = {}
         for skill in sorted(skills):

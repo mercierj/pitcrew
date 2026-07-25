@@ -4,11 +4,18 @@ import stat
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scripts.pitcrew_run_store import (
+    ACTIVE_STATES,
+    ALL_STATES,
+    RETENTION,
+    SCHEMA_VERSION,
+    STALE_HEARTBEAT,
+    TERMINAL_STATES,
     RunConflict,
     RunPaused,
     RunStateError,
@@ -37,7 +44,7 @@ class InsertFailureConnection:
         if statement.startswith("INSERT INTO runs") and self._failures["remaining"]:
             self._failures["remaining"] -= 1
             self._failures["count"] += 1
-            raise sqlite3.IntegrityError("injected collision")
+            raise sqlite3.IntegrityError("CHECK constraint failed: injected")
         return self._connection.execute(statement, parameters)
 
     @property
@@ -76,26 +83,15 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual({True, False}, {first["created"], second["created"]})
         self.assertEqual(1, len(self.store.list_runs("demo", active_only=True)))
 
-    def test_enqueue_retries_one_injected_integrity_collision(self):
-        path = Path(self.temp.name).resolve() / "retry-once.sqlite"
-        failures = {"remaining": 1, "count": 0}
-        def factory(database, **kwargs):
-            return InsertFailureConnection(sqlite3.connect(database, **kwargs), failures)
-        store = RunStore(path, now=self.clock, connect_factory=factory)
-        run = store.enqueue(project="demo", skill="implementer-run", source="dashboard", target="T-retry")
-        self.assertTrue(run["created"])
-        self.assertEqual(1, failures["count"])
-        self.assertEqual(1, len(store.list_runs("demo", active_only=True)))
-
-    def test_enqueue_raises_conflict_after_three_injected_integrity_collisions(self):
-        path = Path(self.temp.name).resolve() / "retry-limit.sqlite"
+    def test_enqueue_does_not_retry_an_unrelated_integrity_error(self):
+        path = Path(self.temp.name).resolve() / "unrelated-integrity.sqlite"
         failures = {"remaining": 3, "count": 0}
         def factory(database, **kwargs):
             return InsertFailureConnection(sqlite3.connect(database, **kwargs), failures)
         store = RunStore(path, now=self.clock, connect_factory=factory)
-        with self.assertRaises(RunConflict):
+        with self.assertRaisesRegex(RunStoreError, "^database operation failed$"):
             store.enqueue(project="demo", skill="implementer-run", source="dashboard", target="T-retry")
-        self.assertEqual(3, failures["count"])
+        self.assertEqual(1, failures["count"])
         self.assertEqual([], store.list_runs("demo", active_only=True))
 
     def test_claims_fifo_and_reports_queue_position(self):
@@ -104,7 +100,7 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual([run["run_id"] for run in runs[:3]], [run["run_id"] for run in claimed])
         snapshot = self.store.snapshot("demo", {"implementer-run": 3})
         queued = [run for run in snapshot["runs"] if run["state"] == "queued"]
-        self.assertEqual((runs[3]["run_id"], 1), (queued[0]["run_id"], queued[0]["queue_position"]))
+        self.assertEqual((runs[3]["run_id"], 0), (queued[0]["run_id"], queued[0]["queue_position"]))
         self.store.finish(claimed[0]["run_id"], state="succeeded")
         self.assertEqual([runs[3]["run_id"]], [run["run_id"] for run in self.store.claim_ready(project="demo", capacities={"implementer-run": 3})])
 
@@ -139,6 +135,18 @@ class RunStoreTest(unittest.TestCase):
         self.assertTrue(second["created"])
         self.assertEqual(first["run_id"], second["predecessor_run_id"])
 
+    def test_terminal_release_after_target_binding_allows_new_admission(self):
+        scheduled = self.store.enqueue(
+            project="demo",
+            skill="scheduled-run",
+            source="scheduled",
+        )
+        self.store.bind_target(scheduled["run_id"], "T-bound")
+        self.store.finish(scheduled["run_id"], state="succeeded")
+        replacement = self.enqueue("T-bound")
+        self.assertTrue(replacement["created"])
+        self.assertNotEqual(scheduled["run_id"], replacement["run_id"])
+
     def test_finish_uses_a_public_phase_for_each_terminal_state(self):
         for state, phase in (("succeeded", "Terminé"), ("failed", "Échec"), ("cancelled", "Annulé")):
             with self.subTest(state=state):
@@ -146,6 +154,20 @@ class RunStoreTest(unittest.TestCase):
                 self.assertEqual(phase, self.store.finish(run["run_id"], state=state)["phase"])
                 with self.assertRaises(RunStateError):
                     self.store.finish(run["run_id"], state=state)
+
+    def test_finish_redacts_credentials_before_persisting_public_error(self):
+        run = self.enqueue("T-secret")
+        finished = self.store.finish(
+            run["run_id"],
+            state="failed",
+            error_code="command_failed",
+            error_message="Authorization: Bearer top-secret\nworker failed",
+        )
+        self.assertNotIn("top-secret", finished["error_message"])
+        self.assertEqual(
+            "Authorization: [REDACTED] worker failed",
+            finished["error_message"],
+        )
 
     def test_stopped_project_blocks_admission_and_claim_and_tracks_generation(self):
         stopped = self.store.set_project_state("demo", "stopped")
@@ -189,7 +211,9 @@ class RunStoreTest(unittest.TestCase):
         old = self.enqueue("T-old")
         self.store.finish(old["run_id"], state="cancelled")
         active = self.enqueue("T-active")
-        self.clock.advance(days=8)
+        self.clock.advance(days=7)
+        self.assertEqual(0, self.store.purge("demo"))
+        self.clock.advance(seconds=1)
         self.assertEqual(1, self.store.purge("demo"))
         self.assertIsNone(self.store.get(old["run_id"]))
         self.assertIsNotNone(self.store.get(active["run_id"]))
@@ -218,13 +242,29 @@ class RunStoreTest(unittest.TestCase):
         for message in ("", 1, "x" * 2049):
             with self.assertRaises(RunStoreError): self.store.finish(claimed["run_id"], state="failed", error_message=message)
 
+    def test_update_phase_changes_only_a_running_run_phase(self):
+        self.assertTrue(callable(getattr(self.store, "update_phase", None)))
+        run = self.enqueue("T-phase")
+        claimed = self.store.claim_ready(
+            project="demo",
+            capacities={"implementer-run": 1},
+        )[0]
+        heartbeat_at = claimed["heartbeat_at"]
+        self.clock.advance(seconds=10)
+        updated = self.store.update_phase(run["run_id"], "Validation")
+        self.assertEqual("Validation", updated["phase"])
+        self.assertEqual(heartbeat_at, updated["heartbeat_at"])
+        self.store.finish(run["run_id"], state="succeeded")
+        with self.assertRaises(RunStateError):
+            self.store.update_phase(run["run_id"], "Trop tard")
+
     def test_get_includes_role_queue_position(self):
         first, second = self.enqueue("T-first"), self.enqueue("T-second")
-        self.assertEqual(1, self.store.get(first["run_id"])["queue_position"])
-        self.assertEqual(2, self.store.get(second["run_id"])["queue_position"])
-        self.store.claim_ready(project="demo", capacities={"implementer-run": 1})
         self.assertEqual(0, self.store.get(first["run_id"])["queue_position"])
         self.assertEqual(1, self.store.get(second["run_id"])["queue_position"])
+        self.store.claim_ready(project="demo", capacities={"implementer-run": 1})
+        self.assertEqual(0, self.store.get(first["run_id"])["queue_position"])
+        self.assertEqual(0, self.store.get(second["run_id"])["queue_position"])
 
     def test_request_cancel_marks_running_runs_only(self):
         running = self.enqueue("T-running")
@@ -245,9 +285,14 @@ class RunStoreTest(unittest.TestCase):
         self.store.finish(terminal["run_id"], state="succeeded")
         snapshot = self.store.snapshot("demo", {"implementer-run": 2, "qa-run": 4})
         self.assertTrue(snapshot["has_active"])
+        self.assertEqual(("running", 0), (snapshot["state"], snapshot["generation"]))
         self.assertEqual([first["run_id"], second["run_id"], terminal["run_id"]], [run["run_id"] for run in snapshot["runs"]])
+        self.assertTrue(all(
+            set(run) == {"run_id", "project", "skill", "target", "state", "queue_position"}
+            for run in snapshot["runs"]
+        ))
         self.assertEqual(0, snapshot["runs"][0]["queue_position"])
-        self.assertEqual(1, snapshot["runs"][1]["queue_position"])
+        self.assertEqual(0, snapshot["runs"][1]["queue_position"])
         self.assertEqual({"running": 1, "queued": 1, "max_concurrent": 2}, snapshot["capacity"]["implementer-run"])
         self.assertEqual({"running": 0, "queued": 0, "max_concurrent": 4}, snapshot["capacity"]["qa-run"])
 
@@ -266,7 +311,11 @@ class RunStoreTest(unittest.TestCase):
         connection.close()
         with self.assertRaisesRegex(RunStoreError, "unsupported schema version"):
             RunStore(self.path)
-        self.assertEqual(99, sqlite3.connect(self.path).execute("PRAGMA user_version").fetchone()[0])
+        verified = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(99, verified.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            verified.close()
 
     def test_failed_schema_migration_rolls_back_version_and_new_tables(self):
         path = Path(self.temp.name).resolve() / "broken.sqlite"
@@ -281,6 +330,91 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual(0, connection.execute("PRAGMA user_version").fetchone()[0])
         self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='project_controls'").fetchone())
         connection.close()
+
+    def test_schema_constants_tables_and_indexes_match_version_one(self):
+        self.assertEqual(("queued", "running"), ACTIVE_STATES)
+        self.assertEqual(("succeeded", "failed", "cancelled"), TERMINAL_STATES)
+        self.assertEqual(ACTIVE_STATES + TERMINAL_STATES, ALL_STATES)
+        self.assertEqual(timedelta(days=7), RETENTION)
+        self.assertEqual(timedelta(seconds=30), STALE_HEARTBEAT)
+        self.assertEqual(1, SCHEMA_VERSION)
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                [
+                    "run_id", "project", "skill", "source", "target",
+                    "dedupe_key", "state", "queue_sequence", "pid",
+                    "created_at", "started_at", "heartbeat_at", "finished_at",
+                    "phase", "cancel_requested", "error_code", "error_message",
+                    "predecessor_run_id",
+                ],
+                [row[1] for row in connection.execute("PRAGMA table_info(runs)")],
+            )
+            controls = list(connection.execute("PRAGMA table_info(project_controls)"))
+            self.assertEqual(
+                ["project", "state", "generation"],
+                [row[1] for row in controls],
+            )
+            indexes = {
+                row[1]: {"unique": row[2], "partial": row[4]}
+                for row in connection.execute("PRAGMA index_list(runs)")
+            }
+            self.assertEqual(
+                {"unique": 1, "partial": 1},
+                indexes["active_run_dedupe"],
+            )
+            self.assertEqual(
+                ["project", "dedupe_key"],
+                [
+                    row[2]
+                    for row in connection.execute(
+                        "PRAGMA index_info(active_run_dedupe)"
+                    )
+                ],
+            )
+            self.assertEqual(
+                ["project", "skill", "state", "queue_sequence"],
+                [
+                    row[2]
+                    for row in connection.execute(
+                        "PRAGMA index_info(queue_by_project_skill)"
+                    )
+                ],
+            )
+
+    def test_connections_are_fresh_private_and_configured(self):
+        path = Path(self.temp.name).resolve() / "connections.sqlite"
+        connections = []
+        options = []
+
+        def factory(database, **kwargs):
+            options.append(kwargs)
+            connection = sqlite3.connect(database, **kwargs)
+            connections.append(connection)
+            return connection
+
+        store = RunStore(path, now=self.clock, connect_factory=factory)
+        store.list_runs("demo")
+        self.assertEqual(
+            [{"timeout": 5, "isolation_level": None}] * 2,
+            options,
+        )
+        self.assertIsNot(connections[0], connections[1])
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+        connection = store._connect()
+        try:
+            self.assertIs(sqlite3.Row, connection.row_factory)
+            self.assertEqual(
+                5000,
+                connection.execute("PRAGMA busy_timeout").fetchone()[0],
+            )
+            self.assertEqual(
+                "wal",
+                connection.execute("PRAGMA journal_mode").fetchone()[0],
+            )
+        finally:
+            connection.close()
 
     def test_symlink_and_private_permissions_are_enforced(self):
         target = Path(self.temp.name).resolve() / "target.sqlite"
@@ -326,6 +460,14 @@ class RunStoreTest(unittest.TestCase):
         self.assertFalse(target.exists())
 
     def test_schema_migration_is_idempotent(self):
-        self.assertEqual(1, sqlite3.connect(self.path).execute("PRAGMA user_version").fetchone()[0])
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
         RunStore(self.path)
-        self.assertEqual(1, sqlite3.connect(self.path).execute("PRAGMA user_version").fetchone()[0])
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            connection.close()
