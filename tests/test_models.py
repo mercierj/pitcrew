@@ -3,16 +3,24 @@ from decimal import Decimal
 
 from scripts.pitcrew_models import (
     DEFAULT_MODELS,
+    DEFAULT_REASONING_EFFORTS,
     MODEL_CATALOG,
+    REASONING_EFFORTS,
     aggregate_usage,
     empty_usage,
     estimate_cost,
     public_catalog,
     resolve_model,
+    resolve_reasoning_effort,
+    resolve_routing_mode,
 )
 
 
 class ModelCatalogTest(unittest.TestCase):
+    def test_reasoning_efforts_include_xhigh(self):
+        self.assertEqual({"low", "medium", "high", "xhigh"}, REASONING_EFFORTS)
+        self.assertTrue(set(DEFAULT_REASONING_EFFORTS) <= set(DEFAULT_MODELS))
+
     def test_every_role_has_a_supported_default(self):
         self.assertEqual(
             {
@@ -49,6 +57,56 @@ class ModelCatalogTest(unittest.TestCase):
     def test_unknown_role_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "unknown role: unknown-run"):
             resolve_model({}, "unknown-run")
+
+    def test_every_model_role_has_a_pinned_reasoning_effort(self):
+        self.assertEqual(set(DEFAULT_MODELS), set(DEFAULT_REASONING_EFFORTS))
+        self.assertEqual(
+            {
+                "security-run": "high",
+                "product-discovery-run": "medium",
+                "research-run": "medium",
+                "manager-run": "low",
+                "implementer-run": "high",
+                "reviewer-run": "high",
+                "validator-run": "medium",
+                "investigate-run": "high",
+                "stale-sweep": "low",
+                "qa-run": "medium",
+                "coverage-run": "medium",
+                "dev-verify-run": "medium",
+                "ops-run": "low",
+                "unblock": "medium",
+                "releaser-run": "medium",
+            },
+            DEFAULT_REASONING_EFFORTS,
+        )
+
+    def test_reasoning_effort_override_wins_and_missing_override_uses_default(self):
+        self.assertEqual(
+            "low",
+            resolve_reasoning_effort(
+                {"agents": {"research-run": {"reasoning_effort": "low"}}},
+                "research-run",
+            ),
+        )
+        self.assertEqual(
+            "high",
+            resolve_reasoning_effort({}, "implementer-run"),
+        )
+
+    def test_reasoning_effort_rejects_unknown_role(self):
+        with self.assertRaisesRegex(ValueError, "unknown role: unknown-run"):
+            resolve_reasoning_effort({}, "unknown-run")
+
+    def test_routing_mode_defaults_to_observe_and_accepts_fixed_override(self):
+        self.assertEqual("observe", resolve_routing_mode({}, "research-run"))
+        self.assertEqual(
+            "fixed",
+            resolve_routing_mode(
+                {"agents": {"research-run": {"routing_mode": "fixed"}}},
+                "research-run",
+            ),
+        )
 
     def test_cost_uses_all_four_token_categories(self):
         usage = {

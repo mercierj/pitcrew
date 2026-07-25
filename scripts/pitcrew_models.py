@@ -55,6 +55,27 @@ DEFAULT_MODELS = {
     "releaser-run": "gpt-5.6-terra",
 }
 
+REASONING_EFFORTS = {"low", "medium", "high"}
+ROUTING_MODES = {"fixed", "observe"}
+
+DEFAULT_REASONING_EFFORTS = {
+    "security-run": "high",
+    "product-discovery-run": "medium",
+    "research-run": "medium",
+    "manager-run": "low",
+    "implementer-run": "high",
+    "reviewer-run": "high",
+    "validator-run": "medium",
+    "investigate-run": "high",
+    "stale-sweep": "low",
+    "qa-run": "medium",
+    "coverage-run": "medium",
+    "dev-verify-run": "medium",
+    "ops-run": "low",
+    "unblock": "medium",
+    "releaser-run": "medium",
+}
+
 PRICING_EFFECTIVE_DATE = "2026-07-24"
 PRICING_CURRENCY = "USD"
 USAGE_FIELDS = (
@@ -66,12 +87,29 @@ USAGE_FIELDS = (
 )
 
 
-def resolve_model(config: Mapping, skill: str) -> str:
+def _agent_entry(config: Mapping, skill: str) -> Mapping:
     if skill not in DEFAULT_MODELS:
         raise ValueError(f"unknown role: {skill}")
     agents = config.get("agents", {})
-    entry = agents.get(skill, {}) if isinstance(agents, Mapping) else {}
+    if not isinstance(agents, Mapping):
+        return {}
+    entry = agents.get(skill, {})
+    return entry if isinstance(entry, Mapping) else {}
+
+
+def resolve_model(config: Mapping, skill: str) -> str:
+    entry = _agent_entry(config, skill)
     return entry.get("model", DEFAULT_MODELS[skill])
+
+
+def resolve_reasoning_effort(config: Mapping, skill: str) -> str:
+    entry = _agent_entry(config, skill)
+    return entry.get("reasoning_effort", DEFAULT_REASONING_EFFORTS[skill])
+
+
+def resolve_routing_mode(config: Mapping, skill: str) -> str:
+    entry = _agent_entry(config, skill)
+    return entry.get("routing_mode", "observe")
 
 
 def estimate_cost(model: str, usage: Mapping[str, int]) -> Decimal:

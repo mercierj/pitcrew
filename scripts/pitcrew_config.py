@@ -16,9 +16,25 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from scripts.pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG, resolve_model
+    from scripts.pitcrew_models import (
+        DEFAULT_MODELS,
+        MODEL_CATALOG,
+        REASONING_EFFORTS,
+        ROUTING_MODES,
+        resolve_model,
+        resolve_reasoning_effort,
+        resolve_routing_mode,
+    )
 else:
-    from pitcrew_models import DEFAULT_MODELS, MODEL_CATALOG, resolve_model
+    from pitcrew_models import (
+        DEFAULT_MODELS,
+        MODEL_CATALOG,
+        REASONING_EFFORTS,
+        ROUTING_MODES,
+        resolve_model,
+        resolve_reasoning_effort,
+        resolve_routing_mode,
+    )
 
 
 FORGES = {"github", "gitlab"}
@@ -201,8 +217,24 @@ def validate(config: Mapping[str, Any]) -> None:
             raise ConfigError(f"agents.{skill} is unsupported")
         if not isinstance(entry, Mapping):
             raise ConfigError(f"agents.{skill} must be an object")
-        if set(entry) != {"model"} or entry.get("model") not in MODEL_CATALOG:
+        unsupported = set(entry) - {"model", "reasoning_effort", "routing_mode"}
+        if unsupported:
+            setting = sorted(unsupported, key=str)[0]
+            raise ConfigError(f"agents.{skill}.{setting} is unsupported")
+        model = entry.get("model")
+        if not isinstance(model, str) or model not in MODEL_CATALOG:
             raise ConfigError(f"agents.{skill}.model is unsupported")
+        if "reasoning_effort" in entry:
+            reasoning_effort = entry["reasoning_effort"]
+            if (
+                not isinstance(reasoning_effort, str)
+                or reasoning_effort not in REASONING_EFFORTS
+            ):
+                raise ConfigError(f"agents.{skill}.reasoning_effort is unsupported")
+        if "routing_mode" in entry:
+            routing_mode = entry["routing_mode"]
+            if not isinstance(routing_mode, str) or routing_mode not in ROUTING_MODES:
+                raise ConfigError(f"agents.{skill}.routing_mode is unsupported")
 
 
 def write_project(
@@ -542,7 +574,9 @@ def update_runtime_model(
         lock_fd = _lock_runtime_config(project_fd)
         config = _load_runtime_config_from_fd(project_fd)
         agents = dict(config.get("agents", {}))
-        agents[skill] = {"model": model}
+        agent = dict(agents.get(skill, {}))
+        agent["model"] = model
+        agents[skill] = agent
         updated = dict(config)
         updated["agents"] = agents
         validate(updated)
@@ -637,6 +671,12 @@ def main(argv: list[str] | None = None) -> int:
     model_parser = subparsers.add_parser("model")
     model_parser.add_argument("--project", required=True)
     model_parser.add_argument("--skill", required=True)
+    reasoning_parser = subparsers.add_parser("reasoning")
+    reasoning_parser.add_argument("--project", required=True)
+    reasoning_parser.add_argument("--skill", required=True)
+    routing_parser = subparsers.add_parser("routing-mode")
+    routing_parser.add_argument("--project", required=True)
+    routing_parser.add_argument("--skill", required=True)
     subparsers.add_parser("project")
     args = parser.parse_args(argv)
 
@@ -656,6 +696,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "model":
         print(resolve_model(load_runtime_config(args.project), args.skill))
+        return 0
+    if args.command == "reasoning":
+        print(resolve_reasoning_effort(load_runtime_config(args.project), args.skill))
+        return 0
+    if args.command == "routing-mode":
+        print(resolve_routing_mode(load_runtime_config(args.project), args.skill))
         return 0
     if args.command == "project":
         print(resolve_runtime_project())

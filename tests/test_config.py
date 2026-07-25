@@ -50,14 +50,16 @@ class ConfigTest(unittest.TestCase):
             env = {"CODEX_HOME": str(Path(temp).resolve())}
             destination = write_project(ROOT / "profiles/getbill.json", "getbill", env)
             original = json.loads(destination.read_text(encoding="utf-8"))
+            original["agents"]["research-run"].update(
+                {"reasoning_effort": "high", "routing_mode": "fixed"}
+            )
+            destination.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
 
             update_runtime_model("getbill", "research-run", "gpt-5.6-luna", env)
 
             updated = json.loads(destination.read_text(encoding="utf-8"))
-            self.assertEqual({"model": "gpt-5.6-luna"}, updated["agents"]["research-run"])
-            self.assertEqual(original["providers"], updated["providers"])
-            self.assertEqual(original["repos"], updated["repos"])
-            self.assertEqual(original["safety"], updated["safety"])
+            original["agents"]["research-run"]["model"] = "gpt-5.6-luna"
+            self.assertEqual(original, updated)
 
     def test_update_runtime_model_writes_private_config(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -376,6 +378,14 @@ class ConfigTest(unittest.TestCase):
         validate(profile)
         profile["agents"] = {"research-run": {"model": "gpt-5.6-terra"}}
         validate(profile)
+        profile["agents"] = {
+            "research-run": {
+                "model": "gpt-5.6-terra",
+                "reasoning_effort": "high",
+                "routing_mode": "fixed",
+            }
+        }
+        validate(profile)
 
         for agents, message in (
             ([], "agents must be an object"),
@@ -384,14 +394,103 @@ class ConfigTest(unittest.TestCase):
             ({"research-run": {}}, "agents.research-run.model is unsupported"),
             (
                 {"research-run": {"model": "gpt-5.6-terra", "extra": True}},
-                "agents.research-run.model is unsupported",
+                "agents.research-run.extra is unsupported",
             ),
             ({"research-run": {"model": "invented"}}, "agents.research-run.model"),
+            ({"research-run": {"model": []}}, "agents.research-run.model"),
+            (
+                {
+                    "research-run": {
+                        "model": "gpt-5.6-terra",
+                        "reasoning_effort": "extreme",
+                    }
+                },
+                "agents.research-run.reasoning_effort is unsupported",
+            ),
+            (
+                {
+                    "research-run": {
+                        "model": "gpt-5.6-terra",
+                        "reasoning_effort": [],
+                    }
+                },
+                "agents.research-run.reasoning_effort is unsupported",
+            ),
+            (
+                {
+                    "research-run": {
+                        "model": "gpt-5.6-terra",
+                        "routing_mode": "automatic",
+                    }
+                },
+                "agents.research-run.routing_mode is unsupported",
+            ),
+            (
+                {
+                    "research-run": {
+                        "model": "gpt-5.6-terra",
+                        "routing_mode": [],
+                    }
+                },
+                "agents.research-run.routing_mode is unsupported",
+            ),
         ):
             with self.subTest(agents=agents):
                 invalid = {**profile, "agents": agents}
                 with self.assertRaisesRegex(ConfigError, message):
                     validate(invalid)
+
+    def test_cli_resolves_reasoning_effort_and_routing_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            codex_home = str(Path(temp).resolve())
+            env = {"CODEX_HOME": codex_home}
+            destination = write_project(ROOT / "profiles/generic.json", "example", env)
+            config = json.loads(destination.read_text(encoding="utf-8"))
+            config["agents"]["research-run"].update(
+                {"reasoning_effort": "high", "routing_mode": "fixed"}
+            )
+            destination.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            command_env = {**os.environ, "CODEX_HOME": codex_home}
+
+            reasoning = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "reasoning",
+                    "--project",
+                    "example",
+                    "--skill",
+                    "research-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=command_env,
+            )
+            routing = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "routing-mode",
+                    "--project",
+                    "example",
+                    "--skill",
+                    "research-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=command_env,
+            )
+
+        self.assertEqual(
+            (0, "high\n", ""),
+            (reasoning.returncode, reasoning.stdout, reasoning.stderr),
+        )
+        self.assertEqual(
+            (0, "fixed\n", ""),
+            (routing.returncode, routing.stdout, routing.stderr),
+        )
 
     def test_execution_capacity_defaults_and_accepts_per_skill_overrides(self):
         profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
