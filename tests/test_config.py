@@ -10,6 +10,8 @@ from pathlib import Path
 
 from scripts.pitcrew_config import (
     ConfigError,
+    DIRECTORY_FLAGS,
+    _lock_runtime_config,
     _write_exclusive_config,
     load_runtime_config,
     load_profile,
@@ -96,13 +98,25 @@ class ConfigTest(unittest.TestCase):
             env = {"CODEX_HOME": str(Path(temp).resolve())}
             destination = write_project(ROOT / "profiles/generic.json", "example", env)
             first_write_entered = threading.Event()
-            second_write_entered = threading.Event()
+            second_snapshot_reached = threading.Event()
             release_first_write = threading.Event()
             write_count = 0
+            snapshot_count = 0
             write_count_lock = threading.Lock()
             original_replace = __import__(
                 "scripts.pitcrew_config", fromlist=["_replace_runtime_config"]
             )._replace_runtime_config
+            original_load = __import__(
+                "scripts.pitcrew_config", fromlist=["_load_runtime_config_from_fd"]
+            )._load_runtime_config_from_fd
+
+            def observe_snapshot(project_fd):
+                nonlocal snapshot_count
+                with write_count_lock:
+                    snapshot_count += 1
+                    if snapshot_count == 2:
+                        second_snapshot_reached.set()
+                return original_load(project_fd)
 
             def delay_first_write(parent_fd, serialized):
                 nonlocal write_count
@@ -111,9 +125,10 @@ class ConfigTest(unittest.TestCase):
                     position = write_count
                 if position == 1:
                     first_write_entered.set()
-                    self.assertTrue(release_first_write.wait(timeout=2))
-                else:
-                    second_write_entered.set()
+                    self.assertTrue(
+                        release_first_write.wait(timeout=2),
+                        "first update was not released",
+                    )
                 original_replace(parent_fd, serialized)
 
             errors = []
@@ -124,27 +139,60 @@ class ConfigTest(unittest.TestCase):
                 except Exception as error:  # pragma: no cover - asserted below
                     errors.append(error)
 
-            with mock.patch("scripts.pitcrew_config._replace_runtime_config", delay_first_write):
+            with (
+                mock.patch("scripts.pitcrew_config._load_runtime_config_from_fd", observe_snapshot),
+                mock.patch("scripts.pitcrew_config._replace_runtime_config", delay_first_write),
+            ):
                 first = threading.Thread(
                     target=update, args=("research-run", "gpt-5.6-luna")
                 )
                 first.start()
-                self.assertTrue(first_write_entered.wait(timeout=2))
+                self.assertTrue(first_write_entered.wait(timeout=2), "first update did not start")
                 second = threading.Thread(
                     target=update, args=("qa-run", "gpt-5.6-sol")
                 )
                 second.start()
-                second_write_entered.wait(timeout=0.2)
+                self.assertFalse(
+                    second_snapshot_reached.wait(timeout=0.2),
+                    "second update entered the protected snapshot while the first held the lock",
+                )
                 release_first_write.set()
                 first.join(timeout=2)
                 second.join(timeout=2)
 
-            self.assertFalse(first.is_alive())
-            self.assertFalse(second.is_alive())
-            self.assertEqual([], errors)
+            self.assertFalse(first.is_alive(), "first update thread did not terminate")
+            self.assertFalse(second.is_alive(), "second update thread did not terminate")
+            self.assertEqual([], errors, "concurrent update raised an exception")
             agents = json.loads(destination.read_text(encoding="utf-8"))["agents"]
             self.assertEqual({"model": "gpt-5.6-luna"}, agents["research-run"])
             self.assertEqual({"model": "gpt-5.6-sol"}, agents["qa-run"])
+
+    def test_runtime_config_lock_closes_descriptor_when_setup_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory_fd = os.open(Path(temp), DIRECTORY_FLAGS)
+            try:
+                for target in (
+                    "scripts.pitcrew_config.os.fchmod",
+                    "scripts.pitcrew_config.fcntl.flock",
+                ):
+                    with self.subTest(target=target):
+                        failed_lock_fds = []
+
+                        def fail_setup(lock_fd, *_):
+                            failed_lock_fds.append(lock_fd)
+                            raise OSError("lock setup failed")
+
+                        with (
+                            mock.patch(target, side_effect=fail_setup),
+                            mock.patch("scripts.pitcrew_config.os.close", wraps=os.close) as close,
+                        ):
+                            with self.assertRaisesRegex(ConfigError, "lock"):
+                                _lock_runtime_config(directory_fd)
+
+                        self.assertEqual(1, len(failed_lock_fds))
+                        close.assert_called_once_with(failed_lock_fds[0])
+            finally:
+                os.close(directory_fd)
 
     def test_runtime_root_uses_codex_home(self):
         with tempfile.TemporaryDirectory() as temp:

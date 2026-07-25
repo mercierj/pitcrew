@@ -393,6 +393,8 @@ def _load_runtime_config_from_fd(project_fd: int) -> dict[str, Any]:
 
 
 def _lock_runtime_config(parent_fd: int) -> int:
+    lock_fd: int | None = None
+    acquired = False
     try:
         lock_fd = os.open(
             "config.json.lock",
@@ -401,13 +403,16 @@ def _lock_runtime_config(parent_fd: int) -> int:
             dir_fd=parent_fd,
         )
         if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
-            os.close(lock_fd)
             raise ConfigError("runtime config lock must be a regular file")
         os.fchmod(lock_fd, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        acquired = True
         return lock_fd
     except OSError as error:
         raise ConfigError("runtime config lock must not be a symlink or unavailable") from error
+    finally:
+        if lock_fd is not None and not acquired:
+            os.close(lock_fd)
 
 
 def _replace_runtime_config(parent_fd: int, serialized: str) -> None:
