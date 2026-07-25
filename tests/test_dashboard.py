@@ -470,6 +470,11 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("What should happen next?", pending["question"])
         self.assertEqual(["Ship it", "Investigate more"], pending["choices"])
         self.assertEqual("Stripe webhook validation", pending["ticket"]["title"])
+        self.assertEqual("issue", pending["ticket"]["resource_type"])
+        self.assertEqual(
+            "https://gitlab.com/getbill1/getbill/-/issues/1",
+            pending["ticket"]["canonical_url"],
+        )
         self.assertIn("Root cause", pending["findings"])
 
     def test_proposals_are_listed_and_rejection_is_persisted(self):
@@ -668,6 +673,8 @@ class DashboardServiceTest(unittest.TestCase):
         )
         self.assertTrue(all(len(group) == 1 for group in work["groups"].values()))
         todo = work["groups"]["todo"][0]
+        self.assertEqual("issue", todo["resource_type"])
+        self.assertEqual(todo["web_url"], todo["canonical_url"])
         self.assertEqual("todo", todo["lifecycle"])
         self.assertEqual("investigate", todo["route"])
         self.assertEqual("research", todo["source"])
@@ -754,6 +761,8 @@ class DashboardServiceTest(unittest.TestCase):
 
         self.assertEqual([11], [mr["iid"] for mr in work["merge_requests"]])
         merge_request = work["merge_requests"][0]
+        self.assertEqual("merge_request", merge_request["resource_type"])
+        self.assertEqual(merge_request["web_url"], merge_request["canonical_url"])
         self.assertEqual("fix/payment-summary", merge_request["source_branch"])
         self.assertEqual("develop", merge_request["target_branch"])
         self.assertEqual("agent-sol", merge_request["author_username"])

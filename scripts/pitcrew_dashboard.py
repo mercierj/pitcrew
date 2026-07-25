@@ -342,6 +342,8 @@ class DashboardService:
                     "title": ticket.get("title", "Ticket sans titre"),
                     "description": str(ticket.get("description", ""))[:12000],
                     "web_url": ticket.get("web_url"),
+                    "resource_type": "issue",
+                    "canonical_url": ticket.get("web_url"),
                 },
                 "findings": findings,
             }
@@ -734,6 +736,8 @@ class DashboardService:
                 groups[lifecycle].append(
                     {
                         **issue,
+                        "resource_type": "issue",
+                        "canonical_url": issue.get("web_url"),
                         "lifecycle": lifecycle,
                         "route": _label_value(
                             issue.get("labels"),
@@ -775,6 +779,12 @@ class DashboardService:
         normalized["pipeline_status"] = (
             pipeline.get("status")
             if isinstance(pipeline, dict) and isinstance(pipeline.get("status"), str)
+            else None
+        )
+        normalized["resource_type"] = "merge_request"
+        normalized["canonical_url"] = (
+            merge_request.get("web_url")
+            if isinstance(merge_request.get("web_url"), str)
             else None
         )
         return normalized
