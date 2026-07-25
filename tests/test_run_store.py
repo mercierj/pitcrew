@@ -395,6 +395,29 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
+    def test_invalid_version_one_keeps_delete_journal_without_sidecars(self):
+        path = Path(self.temp.name).resolve() / "invalid-delete-v1.sqlite"
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY)")
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+            self.assertEqual(
+                "delete",
+                connection.execute("PRAGMA journal_mode").fetchone()[0],
+            )
+        path.chmod(0o600)
+
+        with self.assertRaises(RunStoreError):
+            RunStore(path)
+
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual(
+                "delete",
+                connection.execute("PRAGMA journal_mode").fetchone()[0],
+            )
+        self.assertFalse(Path(f"{path}-wal").exists())
+        self.assertFalse(Path(f"{path}-shm").exists())
+
     def test_version_one_without_state_and_source_checks_is_rejected_unchanged(self):
         path = Path(self.temp.name).resolve() / "unchecked-v1.sqlite"
         with closing(sqlite3.connect(path)) as connection:
@@ -570,6 +593,49 @@ class RunStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(RunStoreError, "symlink"):
             RunStore(linked / "nested" / "runs.sqlite")
         self.assertFalse((actual / "nested").exists())
+
+    def test_parent_replaced_after_preparation_is_not_followed(self):
+        parent = Path(self.temp.name).resolve() / "race-parent"
+        displaced = Path(self.temp.name).resolve() / "race-parent-original"
+        redirected = Path(self.temp.name).resolve() / "race-target"
+        redirected.mkdir(mode=0o700)
+
+        class ParentSwapStore(RunStore):
+            def _prepare_parent(inner_self):
+                super()._prepare_parent()
+                parent.rename(displaced)
+                parent.symlink_to(redirected, target_is_directory=True)
+
+        with self.assertRaises(RunStoreError):
+            ParentSwapStore(parent / "runs.sqlite")
+        self.assertFalse((redirected / "runs.sqlite").exists())
+
+    def test_parent_replaced_before_sqlite_connect_cannot_accept_redirected_store(self):
+        parent = Path(self.temp.name).resolve() / "connect-race-parent"
+        parent.mkdir(mode=0o700)
+        displaced = Path(self.temp.name).resolve() / "connect-race-original"
+        redirected = Path(self.temp.name).resolve() / "connect-race-target"
+        redirected.mkdir(mode=0o700)
+        redirected_database = redirected / "runs.sqlite"
+
+        def redirect_then_connect(database, **kwargs):
+            parent.rename(displaced)
+            parent.symlink_to(redirected, target_is_directory=True)
+            return sqlite3.connect(database, **kwargs)
+
+        with self.assertRaisesRegex(RunStoreError, "database operation failed"):
+            RunStore(
+                parent / "runs.sqlite",
+                connect_factory=redirect_then_connect,
+            )
+        with closing(sqlite3.connect(redirected_database)) as connection:
+            self.assertEqual(
+                0,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+            self.assertIsNone(connection.execute(
+                "SELECT name FROM sqlite_master WHERE name='runs'"
+            ).fetchone())
 
     def test_connection_guard_rejects_database_replaced_before_sqlite_connect(self):
         path = Path(self.temp.name).resolve() / "guard.sqlite"
