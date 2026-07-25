@@ -1,6 +1,6 @@
 # Refonte du dashboard Pitcrew pour le pilotage quotidien
 
-**Date :** 2026-07-26  
+**Date :** 2026-07-26
 **Statut :** Design validé en conversation, en attente de revue de la spécification écrite
 
 ## Objectif
@@ -54,6 +54,13 @@ les éléments qui attendent une action de l’opérateur :
 Chaque entrée affiche le type, le titre, la raison de l’intervention et un bouton
 principal. Trois entrées au maximum sont visibles dans la rangée initiale ; les
 suivantes sont accessibles par `Voir toutes les actions`.
+
+La file classe d’abord les décisions qui bloquent le flux, puis les échecs
+actionnables, les merge requests éligibles à la fusion et les propositions. Dans
+une même catégorie, l’élément le plus ancien passe en premier. L’état du pipeline
+reste affiché mais ne crée pas une nouvelle interdiction de fusion : les règles
+serveur actuelles, dont le blocage des cibles `preprod` et `prod`, restent
+autoritaires.
 
 ### Tableau de flux
 
@@ -150,9 +157,10 @@ est découpé en modules à responsabilité unique :
 
 Le frontend construit un modèle de vue par ticket à partir des réponses
 existantes de statut local, historique, décisions, propositions et travail
-GitLab. Le backend peut ajouter un identifiant de corrélation borné ou des champs
-de présentation manquants, mais cette refonte ne crée ni nouvelle base de données
-ni nouveau système de cycle de vie.
+GitLab. La clé de corrélation est la combinaison du type de ressource et de son
+URL GitLab canonique. Le backend expose ces deux champs lorsqu’ils manquent dans
+une réponse, ainsi que les seuls champs de présentation nécessaires. Cette
+refonte ne crée ni nouvelle base de données ni nouveau système de cycle de vie.
 
 Les modifications actuellement non committées relatives au lancement d’agents
 depuis les tickets et à la synchronisation des tickets fusionnés sont conservées
@@ -219,7 +227,7 @@ Un parcours dans un vrai navigateur valide :
 
 La refonte est réussie lorsque l’opérateur peut, sans défilement initial :
 
-- voir toutes les interventions humaines en attente ;
+- voir le nombre d’interventions en attente et les trois plus prioritaires ;
 - comprendre la répartition du travail actif ;
 - identifier un blocage ou une MR prête ;
 - confirmer la santé globale du crew ;
