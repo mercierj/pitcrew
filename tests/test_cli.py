@@ -471,6 +471,71 @@ class CliTest(unittest.TestCase):
                 if first_pid.exists():
                     os.kill(int(first_pid.read_text(encoding="utf-8")), signal.SIGTERM)
 
+    def test_locked_helper_finishes_when_descendant_keeps_stdout_open(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            descendant_pid = root / "descendant.pid"
+            child = root / "child.py"
+            child.write_text(
+                "from pathlib import Path\n"
+                "import subprocess\n"
+                "import sys\n"
+                f"descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
+                f"Path({str(descendant_pid)!r}).write_text(str(descendant.pid), encoding='utf-8')\n"
+                "print('{\"usage\":{\"input_tokens\":1}}')\n",
+                encoding="utf-8",
+            )
+            helper = ROOT / "scripts/pitcrew_locked_exec.py"
+            try:
+                result = subprocess.Popen(
+                    [
+                        sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
+                        "--project", "getbill", "--skill", "research-run",
+                        "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                        "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                result.wait(timeout=2)
+            finally:
+                if descendant_pid.exists():
+                    os.kill(int(descendant_pid.read_text(encoding="utf-8")), signal.SIGTERM)
+
+            self.assertEqual(0, result.returncode)
+            history = [json.loads(line) for line in (root / "history.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(1, len(history))
+            self.assertEqual(1, history[0]["usage"]["input_tokens"])
+
+    def test_locked_helper_discards_oversized_event_and_keeps_later_usage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            child = root / "child.py"
+            child.write_text(
+                "print('{\\\"type\\\":\\\"thread.started\\\",\\\"padding\\\":\\\"' + 'x' * (1024 * 1024 + 1) + '\\\"}')\n"
+                "print('{\"usage\":{\"input_tokens\":9}}')\n",
+                encoding="utf-8",
+            )
+            helper = ROOT / "scripts/pitcrew_locked_exec.py"
+            result = subprocess.run(
+                [
+                    sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
+                    "--project", "getbill", "--skill", "research-run",
+                    "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                    "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=3,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            history = [json.loads(line) for line in (root / "history.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(9, history[0]["usage"]["input_tokens"])
+
     def test_getbill_dry_run_never_requests_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

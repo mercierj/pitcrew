@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import json
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from pitcrew_history import HistoryStore
 
 
 MAX_SUMMARY_BYTES = 64 * 1024
+MAX_EVENT_BYTES = 1024 * 1024
 NO_SUMMARY = "No bounded final summary was produced."
 
 
@@ -70,18 +72,78 @@ def normalize_usage(value: object) -> dict[str, int] | None:
     return normalized
 
 
-def read_last_usage(stream: object) -> dict[str, int] | None:
+def parse_usage_event(line: bytes) -> dict[str, int] | None:
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(event, dict):
+        return None
+    return normalize_usage(event.get("usage"))
+
+
+def drain_child_output(child: subprocess.Popen[str]) -> dict[str, int] | None:
+    if child.stdout is None:
+        return None
+    descriptor = child.stdout.fileno()
+    os.set_blocking(descriptor, False)
     usage = None
-    for line in stream:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        normalized = normalize_usage(event.get("usage"))
-        if normalized is not None:
-            usage = normalized
+    buffered = bytearray()
+    discarding = False
+
+    def consume(data: bytes) -> None:
+        nonlocal usage, discarding
+        while data:
+            if discarding:
+                newline = data.find(b"\n")
+                if newline < 0:
+                    return
+                discarding = False
+                data = data[newline + 1 :]
+                continue
+            newline = data.find(b"\n")
+            fragment = data if newline < 0 else data[:newline]
+            if len(buffered) + len(fragment) > MAX_EVENT_BYTES:
+                buffered.clear()
+                discarding = newline < 0
+            elif newline < 0:
+                buffered.extend(fragment)
+            else:
+                buffered.extend(fragment)
+                parsed = parse_usage_event(bytes(buffered))
+                if parsed is not None:
+                    usage = parsed
+                buffered.clear()
+            if newline < 0:
+                return
+            data = data[newline + 1 :]
+
+    def drain_available(deadline: float | None = None) -> bool:
+        read_any = False
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                return read_any
+            try:
+                data = os.read(descriptor, 64 * 1024)
+            except BlockingIOError:
+                return read_any
+            if not data:
+                return read_any
+            read_any = True
+            consume(data)
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(descriptor, selectors.EVENT_READ)
+        while child.poll() is None:
+            if selector.select(timeout=0.1):
+                drain_available()
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline:
+            if drain_available(deadline):
+                continue
+            if not selector.select(timeout=max(0, deadline - time.monotonic())):
+                break
+    child.stdout.close()
     return usage
 
 
@@ -173,7 +235,7 @@ def main() -> int:
             for signum in (signal.SIGINT, signal.SIGTERM)
         }
         try:
-            usage = read_last_usage(child.stdout)
+            usage = drain_child_output(child)
             return_code = child.wait()
         finally:
             for signum, handler in previous.items():
