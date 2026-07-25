@@ -261,13 +261,12 @@ def reviewer_decision(
             )
         accumulated.extend(page)
         if page:
-            candidates = sorted(page, key=lambda item: item["iid"])
             return result(
                 "eligible",
                 config,
                 skill,
                 target_id=(
-                    f"{gitlab['project_path']}!{candidates[0]['iid']}"
+                    f"{gitlab['project_path']}!{page[0]['iid']}"
                 ),
                 reason="an authored open merge request requires review",
                 fingerprint_source=accumulated,

@@ -458,6 +458,22 @@ class EligibilityTest(unittest.TestCase):
         self.assertIn("author_username=joachim28", endpoint)
         self.assertIn("per_page=100", endpoint)
 
+    def test_reviewer_selects_first_provider_ordered_merge_request(self):
+        decision = decide(
+            self.config(),
+            "reviewer-run",
+            runtime_dir=self.runtime,
+            provider_run=self.provider_json(
+                [
+                    {"iid": 12},
+                    {"iid": 5},
+                ]
+            ),
+        )
+
+        self.assertEqual("eligible", decision["decision"])
+        self.assertEqual("getbill1/getbill!12", decision["target_id"])
+
     def test_pending_unblock_question_is_empty_without_provider_call(self):
         (self.runtime / "unblock-state.json").write_text(
             json.dumps(
