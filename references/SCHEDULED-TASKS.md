@@ -84,6 +84,25 @@ python3 bin/pitcrew-schedule.py install --project getbill
 python3 bin/pitcrew-schedule.py status --project getbill
 ```
 
+### Global token stop
+
+The scheduler has a persistent per-project stop switch for emergency token
+control:
+
+```bash
+python3 bin/pitcrew-schedule.py stop-all --project getbill
+python3 bin/pitcrew-schedule.py status --project getbill
+python3 bin/pitcrew-schedule.py resume-all --project getbill
+```
+
+`stop-all` records the stopped state and unloads every enabled launchd job.
+The runner checks that state before repository/model resolution and returns a
+structured no-op without invoking Codex. This blocks both launchd and manual
+scheduled-mode starts. `resume-all` is explicit, reinstalls the enabled jobs,
+and does not trigger an immediate pass. The dashboard's **Tout arrêter** button
+performs the same action after confirmation and shows **Exécutions bloquées**
+while the switch is active.
+
 The safe GetBill core enables research, manager, implementer, reviewer,
 validator, investigate, and stale-sweep. QA, coverage, dev verification, and ops
 remain defined but disabled until their required configuration exists. Unblock

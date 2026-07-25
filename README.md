@@ -94,6 +94,19 @@ python3 bin/pitcrew-schedule.py install --project getbill
 python3 bin/pitcrew-schedule.py status --project getbill
 ```
 
+To stop all scheduled agents and block future manual or scheduled runs before
+they can invoke Codex, use the persistent project stop switch:
+
+```bash
+python3 bin/pitcrew-schedule.py stop-all --project getbill
+python3 bin/pitcrew-schedule.py resume-all --project getbill
+```
+
+The dashboard exposes the same safety switch as **Tout arrêter** and requires
+confirmation. While stopped, it displays **Exécutions bloquées** and disables
+per-agent controls. Resuming is explicit and reinstalls schedules without
+starting an immediate pass.
+
 The installer deliberately omits human-gated, release, production, and
 not-yet-configured QA/ops roles. Each installed job performs one bounded pass,
 uses a non-overlapping per-role lock, and returns. Scheduled transcripts are
