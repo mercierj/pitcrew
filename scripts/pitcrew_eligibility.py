@@ -119,6 +119,23 @@ def issue_decision(
             target_id=None,
             reason="configured GitLab issue probe failed",
         )
+    if any(
+        not isinstance(issue.get("iid"), int)
+        or isinstance(issue.get("iid"), bool)
+        or not isinstance(issue.get("labels"), list)
+        or any(
+            not isinstance(label, str)
+            for label in issue.get("labels", [])
+        )
+        for issue in issues
+    ):
+        return result(
+            "unavailable",
+            config,
+            skill,
+            target_id=None,
+            reason="configured GitLab issue probe failed",
+        )
 
     required = {
         "implementer-run": (
@@ -212,6 +229,18 @@ def reviewer_decision(
     )
     merge_requests = gitlab_items(config, endpoint, provider_run)
     if merge_requests is None:
+        return result(
+            "unavailable",
+            config,
+            skill,
+            target_id=None,
+            reason="configured GitLab merge-request probe failed",
+        )
+    if any(
+        not isinstance(item.get("iid"), int)
+        or isinstance(item.get("iid"), bool)
+        for item in merge_requests
+    ):
         return result(
             "unavailable",
             config,

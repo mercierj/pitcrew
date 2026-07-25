@@ -1,6 +1,10 @@
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import io
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +14,7 @@ from scripts.pitcrew_eligibility import decide, default_provider_run, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/pitcrew_eligibility.py"
 EXPECTED_KEYS = {
     "decision",
     "project",
@@ -87,6 +92,57 @@ class EligibilityTest(unittest.TestCase):
         )
 
         self.assertEqual("unavailable", decision["decision"])
+
+    def test_issue_with_invalid_iid_is_unavailable(self):
+        decision = decide(
+            self.config(),
+            "implementer-run",
+            runtime_dir=self.runtime,
+            provider_run=self.provider_json(
+                [
+                    {
+                        "iid": "5",
+                        "labels": [
+                            "pitcrew-agent",
+                            "pitcrew-state::todo",
+                        ],
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual("unavailable", decision["decision"])
+        self.assertIsNone(decision["target_id"])
+
+    def test_issue_with_invalid_labels_is_unavailable(self):
+        invalid_labels = (
+            "pitcrew-agent",
+            ["pitcrew-agent", 7],
+        )
+        for labels in invalid_labels:
+            with self.subTest(labels=labels):
+                decision = decide(
+                    self.config(),
+                    "implementer-run",
+                    runtime_dir=self.runtime,
+                    provider_run=self.provider_json(
+                        [{"iid": 5, "labels": labels}]
+                    ),
+                )
+
+                self.assertEqual("unavailable", decision["decision"])
+                self.assertIsNone(decision["target_id"])
+
+    def test_merge_request_with_invalid_iid_is_unavailable(self):
+        decision = decide(
+            self.config(),
+            "reviewer-run",
+            runtime_dir=self.runtime,
+            provider_run=self.provider_json([{"iid": "12"}]),
+        )
+
+        self.assertEqual("unavailable", decision["decision"])
+        self.assertIsNone(decision["target_id"])
 
     def test_provider_oserror_and_timeout_are_unavailable(self):
         for name, error in (
@@ -517,23 +573,13 @@ class EligibilityTest(unittest.TestCase):
         self.assertEqual(expected, first["fingerprint"])
         self.assertEqual(first["fingerprint"], second["fingerprint"])
 
-    def test_cli_prints_unavailable_as_json_with_exit_zero(self):
+    def test_cli_prints_real_unavailable_decision_as_json_with_exit_zero(self):
         with mock.patch(
             "scripts.pitcrew_eligibility.load_runtime_config",
             return_value=self.config(),
         ), mock.patch(
             "scripts.pitcrew_eligibility.runtime_root",
             return_value=self.runtime.parent,
-        ), mock.patch(
-            "scripts.pitcrew_eligibility.decide",
-            return_value={
-                "decision": "unavailable",
-                "project": "getbill",
-                "skill": "research-run",
-                "target_id": None,
-                "fingerprint": None,
-                "reason": "this role has no Phase A deterministic eligibility probe",
-            },
         ), mock.patch("builtins.print") as output:
             exit_code = main(
                 ["check", "--project", "getbill", "--skill", "research-run"]
@@ -544,6 +590,102 @@ class EligibilityTest(unittest.TestCase):
         self.assertEqual("unavailable", json.loads(printed)["decision"])
         self.assertNotIn('": ', printed)
         self.assertNotIn(", ", printed)
+
+    def test_cli_passes_runtime_project_directory_to_decide(self):
+        config = self.config()
+        runtime_base = self.runtime / "runtime-root"
+        expected = {
+            "decision": "unavailable",
+            "project": "getbill",
+            "skill": "research-run",
+            "target_id": None,
+            "fingerprint": None,
+            "reason": "unsupported",
+        }
+        with mock.patch(
+            "scripts.pitcrew_eligibility.load_runtime_config",
+            return_value=config,
+        ), mock.patch(
+            "scripts.pitcrew_eligibility.runtime_root",
+            return_value=runtime_base,
+        ), mock.patch(
+            "scripts.pitcrew_eligibility.decide",
+            return_value=expected,
+        ) as decide_mock, mock.patch("builtins.print"):
+            exit_code = main(
+                ["check", "--project", "getbill", "--skill", "research-run"]
+            )
+
+        self.assertEqual(0, exit_code)
+        decide_mock.assert_called_once_with(
+            config,
+            "research-run",
+            runtime_dir=runtime_base / "getbill",
+        )
+
+    def test_cli_configuration_exception_is_concise_stderr_and_exit_two(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch(
+            "scripts.pitcrew_eligibility.load_runtime_config",
+            side_effect=ValueError("invalid runtime configuration"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main(
+                ["check", "--project", "getbill", "--skill", "reviewer-run"]
+            )
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(
+            "pitcrew eligibility: invalid runtime configuration\n",
+            stderr.getvalue(),
+        )
+        self.assertLessEqual(len(stderr.getvalue()), 280)
+
+    def test_direct_script_uses_runtime_config_and_fake_glab(self):
+        codex_home = (self.runtime / "codex-home").resolve()
+        project_dir = codex_home / "pitcrew/getbill"
+        project_dir.mkdir(parents=True)
+        (project_dir / "config.json").write_text(
+            json.dumps(self.config()),
+            encoding="utf-8",
+        )
+        fake_glab = self.runtime / "fake-glab"
+        fake_glab.write_text(
+            "#!/usr/bin/env python3\nprint('[]')\n",
+            encoding="utf-8",
+        )
+        fake_glab.chmod(0o700)
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(codex_home)
+        env["GLAB_BIN"] = str(fake_glab)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "check",
+                "--project",
+                "getbill",
+                "--skill",
+                "reviewer-run",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("", completed.stderr)
+        decision = json.loads(completed.stdout)
+        self.assertEqual(EXPECTED_KEYS, set(decision))
+        self.assertEqual("empty", decision["decision"])
+        self.assertEqual("getbill", decision["project"])
+        self.assertEqual("reviewer-run", decision["skill"])
+        self.assertIsNotNone(decision["fingerprint"])
 
 
 if __name__ == "__main__":
