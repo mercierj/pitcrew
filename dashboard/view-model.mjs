@@ -36,9 +36,15 @@ const workflowIssues = (work) => {
   return asArray(work?.issues);
 };
 
+const matchesFilters = (issue, query, role) => {
+  const text = `${issue.iid ?? ""} ${issue.title ?? ""}`.toLocaleLowerCase("fr");
+  const agentRole = String(issue.agent_action?.skill || issue.route || "").toLocaleLowerCase("fr");
+  return (!query || text.includes(query)) && (!role || agentRole === role);
+};
+
 export function buildWorkflow(work = {}, { query = "", role = "", doneDay = currentParisDay() } = {}) {
   const groups = Object.fromEntries([...ACTIVE_LIFECYCLES, "done"].map((lifecycle) => [lifecycle, []]));
-  const normalizedQuery = String(query).toLocaleLowerCase("fr");
+  const normalizedQuery = String(query).trim().toLocaleLowerCase("fr");
   const normalizedRole = String(role).toLocaleLowerCase("fr");
 
   for (const issue of workflowIssues(work)) {
@@ -46,13 +52,14 @@ export function buildWorkflow(work = {}, { query = "", role = "", doneDay = curr
     const lifecycle = issue.lifecycle;
     const card = { ...issue, key: resourceKey(issue, "issue"), kind: "issue", lifecycle };
     if (ACTIVE_LIFECYCLES.includes(lifecycle)) {
-      const text = `${issue.iid ?? ""} ${issue.title ?? ""}`.toLocaleLowerCase("fr");
-      const agentRole = String(issue.agent_action?.skill || issue.route || "").toLocaleLowerCase("fr");
-      if ((!normalizedQuery || text.includes(normalizedQuery)) && (!normalizedRole || agentRole === normalizedRole)) {
+      if (matchesFilters(issue, normalizedQuery, normalizedRole)) {
         groups[lifecycle].push(card);
       }
     } else if (lifecycle === "done" || lifecycle === "closed") {
-      if (dayInParis(issue.closed_at || issue.updated_at) === doneDay) groups.done.push(card);
+      if (
+        dayInParis(issue.closed_at || issue.updated_at) === doneDay
+        && matchesFilters(issue, normalizedQuery, normalizedRole)
+      ) groups.done.push(card);
     }
   }
   return groups;
@@ -63,9 +70,12 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
   const decisionItems = asArray(decisions?.decisions).concat(decisions?.pending ? [decisions.pending] : []);
   for (const decision of decisionItems) {
     const ticket = decision?.ticket;
+    const ticketId = typeof decision?.ticket_id === "string" ? decision.ticket_id.trim() : "";
+    const key = resourceKey(ticket, "issue") || (ticketId ? `decision:${ticketId}` : "");
+    if (!key) continue;
     actions.push({
       kind: "decision",
-      key: resourceKey(ticket, "issue") || `decision:${decision?.ticket_id ?? ""}`,
+      key,
       label: "Répondre",
       priority: 0,
       timestamp: timestampOf(decision),
@@ -74,14 +84,17 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
   }
   for (const agent of asArray(snapshot?.agents)) {
     if (!agent || !["failed", "warning"].includes(agent.health)) continue;
-    const skill = agent.skill || agent.role || "";
-    actions.push({ kind: "agent-failure", key: `agent:${skill}`, label: "Diagnostiquer", priority: 1, timestamp: timestampOf(agent), resource: agent });
+    const skill = typeof agent.skill === "string" ? agent.skill.trim() : "";
+    if (!skill) continue;
+    actions.push({ kind: "agent-failure", key: `agent:${skill}`, label: "Diagnostiquer", priority: 1, timestamp: agent.latest_history?.finished_at || "", resource: agent });
   }
   for (const mergeRequest of asArray(work?.merge_requests)) {
     if (!mergeRequest || ["preprod", "prod"].includes(mergeRequest.target_branch)) continue;
+    const key = resourceKey(mergeRequest, "merge_request");
+    if (!key) continue;
     actions.push({
       kind: "merge-request",
-      key: resourceKey(mergeRequest, "merge_request"),
+      key,
       label: "Fusionner",
       priority: 2,
       timestamp: timestampOf(mergeRequest),
@@ -89,11 +102,15 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
     });
   }
   for (const proposal of asArray(proposals?.proposals)) {
-    actions.push({ kind: "proposal", key: `proposal:${proposal?.id ?? ""}`, label: "Examiner", priority: 3, timestamp: timestampOf(proposal), resource: proposal });
+    const id = typeof proposal?.id === "string" ? proposal.id.trim() : "";
+    if (!id) continue;
+    actions.push({ kind: "proposal", key: `proposal:${id}`, label: "Examiner", priority: 3, timestamp: timestampOf(proposal), resource: proposal });
   }
-  return actions.sort((left, right) => (
+  const sorted = actions.sort((left, right) => (
     left.priority - right.priority
     || String(left.timestamp).localeCompare(String(right.timestamp))
     || left.key.localeCompare(right.key)
   ));
+  const keys = new Set();
+  return sorted.filter((action) => !keys.has(action.key) && keys.add(action.key));
 }

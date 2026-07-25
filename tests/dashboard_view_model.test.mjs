@@ -78,15 +78,37 @@ test("buildWorkflow filters active cards by text and agent role", () => {
   assert.deepEqual(routeWorkflow.review.map(({ iid }) => iid), [3]);
 });
 
+test("buildWorkflow applies text and role filters to done cards", () => {
+  const workflow = buildWorkflow(
+    { issues: [
+      issue("done", 1, { title: "Payments", route: "implementer-run", closed_at: "2026-07-26T08:00:00Z" }),
+      issue("done", 2, { title: "Payments", route: "qa-run", closed_at: "2026-07-26T08:00:00Z" }),
+      issue("done", 3, { title: "Invoices", route: "implementer-run", closed_at: "2026-07-26T08:00:00Z" }),
+    ] },
+    { doneDay: "2026-07-26", query: "payments", role: "implementer-run" },
+  );
+
+  assert.deepEqual(workflow.done.map(({ iid }) => iid), [1]);
+});
+
+test("buildWorkflow treats whitespace query as no filter", () => {
+  const workflow = buildWorkflow(
+    { issues: [issue("todo", 1, { title: "Payments" })] },
+    { query: "   ", doneDay: "2026-07-26" },
+  );
+
+  assert.deepEqual(workflow.todo.map(({ iid }) => iid), [1]);
+});
+
 test("buildActionQueue orders action kinds by priority and timestamps", () => {
   const queue = buildActionQueue({
     decisions: { decisions: [
-      { ticket_id: 2, created_at: "2026-07-26T11:00:00Z" },
-      { ticket_id: 1, created_at: "2026-07-26T09:00:00Z" },
+      { ticket_id: "2", created_at: "2026-07-26T11:00:00Z" },
+      { ticket_id: "1", created_at: "2026-07-26T09:00:00Z" },
     ] },
     snapshot: { agents: [
-      { skill: "qa-run", health: "warning", updated_at: "2026-07-26T12:00:00Z" },
-      { skill: "implementer-run", health: "failed", updated_at: "2026-07-26T10:00:00Z" },
+      { skill: "zeta-run", health: "warning", updated_at: "2026-07-26T12:00:00Z", latest_history: { finished_at: "2026-07-26T10:00:00Z" } },
+      { skill: "alpha-run", health: "failed", updated_at: "2026-07-26T08:00:00Z", latest_history: { finished_at: "2026-07-26T11:00:00Z" } },
     ] },
     work: { merge_requests: [issue("opened", 3, {
       resource_type: "merge_request",
@@ -101,8 +123,24 @@ test("buildActionQueue orders action kinds by priority and timestamps", () => {
     "decision", "decision", "agent-failure", "agent-failure", "merge-request", "proposal",
   ]);
   assert.deepEqual(queue.slice(0, 2).map(({ key }) => key), ["decision:1", "decision:2"]);
-  assert.deepEqual(queue.slice(2, 4).map(({ key }) => key), ["agent:implementer-run", "agent:qa-run"]);
+  assert.deepEqual(queue.slice(2, 4).map(({ key }) => key), ["agent:zeta-run", "agent:alpha-run"]);
   assert.deepEqual(queue.map(({ label }) => label), ["Répondre", "Répondre", "Diagnostiquer", "Diagnostiquer", "Fusionner", "Examiner"]);
+});
+
+test("buildActionQueue skips invalid keys and deduplicates sorted entries", () => {
+  const queue = buildActionQueue({
+    decisions: { decisions: [
+      { created_at: "2026-07-26T08:00:00Z" },
+      { ticket_id: "duplicate", created_at: "2026-07-26T10:00:00Z" },
+      { ticket_id: "duplicate", created_at: "2026-07-26T09:00:00Z" },
+    ] },
+    snapshot: { agents: [{ health: "warning", latest_history: { finished_at: "2026-07-26T08:00:00Z" } }] },
+    work: { merge_requests: [{ resource_type: "merge_request", updated_at: "2026-07-26T08:00:00Z" }] },
+    proposals: { proposals: [{ created_at: "2026-07-26T08:00:00Z" }] },
+  });
+
+  assert.deepEqual(queue.map(({ key }) => key), ["decision:duplicate"]);
+  assert.equal(queue[0].timestamp, "2026-07-26T09:00:00Z");
 });
 
 test("buildActionQueue excludes merge requests targeting protected deployment branches", () => {
