@@ -52,15 +52,26 @@ class RunStore:
         """Create only missing private directories; never trust symlinked ancestors."""
         absolute = self.path.absolute()
         missing: list[Path] = []
-        current = absolute.parent
-        while not current.exists():
-            missing.append(current)
-            current = current.parent
-        for directory in reversed(missing):
+        current = Path(absolute.anchor)
+        prefix_missing = False
+        for part in absolute.parent.parts[1:]:
+            current /= part
+            if prefix_missing:
+                missing.append(current)
+                continue
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                prefix_missing = True
+                missing.append(current)
+                continue
+            if stat.S_ISLNK(metadata.st_mode):
+                raise RunStoreError("database path contains a symlink")
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RunStoreError("database ancestor is not a directory")
+        for directory in missing:
             directory.mkdir(mode=0o700)
         parent = self.path.parent.absolute()
-        if parent.resolve(strict=True) != parent:
-            raise RunStoreError("database path contains a symlink")
         metadata = os.lstat(parent)
         if not stat.S_ISDIR(metadata.st_mode):
             raise RunStoreError("database parent is not a directory")
@@ -156,6 +167,7 @@ class RunStore:
                 "CREATE INDEX IF NOT EXISTS queue_by_project_skill ON runs(project, skill, state, queue_sequence)",
             ):
                 connection.execute(statement)
+            self._validate_schema(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
         except (sqlite3.Error, RunStoreError) as error:
@@ -172,6 +184,86 @@ class RunStore:
             os.chmod(self.path, 0o600)
         except OSError as error:
             raise RunStoreError("database initialization failed") from error
+
+    @staticmethod
+    def _validate_schema(connection: sqlite3.Connection) -> None:
+        expected_tables = {
+            "runs": (
+                ("run_id", "TEXT", 0, 1, None),
+                ("project", "TEXT", 1, 0, None),
+                ("skill", "TEXT", 1, 0, None),
+                ("source", "TEXT", 1, 0, None),
+                ("target", "TEXT", 0, 0, None),
+                ("dedupe_key", "TEXT", 1, 0, None),
+                ("state", "TEXT", 1, 0, None),
+                ("queue_sequence", "INTEGER", 1, 0, None),
+                ("pid", "INTEGER", 0, 0, None),
+                ("created_at", "TEXT", 1, 0, None),
+                ("started_at", "TEXT", 0, 0, None),
+                ("heartbeat_at", "TEXT", 0, 0, None),
+                ("finished_at", "TEXT", 0, 0, None),
+                ("phase", "TEXT", 1, 0, None),
+                ("cancel_requested", "INTEGER", 1, 0, "0"),
+                ("error_code", "TEXT", 0, 0, None),
+                ("error_message", "TEXT", 0, 0, None),
+                ("predecessor_run_id", "TEXT", 0, 0, None),
+            ),
+            "project_controls": (
+                ("project", "TEXT", 0, 1, None),
+                ("state", "TEXT", 1, 0, None),
+                ("generation", "INTEGER", 1, 0, "0"),
+            ),
+        }
+        for table, expected in expected_tables.items():
+            actual = tuple(
+                (
+                    row["name"],
+                    row["type"].upper(),
+                    row["notnull"],
+                    row["pk"],
+                    row["dflt_value"],
+                )
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            )
+            if actual != expected:
+                raise RunStoreError(f"database schema mismatch for {table}")
+
+        indexes = {
+            row["name"]: row
+            for row in connection.execute("PRAGMA index_list(runs)")
+        }
+        active = indexes.get("active_run_dedupe")
+        queue = indexes.get("queue_by_project_skill")
+        if (
+            active is None
+            or (active["unique"], active["partial"]) != (1, 1)
+            or queue is None
+            or (queue["unique"], queue["partial"]) != (0, 0)
+        ):
+            raise RunStoreError("database schema mismatch for run indexes")
+        for name, expected_columns in (
+            ("active_run_dedupe", ("project", "dedupe_key")),
+            (
+                "queue_by_project_skill",
+                ("project", "skill", "state", "queue_sequence"),
+            ),
+        ):
+            columns = tuple(
+                row["name"]
+                for row in connection.execute(f"PRAGMA index_info({name})")
+            )
+            if columns != expected_columns:
+                raise RunStoreError(f"database schema mismatch for index {name}")
+        active_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+            ("active_run_dedupe",),
+        ).fetchone()
+        if active_sql is None or not isinstance(active_sql["sql"], str):
+            raise RunStoreError("database schema mismatch for active run index")
+        normalized = re.sub(r"\s+", "", active_sql["sql"]).lower()
+        _, separator, predicate = normalized.partition("where")
+        if separator != "where" or predicate != "statein('queued','running')":
+            raise RunStoreError("database schema mismatch for active run index")
 
     def _timestamp(self) -> str:
         value = self._now()
@@ -202,13 +294,14 @@ class RunStore:
     def _public_error(cls, value: Any) -> str:
         cls._public(value, "error_message", 2048)
         scrubbed = re.sub(
-            r"(?im)(\bAuthorization\s*:\s*)[^\r\n]+",
+            r"(?im)(\b(?:Authorization|X-API-Key)\s*:\s*)[^\r\n]+",
             r"\1[REDACTED]",
             value,
         )
         scrubbed = re.sub(
             (
-                r'(?i)("?\b(?:token|authorization|password|secret)\b"?\s*'
+                r'(?i)("?\b(?:token|authorization|password|secret|'
+                r'api[_-]?key|access[_-]?token)\b"?\s*'
                 r'(?:=|:)\s*)(?:Bearer\s+)?(?:"[^"]*"|\'[^\']*\'|[^\s,}]+)'
             ),
             r"\1[REDACTED]",

@@ -169,6 +169,28 @@ class RunStoreTest(unittest.TestCase):
             finished["error_message"],
         )
 
+    def test_finish_redacts_api_key_and_access_token_variants(self):
+        cases = (
+            ("X-API-Key: header-secret\nworker failed", "header-secret"),
+            ("x-api-key=equals-secret worker failed", "equals-secret"),
+            ("API_KEY: snake-secret worker failed", "snake-secret"),
+            ("AcCeSs_ToKeN=token-secret worker failed", "token-secret"),
+        )
+        for number, (message, secret) in enumerate(cases):
+            with self.subTest(message=message):
+                run = self.enqueue(f"T-secret-{number}")
+                finished = self.store.finish(
+                    run["run_id"],
+                    state="failed",
+                    error_code="command_failed",
+                    error_message=message,
+                )
+                persisted = self.store.get(run["run_id"])
+                self.assertNotIn(secret, finished["error_message"])
+                self.assertNotIn(secret, persisted["error_message"])
+                self.assertIn("[REDACTED]", persisted["error_message"])
+                self.assertIn("worker failed", persisted["error_message"])
+
     def test_stopped_project_blocks_admission_and_claim_and_tracks_generation(self):
         stopped = self.store.set_project_state("demo", "stopped")
         with self.assertRaises(RunPaused): self.enqueue()
@@ -331,6 +353,48 @@ class RunStoreTest(unittest.TestCase):
         self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='project_controls'").fetchone())
         connection.close()
 
+    def test_version_one_with_incomplete_schema_is_rejected_without_mutation(self):
+        path = Path(self.temp.name).resolve() / "incomplete-v1.sqlite"
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE runs (
+                    run_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL,
+                    skill TEXT NOT NULL,
+                    dedupe_key TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    queue_sequence INTEGER NOT NULL
+                )
+                """
+            )
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+        path.chmod(0o600)
+
+        with self.assertRaisesRegex(RunStoreError, "schema"):
+            RunStore(path)
+
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual(
+                [
+                    "run_id", "project", "skill", "dedupe_key", "state",
+                    "queue_sequence",
+                ],
+                [row[1] for row in connection.execute("PRAGMA table_info(runs)")],
+            )
+            self.assertEqual(
+                [],
+                list(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN "
+                    "('project_controls','active_run_dedupe','queue_by_project_skill')"
+                )),
+            )
+            self.assertEqual(
+                1,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+
     def test_schema_constants_tables_and_indexes_match_version_one(self):
         self.assertEqual(("queued", "running"), ACTIVE_STATES)
         self.assertEqual(("succeeded", "failed", "cancelled"), TERMINAL_STATES)
@@ -447,6 +511,7 @@ class RunStoreTest(unittest.TestCase):
         linked.symlink_to(actual, target_is_directory=True)
         with self.assertRaisesRegex(RunStoreError, "symlink"):
             RunStore(linked / "nested" / "runs.sqlite")
+        self.assertFalse((actual / "nested").exists())
 
     def test_connection_guard_rejects_database_replaced_before_sqlite_connect(self):
         path = Path(self.temp.name).resolve() / "guard.sqlite"
