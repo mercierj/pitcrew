@@ -19,6 +19,11 @@ test("resourceKey uses the resource type and canonical URL", () => {
     resourceKey(issue("todo", 1)),
     "issue:https://gitlab.example/group/app/-/issues/1",
   );
+  assert.equal(
+    resourceKey({ resource_type: "issue", web_url: "https://gitlab.example/group/app/-/issues/2" }),
+    "issue:https://gitlab.example/group/app/-/issues/2",
+  );
+  assert.equal(resourceKey({ resource_type: "issue" }), "");
 });
 
 test("buildWorkflow orders active lifecycle keys and only keeps today's done issues", () => {
@@ -31,6 +36,8 @@ test("buildWorkflow orders active lifecycle keys and only keeps today's done iss
         issue("blocked", 4),
         issue("processing", 5),
         issue("closed", 6, { closed_at: "2026-07-25T08:00:00Z" }),
+        issue("closed", 7, { closed_at: undefined, updated_at: "2026-07-25T22:30:00Z" }),
+        issue("closed", 8, { closed_at: undefined, updated_at: "2026-07-25T20:30:00Z" }),
       ],
     },
     { doneDay: "2026-07-26" },
@@ -41,7 +48,7 @@ test("buildWorkflow orders active lifecycle keys and only keeps today's done iss
   assert.deepEqual(workflow.processing.map(({ lifecycle }) => lifecycle), ["processing"]);
   assert.deepEqual(workflow.review.map(({ lifecycle }) => lifecycle), ["review"]);
   assert.deepEqual(workflow.blocked.map(({ lifecycle }) => lifecycle), ["blocked"]);
-  assert.deepEqual(workflow.done.map(({ iid }) => iid), [1]);
+  assert.deepEqual(workflow.done.map(({ iid }) => iid), [1, 7]);
   assert.equal(workflow.todo[0].key, "issue:https://gitlab.example/group/app/-/issues/2");
   assert.equal(workflow.todo[0].kind, "issue");
   assert.equal(workflow.todo[0].lifecycle, "todo");
@@ -53,7 +60,7 @@ test("buildWorkflow filters active cards by text and agent role", () => {
       issues: [
         issue("todo", 1, { title: "Payments need review", agent_action: { skill: "implementer-run" } }),
         issue("todo", 2, { title: "Payments without matching role", agent_action: { route: "qa-run" } }),
-        issue("review", 3, { title: "Invoices", agent_action: { route: "implementer-run" } }),
+        issue("review", 3, { title: "Invoices", route: "implementer-run" }),
       ],
     },
     { query: "payments", role: "implementer-run", doneDay: "2026-07-26" },
@@ -63,6 +70,12 @@ test("buildWorkflow filters active cards by text and agent role", () => {
   assert.deepEqual(workflow.processing, []);
   assert.deepEqual(workflow.review, []);
   assert.deepEqual(workflow.blocked, []);
+
+  const routeWorkflow = buildWorkflow(
+    { issues: [issue("review", 3, { title: "Invoices", route: "implementer-run" })] },
+    { query: "invoices", role: "implementer-run", doneDay: "2026-07-26" },
+  );
+  assert.deepEqual(routeWorkflow.review.map(({ iid }) => iid), [3]);
 });
 
 test("buildActionQueue orders action kinds by priority and timestamps", () => {
