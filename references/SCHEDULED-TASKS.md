@@ -4,6 +4,35 @@ Schedulers invoke namespaced Pitcrew skills from a configured project directory.
 Every scheduled invocation is a single bounded pass and must emit the runtime
 structured result.
 
+## Agent model and usage controls
+
+Each configured role can pin `agents.<role>.model` to one of the catalog slugs.
+`agents.<role>.fallback` describes the built-in fallback used only when an older
+configuration omits that role; it is not a writable configuration field. The
+profiles pin all roles so model selection stays explicit:
+
+| Model | Intended use | Why |
+|---|---|---|
+| `gpt-5.6-sol` | quality-critical implementation, review, investigation, unblock | strongest quality profile |
+| `gpt-5.6-terra` | research, validation, QA, coverage, dev verification, release | balanced quality and cost |
+| `gpt-5.6-luna` | management, stale sweep, operations | fastest, lowest-cost profile |
+
+The fallback mapping is: research `gpt-5.6-terra`; manager `gpt-5.6-luna`;
+implementer, reviewer, investigate, and unblock `gpt-5.6-sol`; validator, QA,
+coverage, dev verification, and releaser `gpt-5.6-terra`; stale sweep and ops
+`gpt-5.6-luna`. The dashboard submits the selected slug with `--model`.
+
+The runtime records the selected model and token usage in JSONL history, without
+retaining a full transcript. When usage is available, each record includes
+`input_tokens`, `cached_input_tokens`, `cache_write_tokens`, `output_tokens`, and
+`total_tokens`; the dashboard shows the last run and rolling seven-day measured
+subtotal. This is API-equivalent metering, not a subscription charge. It excludes
+tools, container execution, regional pricing, and priority pricing.
+
+Pricing snapshot effective 2026-07-24, in USD per million tokens (input / cache
+read / cache write / output): Sol 5 / .5 / 6.25 / 30; Terra 2.5 / .25 / 3.125 /
+15; Luna 1 / .1 / 1.25 / 6.
+
 ## Research template
 
 Run at a low, predictable cadence such as once per business day:
@@ -99,6 +128,11 @@ Controls are restricted to enabled skills:
   overlapping pass.
 - **Stop** stops the current pass and unloads that role's schedule.
 - **Restart** installs or reloads that role's schedule.
+
+Changing an enabled role's model follows the same safe sequence: Stop the running
+role, atomically persist its configuration, install the refreshed schedule, then
+issue an immediate Trigger. A failure stops at that boundary: there is no rollback
+or implicit retry, and the operator sees the actionable error.
 
 These controls invoke only local allowlisted commands with server-resolved
 project and skill values. Release, prod, and preprod controls are absent. The

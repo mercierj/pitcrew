@@ -95,6 +95,39 @@ class DocsTest(unittest.TestCase):
         )
         json.loads((ROOT / "profiles/getbill.json").read_text(encoding="utf-8"))
 
+    def test_agent_model_usage_controls_are_documented(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        scheduled = (ROOT / "references/SCHEDULED-TASKS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("agents.<role>.model", scheduled)
+        self.assertIn("agents.<role>.fallback", scheduled)
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            self.assertIn(model, scheduled)
+            self.assertIn(model, readme)
+        for term in (
+            "--model",
+            "JSONL",
+            "full transcript",
+            "cache_write_tokens",
+            "stop",
+            "atomic",
+            "install",
+            "immediate",
+            "seven-day",
+            "2026-07-24",
+            "USD",
+            "API-equivalent",
+            "subscription",
+            "priority",
+            "regional",
+            "container",
+        ):
+            self.assertIn(term, scheduled)
+        self.assertIn("API-equivalent", readme)
+        self.assertIn("seven-day", readme)
+
     def test_documented_migration_options_are_supported(self):
         result = subprocess.run(
             [

@@ -124,6 +124,13 @@ remote environment actions. The status CLI remains available:
 python3 bin/pitcrew-schedule.py status --project getbill
 ```
 
+### Models and usage
+
+The dashboard shows each agent's configured `gpt-5.6-sol`, `gpt-5.6-terra`, or
+`gpt-5.6-luna` model, plus last-run and rolling seven-day measured usage. The
+amount is API-equivalent metering rather than a subscription charge. See the
+[model catalogue, controls, and pricing assumptions](references/SCHEDULED-TASKS.md).
+
 ## State and providers
 
 The generic lifecycle is:

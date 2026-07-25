@@ -22,6 +22,7 @@ from scripts.pitcrew_config import (
     validate,
     write_project,
 )
+from scripts.pitcrew_models import DEFAULT_MODELS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,20 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def test_profiles_and_example_pin_the_complete_default_agent_mapping(self):
+        for relative in (
+            "profiles/getbill.json",
+            "profiles/generic.json",
+            "references/config.example.json",
+        ):
+            profile = json.loads((ROOT / relative).read_text(encoding="utf-8"))
+            self.assertEqual(
+                {role: {"model": model} for role, model in DEFAULT_MODELS.items()},
+                profile["agents"],
+                relative,
+            )
+            validate(profile)
+
     def test_update_runtime_model_replaces_only_requested_agent_and_preserves_content(self):
         with tempfile.TemporaryDirectory() as temp:
             env = {"CODEX_HOME": str(Path(temp).resolve())}
