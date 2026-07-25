@@ -249,6 +249,127 @@ class EligibilityTest(unittest.TestCase):
         self.assertEqual("eligible", decision["decision"])
         self.assertEqual("getbill1/getbill#4", decision["target_id"])
 
+    def test_issue_probe_fetches_second_page_before_declaring_empty(self):
+        page_one = [
+            {
+                "iid": iid,
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            }
+            for iid in range(1, 101)
+        ]
+        page_two = [
+            {
+                "iid": 101,
+                "labels": ["pitcrew-agent", "pitcrew-state::todo"],
+            }
+        ]
+        commands = []
+
+        def provider(command):
+            commands.append(command)
+            value = page_one if len(commands) == 1 else page_two
+            return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+
+        decision = decide(
+            self.config(),
+            "implementer-run",
+            runtime_dir=self.runtime,
+            provider_run=provider,
+        )
+
+        self.assertEqual("eligible", decision["decision"])
+        self.assertEqual("getbill1/getbill#101", decision["target_id"])
+        self.assertEqual(2, len(commands))
+        self.assertIn("page=1", commands[0][-1])
+        self.assertIn("page=2", commands[1][-1])
+
+    def test_issue_probe_rejects_malformed_later_page(self):
+        page_one = [
+            {
+                "iid": iid,
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            }
+            for iid in range(1, 101)
+        ]
+        commands = []
+
+        def provider(command):
+            commands.append(command)
+            value = page_one if len(commands) == 1 else [{"iid": "bad"}]
+            return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+
+        decision = decide(
+            self.config(),
+            "implementer-run",
+            runtime_dir=self.runtime,
+            provider_run=provider,
+        )
+
+        self.assertEqual("unavailable", decision["decision"])
+        self.assertEqual(2, len(commands))
+
+    def test_issue_probe_page_limit_is_unavailable(self):
+        full_page = [
+            {
+                "iid": iid,
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            }
+            for iid in range(1, 101)
+        ]
+        commands = []
+
+        def provider(command):
+            commands.append(command)
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(full_page), ""
+            )
+
+        decision = decide(
+            self.config(),
+            "implementer-run",
+            runtime_dir=self.runtime,
+            provider_run=provider,
+        )
+
+        self.assertEqual("unavailable", decision["decision"])
+        self.assertGreater(len(commands), 1)
+        self.assertLessEqual(len(commands), 100)
+
+    def test_issue_probe_stops_after_candidate_on_full_first_page(self):
+        full_page = [
+            {
+                "iid": iid,
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            }
+            for iid in range(1, 100)
+        ]
+        full_page.append(
+            {
+                "iid": 100,
+                "labels": ["pitcrew-agent", "pitcrew-state::todo"],
+            }
+        )
+        commands = []
+
+        def provider(command):
+            commands.append(command)
+            if len(commands) > 1:
+                self.fail("candidate on page one must stop pagination")
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(full_page), ""
+            )
+
+        decision = decide(
+            self.config(),
+            "implementer-run",
+            runtime_dir=self.runtime,
+            provider_run=provider,
+        )
+
+        self.assertEqual("eligible", decision["decision"])
+        self.assertEqual("getbill1/getbill#100", decision["target_id"])
+        self.assertEqual(1, len(commands))
+
     def test_validator_requires_agent_and_review_labels(self):
         issues = [
             {"iid": 1, "labels": ["pitcrew-state::review"]},
@@ -363,6 +484,100 @@ class EligibilityTest(unittest.TestCase):
 
         self.assertEqual("empty", decision["decision"])
         self.assertIn("human decision", decision["reason"])
+
+    def test_selecting_unblock_question_is_empty_without_provider_call(self):
+        (self.runtime / "unblock-state.json").write_text(
+            json.dumps(
+                {
+                    "pending_question": {
+                        "ticket_id": "getbill1/getbill#5",
+                        "status": "selecting",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        decision = decide(
+            self.config(),
+            "unblock",
+            runtime_dir=self.runtime,
+            provider_run=lambda command: self.fail("provider must not run"),
+        )
+
+        self.assertEqual("empty", decision["decision"])
+        self.assertIn("human decision", decision["reason"])
+
+    def test_answered_unblock_question_is_eligible_without_provider_call(self):
+        (self.runtime / "unblock-state.json").write_text(
+            json.dumps(
+                {
+                    "pending_question": {
+                        "ticket_id": "getbill1/getbill#5",
+                        "status": "answered",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        decision = decide(
+            self.config(),
+            "unblock",
+            runtime_dir=self.runtime,
+            provider_run=lambda command: self.fail("provider must not run"),
+        )
+
+        self.assertEqual("eligible", decision["decision"])
+        self.assertEqual("getbill1/getbill#5", decision["target_id"])
+
+    def test_unknown_unblock_status_is_unavailable_without_provider_call(self):
+        (self.runtime / "unblock-state.json").write_text(
+            json.dumps(
+                {
+                    "pending_question": {
+                        "ticket_id": "getbill1/getbill#5",
+                        "status": "invented",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        decision = decide(
+            self.config(),
+            "unblock",
+            runtime_dir=self.runtime,
+            provider_run=lambda command: self.fail("provider must not run"),
+        )
+
+        self.assertEqual("unavailable", decision["decision"])
+
+    def test_malformed_pending_unblock_fields_are_unavailable(self):
+        cases = (
+            {},
+            {"status": 7},
+            {"status": "answered"},
+            {"status": "answered", "ticket_id": ""},
+            {"status": "answered", "ticket_id": 5},
+        )
+        for pending in cases:
+            with self.subTest(pending=pending):
+                (self.runtime / "unblock-state.json").write_text(
+                    json.dumps({"pending_question": pending}),
+                    encoding="utf-8",
+                )
+
+                decision = decide(
+                    self.config(),
+                    "unblock",
+                    runtime_dir=self.runtime,
+                    provider_run=lambda command: self.fail(
+                        "provider must not run"
+                    ),
+                )
+
+                self.assertEqual("unavailable", decision["decision"])
 
     def test_unblock_without_pending_question_selects_blocked_issue(self):
         decision = decide(
@@ -623,12 +838,12 @@ class EligibilityTest(unittest.TestCase):
             runtime_dir=runtime_base / "getbill",
         )
 
-    def test_cli_configuration_exception_is_concise_stderr_and_exit_two(self):
+    def test_cli_configuration_exception_is_generic_stderr_and_exit_two(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch(
             "scripts.pitcrew_eligibility.load_runtime_config",
-            side_effect=ValueError("invalid runtime configuration"),
+            side_effect=ValueError("invalid secret-token configuration"),
         ), redirect_stdout(stdout), redirect_stderr(stderr):
             exit_code = main(
                 ["check", "--project", "getbill", "--skill", "reviewer-run"]
@@ -637,10 +852,10 @@ class EligibilityTest(unittest.TestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("", stdout.getvalue())
         self.assertEqual(
-            "pitcrew eligibility: invalid runtime configuration\n",
+            "pitcrew eligibility: configuration or local probe is unavailable\n",
             stderr.getvalue(),
         )
-        self.assertLessEqual(len(stderr.getvalue()), 280)
+        self.assertNotIn("secret-token", stderr.getvalue())
 
     def test_direct_script_uses_runtime_config_and_fake_glab(self):
         codex_home = (self.runtime / "codex-home").resolve()

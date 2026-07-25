@@ -18,6 +18,7 @@ else:
 
 
 ProviderRun = Callable[[list[str]], subprocess.CompletedProcess[str]]
+MAX_GITLAB_PAGES = 100
 QUEUE_ROLES = {
     "implementer-run",
     "validator-run",
@@ -66,13 +67,15 @@ def default_provider_run(command: list[str]) -> subprocess.CompletedProcess[str]
 def gitlab_items(
     config: Mapping,
     endpoint: str,
+    page: int,
     provider_run: ProviderRun,
 ) -> list[dict] | None:
     host = config["gitlab"]["host"]
     binary = os.environ.get("GLAB_BIN", "glab")
+    paged_endpoint = f"{endpoint}&{urlencode({'page': page})}"
     try:
         completed = provider_run(
-            [binary, "api", "--hostname", host, endpoint]
+            [binary, "api", "--hostname", host, paged_endpoint]
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -110,33 +113,6 @@ def issue_decision(
             }
         )
     )
-    issues = gitlab_items(config, endpoint, provider_run)
-    if issues is None:
-        return result(
-            "unavailable",
-            config,
-            skill,
-            target_id=None,
-            reason="configured GitLab issue probe failed",
-        )
-    if any(
-        not isinstance(issue.get("iid"), int)
-        or isinstance(issue.get("iid"), bool)
-        or not isinstance(issue.get("labels"), list)
-        or any(
-            not isinstance(label, str)
-            for label in issue.get("labels", [])
-        )
-        for issue in issues
-    ):
-        return result(
-            "unavailable",
-            config,
-            skill,
-            target_id=None,
-            reason="configured GitLab issue probe failed",
-        )
-
     required = {
         "implementer-run": (
             {labels["agent"], states["todo"]},
@@ -152,61 +128,98 @@ def issue_decision(
         ),
         "unblock": ({labels["agent"], states["blocked"]},),
     }[skill]
-    candidates = []
-    for issue in issues:
-        iid = issue.get("iid")
-        item_labels = issue.get("labels")
+    accumulated = []
+    for page_number in range(1, MAX_GITLAB_PAGES + 1):
+        page = gitlab_items(config, endpoint, page_number, provider_run)
         if (
-            isinstance(iid, int)
-            and not isinstance(iid, bool)
-            and isinstance(item_labels, list)
-            and all(isinstance(label, str) for label in item_labels)
-            and any(
-                expected.issubset(set(item_labels))
-                for expected in required
+            page is None
+            or len(page) > 100
+            or any(
+                not isinstance(issue.get("iid"), int)
+                or isinstance(issue.get("iid"), bool)
+                or not isinstance(issue.get("labels"), list)
+                or any(
+                    not isinstance(label, str)
+                    for label in issue.get("labels", [])
+                )
+                for issue in page
             )
         ):
-            candidates.append(issue)
-    candidates.sort(key=lambda issue: issue["iid"])
-    if not candidates:
-        return result(
-            "empty",
-            config,
-            skill,
-            target_id=None,
-            reason="no eligible configured GitLab issue",
-            fingerprint_source=issues,
-        )
+            return result(
+                "unavailable",
+                config,
+                skill,
+                target_id=None,
+                reason="configured GitLab issue probe failed",
+            )
+        accumulated.extend(page)
+        candidates = []
+        for issue in page:
+            item_labels = set(issue["labels"])
+            if any(
+                expected.issubset(item_labels)
+                for expected in required
+            ):
+                candidates.append(issue)
+        if candidates:
+            candidates.sort(key=lambda issue: issue["iid"])
+            return result(
+                "eligible",
+                config,
+                skill,
+                target_id=(
+                    f"{tracker['ticket_prefix']}{candidates[0]['iid']}"
+                ),
+                reason="first ascending issue is eligible",
+                fingerprint_source=accumulated,
+            )
+        if len(page) < 100:
+            return result(
+                "empty",
+                config,
+                skill,
+                target_id=None,
+                reason="no eligible configured GitLab issue",
+                fingerprint_source=accumulated,
+            )
     return result(
-        "eligible",
+        "unavailable",
         config,
         skill,
-        target_id=f"{tracker['ticket_prefix']}{candidates[0]['iid']}",
-        reason="first ascending issue is eligible",
-        fingerprint_source=issues,
+        target_id=None,
+        reason="configured GitLab issue probe failed",
     )
 
 
-def pending_unblock(runtime_dir: Path) -> bool | None:
+def pending_unblock(
+    runtime_dir: Path,
+) -> tuple[str, str | None, object | None]:
     try:
         value = json.loads(
             (runtime_dir / "unblock-state.json").read_text(encoding="utf-8")
         )
     except FileNotFoundError:
-        return False
+        return "missing", None, None
     except (OSError, json.JSONDecodeError):
-        return None
+        return "unavailable", None, None
     if not isinstance(value, dict):
-        return None
+        return "unavailable", None, None
     pending = value.get("pending_question")
     if pending is None:
-        return False
+        return "missing", None, None
     if not isinstance(pending, dict):
-        return None
+        return "unavailable", None, None
     status = pending.get("status")
     if not isinstance(status, str) or not status:
-        return None
-    return status == "blocked"
+        return "unavailable", None, None
+    if status in {"blocked", "selecting"}:
+        return "pending", None, pending
+    if status == "answered":
+        ticket_id = pending.get("ticket_id")
+        if isinstance(ticket_id, str) and ticket_id:
+            return "answered", ticket_id, pending
+        return "unavailable", None, None
+    return "unavailable", None, None
 
 
 def reviewer_decision(
@@ -227,50 +240,53 @@ def reviewer_decision(
             }
         )
     )
-    merge_requests = gitlab_items(config, endpoint, provider_run)
-    if merge_requests is None:
-        return result(
-            "unavailable",
-            config,
-            skill,
-            target_id=None,
-            reason="configured GitLab merge-request probe failed",
-        )
-    if any(
-        not isinstance(item.get("iid"), int)
-        or isinstance(item.get("iid"), bool)
-        for item in merge_requests
-    ):
-        return result(
-            "unavailable",
-            config,
-            skill,
-            target_id=None,
-            reason="configured GitLab merge-request probe failed",
-        )
-    candidates = [
-        item
-        for item in merge_requests
-        if isinstance(item.get("iid"), int)
-        and not isinstance(item.get("iid"), bool)
-    ]
-    candidates.sort(key=lambda item: item["iid"])
-    if not candidates:
-        return result(
-            "empty",
-            config,
-            skill,
-            target_id=None,
-            reason="no authored open merge request requires review",
-            fingerprint_source=merge_requests,
-        )
+    accumulated = []
+    for page_number in range(1, MAX_GITLAB_PAGES + 1):
+        page = gitlab_items(config, endpoint, page_number, provider_run)
+        if (
+            page is None
+            or len(page) > 100
+            or any(
+                not isinstance(item.get("iid"), int)
+                or isinstance(item.get("iid"), bool)
+                for item in page
+            )
+        ):
+            return result(
+                "unavailable",
+                config,
+                skill,
+                target_id=None,
+                reason="configured GitLab merge-request probe failed",
+            )
+        accumulated.extend(page)
+        if page:
+            candidates = sorted(page, key=lambda item: item["iid"])
+            return result(
+                "eligible",
+                config,
+                skill,
+                target_id=(
+                    f"{gitlab['project_path']}!{candidates[0]['iid']}"
+                ),
+                reason="an authored open merge request requires review",
+                fingerprint_source=accumulated,
+            )
+        if len(page) < 100:
+            return result(
+                "empty",
+                config,
+                skill,
+                target_id=None,
+                reason="no authored open merge request requires review",
+                fingerprint_source=accumulated,
+            )
     return result(
-        "eligible",
+        "unavailable",
         config,
         skill,
-        target_id=f"{gitlab['project_path']}!{candidates[0]['iid']}",
-        reason="an authored open merge request requires review",
-        fingerprint_source=merge_requests,
+        target_id=None,
+        reason="configured GitLab merge-request probe failed",
     )
 
 
@@ -389,8 +405,10 @@ def decide(
     if skill == "reviewer-run":
         return reviewer_decision(config, skill, provider_run)
     if skill == "unblock":
-        pending = pending_unblock(runtime_dir)
-        if pending is None:
+        pending_status, target_id, fingerprint_source = pending_unblock(
+            runtime_dir
+        )
+        if pending_status == "unavailable":
             return result(
                 "unavailable",
                 config,
@@ -398,14 +416,23 @@ def decide(
                 target_id=None,
                 reason="unblock state is unavailable",
             )
-        if pending:
+        if pending_status == "pending":
             return result(
                 "empty",
                 config,
                 skill,
                 target_id=None,
                 reason="a human decision is pending",
-                fingerprint_source="pending-human-decision",
+                fingerprint_source=fingerprint_source,
+            )
+        if pending_status == "answered":
+            return result(
+                "eligible",
+                config,
+                skill,
+                target_id=target_id,
+                reason="an answered human decision is ready",
+                fingerprint_source=fingerprint_source,
             )
     if skill in QUEUE_ROLES:
         return issue_decision(config, skill, provider_run)
@@ -432,9 +459,11 @@ def main(argv: list[str] | None = None) -> int:
             args.skill,
             runtime_dir=runtime_root() / args.project,
         )
-    except (KeyError, OSError, TypeError, ValueError) as error:
-        message = str(error)[:240] or error.__class__.__name__
-        print(f"pitcrew eligibility: {message}", file=sys.stderr)
+    except (KeyError, OSError, TypeError, ValueError):
+        print(
+            "pitcrew eligibility: configuration or local probe is unavailable",
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(decision, separators=(",", ":")))
     return 0
