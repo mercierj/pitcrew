@@ -746,6 +746,20 @@ class DashboardServiceTest(unittest.TestCase):
                 kwargs,
             )
 
+    def test_restart_failure_keeps_restart_public_error(self):
+        def runner(args, **kwargs):
+            if "status" in args:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps(schedule_status()),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+
+        with self.assertRaisesRegex(DashboardError, "^failed to restart agent$"):
+            self.service(runner).control("restart", "research-run")
+
     def test_change_model_stops_persists_installs_and_triggers_in_order(self):
         runner = FakeRunner()
         service = self.service(runner)

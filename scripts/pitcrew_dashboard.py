@@ -420,7 +420,13 @@ class DashboardService:
                         related.add(url)
         return sorted(related)
 
-    def _scheduler_control(self, action: str, skill: str) -> None:
+    def _scheduler_control(
+        self,
+        action: str,
+        skill: str,
+        *,
+        error_action: str | None = None,
+    ) -> None:
         result = self._run(
             [
                 "python3",
@@ -434,7 +440,10 @@ class DashboardService:
         )
         if result.returncode:
             raise DashboardError(
-                _redacted_error(result.stderr, f"failed to {action} agent")
+                _redacted_error(
+                    result.stderr,
+                    f"failed to {error_action or action} agent",
+                )
             )
         self._schedule_cache = None
 
@@ -459,7 +468,11 @@ class DashboardService:
             self._enabled_entry(skill)
             if action == "trigger":
                 return {"accepted": True, "pid": self._trigger(skill)}
-            self._scheduler_control("stop" if action == "stop" else "install", skill)
+            self._scheduler_control(
+                "stop" if action == "stop" else "install",
+                skill,
+                error_action=action,
+            )
             return {"accepted": True}
 
     def change_model(self, skill: str, model: str) -> dict:
