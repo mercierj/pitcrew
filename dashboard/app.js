@@ -89,16 +89,30 @@ function finiteNumber(value) {
 }
 
 function formatTokens(value) {
-  const tokens = finiteNumber(value);
-  return tokens == null ? "Données indisponibles" : new Intl.NumberFormat("fr-FR").format(tokens);
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    return new Intl.NumberFormat("fr-FR").format(BigInt(value));
+  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return new Intl.NumberFormat("fr-FR").format(BigInt(value));
+  }
+  return "Données indisponibles";
+}
+
+function formatCost(value) {
+  if (typeof value !== "string") {
+    return "Données indisponibles";
+  }
+  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match) {
+    return "Données indisponibles";
+  }
+  const integer = new Intl.NumberFormat("fr-FR").format(BigInt(match[1]));
+  const decimals = (match[2] || "").padEnd(4, "0").slice(0, 6);
+  return `${integer},${decimals} USD`;
 }
 
 function formatUsd(value) {
-  const numericValue = typeof value === "string" && value.trim() ? Number(value) : value;
-  const cost = finiteNumber(numericValue);
-  return cost == null
-    ? "Données indisponibles"
-    : `${new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(cost)} USD`;
+  return formatCost(value);
 }
 
 function usageMeasured(usage) {
@@ -179,7 +193,7 @@ function createModelControl(agent, modelCatalog) {
   select.value = typeof agent.configured_model === "string" ? agent.configured_model : "";
   select.disabled = pendingSkills.has(skill) || !select.value;
   const previous = select.value;
-  select.addEventListener("change", () => changeModel(skill, select.value, previous));
+  select.addEventListener("change", () => changeModel(skill, select.value, previous, select));
   const latest = document.createElement("p");
   latest.className = "latest-model";
   latest.textContent = `Dernier modèle : ${modelLabel(catalog, agent.latest_model)}`;
@@ -474,12 +488,19 @@ async function control(action, skill) {
   }
 }
 
-async function changeModel(skill, model, previous) {
+function restoreModelSelect(select, previous) {
+  if (select && typeof previous === "string") {
+    select.value = previous;
+  }
+}
+
+async function changeModel(skill, model, previous, select) {
   if (pendingSkills.has(skill) || !skill || !model || model === previous) {
     return;
   }
   if (!window.confirm(`Le passage courant sera interrompu puis relancé immédiatement pour appliquer ${model}.`)) {
-    await refresh({ manual: true });
+    restoreModelSelect(select, previous);
+    void refresh({ manual: true });
     return;
   }
   pendingSkills.add(skill);
@@ -496,11 +517,12 @@ async function changeModel(skill, model, previous) {
     });
     setText(elements.operationalStatus, `Changement de modèle accepté pour ${skill}.`);
   } catch {
+    restoreModelSelect(select, previous);
     setText(elements.operationalStatus, `Impossible de changer le modèle pour ${skill}.`);
   } finally {
     pendingSkills.delete(skill);
     syncSkillButtons(skill);
-    await refresh({ manual: true });
+    await refreshFresh({ manual: true, skipGitLab: true });
   }
 }
 
@@ -516,7 +538,14 @@ function historyPath() {
   return suffix ? `/api/history?${suffix}` : "/api/history";
 }
 
-async function refresh({ manual = false } = {}) {
+async function refreshFresh(options = {}) {
+  if (refreshPromise) {
+    await refreshPromise;
+  }
+  return refresh(options);
+}
+
+async function refresh({ manual = false, skipGitLab = false } = {}) {
   if (refreshPromise) {
     return refreshPromise;
   }
@@ -534,7 +563,7 @@ async function refresh({ manual = false } = {}) {
       renderHistory(history);
 
       const now = Date.now();
-      if (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS) {
+      if (!skipGitLab && (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS)) {
         lastGitLabRefresh = now;
         try {
           const gitlabPath = manual ? "/api/gitlab?refresh=1" : "/api/gitlab";

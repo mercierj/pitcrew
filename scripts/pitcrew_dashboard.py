@@ -55,6 +55,18 @@ def _timestamp(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _present_usage(usage: dict) -> dict:
+    """Keep API token counts JSON-safe without changing aggregation semantics."""
+    tokens = usage.get("tokens", {})
+    return {
+        **usage,
+        "tokens": {
+            field: str(value)
+            for field, value in tokens.items()
+        },
+    }
+
+
 def _redacted_error(message: str, fallback: str) -> str:
     if not message.strip():
         return fallback
@@ -192,8 +204,8 @@ class DashboardService:
                 "estimated_next_pass": estimated,
                 "configured_model": resolve_model(self.config, skill),
                 "latest_model": latest.get("model") if latest is not None else None,
-                "latest_usage": aggregate_usage([latest]) if latest is not None else aggregate_usage([]),
-                "usage_7d": aggregate_usage(records_by_skill.get(skill, [])),
+                "latest_usage": _present_usage(aggregate_usage([latest]) if latest is not None else aggregate_usage([])),
+                "usage_7d": _present_usage(aggregate_usage(records_by_skill.get(skill, []))),
             }
             if entry.get("enabled"):
                 agents.append(normalized)
@@ -215,7 +227,7 @@ class DashboardService:
                 "effective_date": PRICING_EFFECTIVE_DATE,
                 "basis": "API standard token pricing estimate",
             },
-            "usage_7d": aggregate_usage(records),
+            "usage_7d": _present_usage(aggregate_usage(records)),
         }
 
     def _schedule_entries(self, force_refresh: bool = False) -> list[dict]:

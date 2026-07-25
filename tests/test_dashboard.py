@@ -378,7 +378,7 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("gpt-5.6-terra", research["latest_model"])
         self.assertEqual(1, research["latest_usage"]["measured_runs"])
         self.assertEqual(2, research["usage_7d"]["measured_runs"])
-        self.assertEqual(110, research["usage_7d"]["tokens"]["input_tokens"])
+        self.assertEqual("110", research["usage_7d"]["tokens"]["input_tokens"])
         self.assertEqual("0.000488", research["usage_7d"]["estimated_cost_usd"])
         self.assertEqual(0, roles["manager-run"]["latest_usage"]["measured_runs"])
         self.assertEqual(1, roles["manager-run"]["latest_usage"]["unmeasured_runs"])
@@ -397,7 +397,7 @@ class DashboardServiceTest(unittest.TestCase):
         )
         self.assertEqual(4, snapshot["usage_7d"]["measured_runs"])
         self.assertEqual(1, snapshot["usage_7d"]["unmeasured_runs"])
-        self.assertEqual(125, snapshot["usage_7d"]["tokens"]["input_tokens"])
+        self.assertEqual("125", snapshot["usage_7d"]["tokens"]["input_tokens"])
         self.assertEqual("0.000544", snapshot["usage_7d"]["estimated_cost_usd"])
         self.assertEqual(
             [
@@ -413,6 +413,46 @@ class DashboardServiceTest(unittest.TestCase):
             {"text": True, "capture_output": True, "check": False},
             runner.calls[0][1],
         )
+
+    def test_snapshot_serializes_usage_tokens_as_exact_decimal_strings(self):
+        huge = 10**100
+        record = {
+            "project": "getbill",
+            "skill": "research-run",
+            "started_at": "2026-07-24T11:29:00+00:00",
+            "finished_at": "2026-07-24T11:30:00+00:00",
+            "outcome": "success",
+            "summary": "large usage",
+            "exit_code": 0,
+            "model": "gpt-5.6-terra",
+            "usage": {
+                "input_tokens": huge,
+                "cached_input_tokens": huge,
+                "cache_write_tokens": huge,
+                "output_tokens": huge,
+                "total_tokens": huge * 4,
+            },
+        }
+        (self.runtime / "history.jsonl").write_text(
+            json.dumps(record) + "\n",
+            encoding="utf-8",
+        )
+
+        snapshot = self.service(FakeRunner()).snapshot()
+
+        expected = str(huge)
+        for usage in (
+            snapshot["usage_7d"],
+            snapshot["agents"][0]["latest_usage"],
+            snapshot["agents"][0]["usage_7d"],
+            snapshot["disabled_roles"][0]["latest_usage"],
+            snapshot["disabled_roles"][0]["usage_7d"],
+        ):
+            self.assertEqual(
+                expected if usage["measured_runs"] else "0",
+                usage["tokens"]["input_tokens"],
+            )
+            self.assertTrue(all(isinstance(value, str) for value in usage["tokens"].values()))
 
     def test_snapshot_uses_default_models_when_runtime_agents_are_absent(self):
         config = runtime_config()
@@ -1570,19 +1610,41 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("Sous-total mesuré", self.javascript)
         self.assertIn("formatTokens", self.javascript)
         self.assertIn("formatUsd", self.javascript)
-        self.assertIn('typeof value === "string" && value.trim()', self.javascript)
+        self.assertIn('typeof value === "string" && /^\\d+$/.test(value)', self.javascript)
+        self.assertIn("BigInt(value)", self.javascript)
+        formatter_source = self.javascript.split("function formatTokens", 1)[1].split("function usageMeasured", 1)[0]
+        self.assertNotIn("Number(value)", formatter_source)
         self.assertNotIn("innerHTML", self.javascript)
 
     def test_model_change_is_separate_confirmed_and_session_authenticated(self):
         self.assertRegex(
             self.javascript,
-            r"async function changeModel\(skill, model, previous\)",
+            r"async function changeModel\(skill, model, previous, select\)",
         )
         self.assertIn("passage courant sera interrompu", self.javascript)
         self.assertIn("relancé immédiatement", self.javascript)
         self.assertIn('JSON.stringify({ action: "change-model", skill, model })', self.javascript)
         self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertNotIn('"change-model"', self.javascript.split("const ACTIONS", 1)[1].split(";", 1)[0])
+        self.assertIn("restoreModelSelect", self.javascript)
+        self.assertIn("await refreshFresh({ manual: true, skipGitLab: true });", self.javascript)
+        change_source = self.javascript.split("async function changeModel", 1)[1].split("function historyPath", 1)[0]
+        self.assertLess(
+            change_source.index("restoreModelSelect(select, previous);"),
+            change_source.index("void refresh({ manual: true });"),
+        )
+        self.assertLess(
+            change_source.rindex("restoreModelSelect(select, previous);"),
+            change_source.index("await refreshFresh({ manual: true, skipGitLab: true });"),
+        )
+
+    def test_model_change_waits_for_an_inflight_refresh_before_a_fresh_status_fetch(self):
+        self.assertRegex(
+            self.javascript,
+            r"async function refreshFresh\([^)]*\)\s*{\s*"
+            r"if \(refreshPromise\) \{\s*await refreshPromise;\s*}\s*"
+            r"return refresh\(",
+        )
 
     def test_usage_and_model_styles_are_compact_and_responsive(self):
         for selector in (".agent-model", ".usage-section", ".usage-grid", ".usage-note"):
