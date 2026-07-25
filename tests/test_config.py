@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import subprocess
@@ -98,25 +99,26 @@ class ConfigTest(unittest.TestCase):
             env = {"CODEX_HOME": str(Path(temp).resolve())}
             destination = write_project(ROOT / "profiles/generic.json", "example", env)
             first_write_entered = threading.Event()
-            second_snapshot_reached = threading.Event()
+            second_attempted = threading.Event()
+            second_acquired = threading.Event()
             release_first_write = threading.Event()
             write_count = 0
-            snapshot_count = 0
             write_count_lock = threading.Lock()
             original_replace = __import__(
                 "scripts.pitcrew_config", fromlist=["_replace_runtime_config"]
             )._replace_runtime_config
-            original_load = __import__(
-                "scripts.pitcrew_config", fromlist=["_load_runtime_config_from_fd"]
-            )._load_runtime_config_from_fd
+            original_flock = __import__("scripts.pitcrew_config", fromlist=["fcntl"]).fcntl.flock
 
-            def observe_snapshot(project_fd):
-                nonlocal snapshot_count
-                with write_count_lock:
-                    snapshot_count += 1
-                    if snapshot_count == 2:
-                        second_snapshot_reached.set()
-                return original_load(project_fd)
+            def observe_flock(lock_fd, operation):
+                is_second_acquisition = (
+                    threading.current_thread().name == "second-model-update"
+                    and operation == fcntl.LOCK_EX
+                )
+                if is_second_acquisition:
+                    second_attempted.set()
+                original_flock(lock_fd, operation)
+                if is_second_acquisition:
+                    second_acquired.set()
 
             def delay_first_write(parent_fd, serialized):
                 nonlocal write_count
@@ -140,8 +142,8 @@ class ConfigTest(unittest.TestCase):
                     errors.append(error)
 
             with (
-                mock.patch("scripts.pitcrew_config._load_runtime_config_from_fd", observe_snapshot),
                 mock.patch("scripts.pitcrew_config._replace_runtime_config", delay_first_write),
+                mock.patch("scripts.pitcrew_config.fcntl.flock", observe_flock),
             ):
                 first = threading.Thread(
                     target=update, args=("research-run", "gpt-5.6-luna")
@@ -149,14 +151,24 @@ class ConfigTest(unittest.TestCase):
                 first.start()
                 self.assertTrue(first_write_entered.wait(timeout=2), "first update did not start")
                 second = threading.Thread(
-                    target=update, args=("qa-run", "gpt-5.6-sol")
+                    target=update,
+                    args=("qa-run", "gpt-5.6-sol"),
+                    name="second-model-update",
                 )
                 second.start()
+                self.assertTrue(
+                    second_attempted.wait(timeout=2),
+                    "second update did not attempt to acquire the runtime config lock",
+                )
                 self.assertFalse(
-                    second_snapshot_reached.wait(timeout=0.2),
-                    "second update entered the protected snapshot while the first held the lock",
+                    second_acquired.is_set(),
+                    "second update acquired the runtime config lock while the first held it",
                 )
                 release_first_write.set()
+                self.assertTrue(
+                    second_acquired.wait(timeout=2),
+                    "second update did not acquire the runtime config lock after release",
+                )
                 first.join(timeout=2)
                 second.join(timeout=2)
 
