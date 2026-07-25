@@ -143,6 +143,36 @@ test("buildActionQueue skips invalid keys and deduplicates sorted entries", () =
   assert.equal(queue[0].timestamp, "2026-07-26T09:00:00Z");
 });
 
+test("buildActionQueue sorts valid dates before absent or invalid dates", () => {
+  const queue = buildActionQueue({
+    decisions: { decisions: [{ ticket_id: "decision", asked_at: "not-a-date" }] },
+    snapshot: { agents: [
+      { skill: "zeta", health: "warning", latest_history: { finished_at: "2026-07-26T09:00:00Z" } },
+      { skill: "alpha", health: "failed" },
+      { skill: "beta", health: "warning", latest_history: { finished_at: "not-a-date" } },
+    ] },
+    work: { merge_requests: [
+      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/zeta", updated_at: "2026-07-26T09:00:00Z" },
+      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/alpha" },
+      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/beta", updated_at: "not-a-date" },
+    ] },
+    proposals: { proposals: [
+      { id: "zeta", created_at: "2026-07-26T09:00:00Z" },
+      { id: "alpha" },
+      { id: "beta", updated_at: "not-a-date" },
+    ] },
+  });
+
+  assert.deepEqual(queue.filter(({ kind }) => kind === "decision").map(({ key }) => key), ["decision:decision"]);
+  assert.deepEqual(queue.filter(({ kind }) => kind === "agent-failure").map(({ key }) => key), ["agent:zeta", "agent:alpha", "agent:beta"]);
+  assert.deepEqual(queue.filter(({ kind }) => kind === "merge-request").map(({ key }) => key), [
+    "merge_request:https://gitlab.example/mr/zeta",
+    "merge_request:https://gitlab.example/mr/alpha",
+    "merge_request:https://gitlab.example/mr/beta",
+  ]);
+  assert.deepEqual(queue.filter(({ kind }) => kind === "proposal").map(({ key }) => key), ["proposal:zeta", "proposal:alpha", "proposal:beta"]);
+});
+
 test("buildActionQueue excludes merge requests targeting protected deployment branches", () => {
   const queue = buildActionQueue({
     work: { merge_requests: [

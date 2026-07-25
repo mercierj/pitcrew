@@ -19,6 +19,11 @@ const currentParisDay = () => dayInParis(new Date());
 
 const timestampOf = (resource) => resource?.created_at || resource?.asked_at || resource?.updated_at || "";
 
+const timestamp = (value) => {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+};
+
 export function resourceKey(resource, fallbackType = "resource") {
   const type = typeof resource?.resource_type === "string" && resource.resource_type
     ? resource.resource_type
@@ -108,7 +113,7 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
   }
   const sorted = actions.sort((left, right) => (
     left.priority - right.priority
-    || String(left.timestamp).localeCompare(String(right.timestamp))
+    || timestamp(left.timestamp) - timestamp(right.timestamp)
     || left.key.localeCompare(right.key)
   ));
   const keys = new Set();
