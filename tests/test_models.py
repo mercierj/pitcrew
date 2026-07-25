@@ -16,6 +16,8 @@ class ModelCatalogTest(unittest.TestCase):
     def test_every_role_has_a_supported_default(self):
         self.assertEqual(
             {
+                "security-run": "gpt-5.6-sol",
+                "product-discovery-run": "gpt-5.6-terra",
                 "research-run": "gpt-5.6-terra",
                 "manager-run": "gpt-5.6-luna",
                 "implementer-run": "gpt-5.6-sol",

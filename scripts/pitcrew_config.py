@@ -96,8 +96,17 @@ def validate(config: Mapping[str, Any]) -> None:
             for key in ("agent", "investigate", "quick_win", "bug", "improvement"):
                 if not isinstance(labels.get(key), str) or not labels[key]:
                     raise ConfigError(f"gitlab.tracker.labels.{key} must be a non-empty string")
+            for key in (
+                "proposal", "proposal_suggested", "proposal_approved",
+                "proposal_dismissed", "category_security", "category_feature",
+            ):
+                if key in labels and (not isinstance(labels.get(key), str) or not labels[key]):
+                    raise ConfigError(f"gitlab.tracker.labels.{key} must be a non-empty string")
             for key in ("todo", "processing", "review", "blocked", "done"):
                 if not isinstance(states.get(key), str) or not states[key]:
+                    raise ConfigError(f"gitlab.tracker.states.{key} must be a non-empty string")
+            for key in ("suggested", "approved", "dismissed"):
+                if key in states and (not isinstance(states.get(key), str) or not states[key]):
                     raise ConfigError(f"gitlab.tracker.states.{key} must be a non-empty string")
 
     if config.get("schema_version") != 1:

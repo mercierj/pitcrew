@@ -159,6 +159,8 @@ class ReferenceContractTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("git checkout -- .", implementer)
+        self.assertIn("EVENTS_FILE=$(mktemp /tmp/implementer-events.XXXXXX)", implementer)
+        self.assertNotIn("trap 'rm -f", implementer)
 
         self.assert_markers(
             "references/DIRECTED-TARGET.md",
@@ -221,6 +223,15 @@ class ReferenceContractTest(unittest.TestCase):
                 )
                 self.assertIn("graphify-out/converted", text)
                 self.assertIn("Never print or quote discovered PII", text)
+                self.assertIn("research_coverage.py", text)
+                self.assertIn("Coverage helper", text)
+                self.assertIn("STEP 1.6. Pick the coverage area", text)
+                self.assertIn("least recently visited area", text)
+                self.assertIn("starts a new epoch", text)
+                self.assertIn("must not\nadvance `visited`", text)
+                self.assertIn("coverage_area", text)
+                self.assertIn("fingerprints", text)
+                self.assertIn("Git tree fingerprint", text)
 
         for name in ("research-run", "qa-run"):
             self.assert_markers(
@@ -263,6 +274,17 @@ class ReferenceContractTest(unittest.TestCase):
             "AWS credentials/configuration",
         )
 
+    def test_investigation_route_does_not_require_implementer_label(self):
+        investigate = (ROOT / "skills/investigate-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        manager = (ROOT / "skills/manager-run/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("investigate-labeled tickets", investigate)
+        self.assertIn("`$INVESTIGATE_LABEL` is the routing gate", investigate)
+        self.assertNotIn("must have `$AGENT_LABEL`", investigate)
+        self.assertIn("NOT `$AGENT_LABEL`", manager)
+
     def test_all_skills_are_codex_native(self):
         forbidden = (
             "~/.claude",
@@ -304,6 +326,10 @@ class ReferenceContractTest(unittest.TestCase):
             "choices: $choices",
             "context: $context",
             "status: \"selecting\"",
+            "pending_question.status=answered",
+            "answer must match one of the stored",
+            "skip STEP 6",
+            "continue at STEP 7",
         ):
             self.assertIn(marker, unblock)
 

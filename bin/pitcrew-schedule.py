@@ -26,6 +26,8 @@ PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 LABEL_PREFIX = "io.getbill.pitcrew"
 
 SCHEDULE = (
+    ("security-run", 86400, True, ""),
+    ("product-discovery-run", 604800, True, ""),
     ("research-run", 1800, True, ""),
     ("manager-run", 3600, True, ""),
     ("implementer-run", 900, True, ""),
@@ -37,7 +39,7 @@ SCHEDULE = (
     ("coverage-run", 43200, False, "QA flow and architecture repositories are not configured"),
     ("dev-verify-run", 900, False, "live dev flow verification is not configured"),
     ("ops-run", 600, False, "repos[].health is not configured"),
-    ("unblock", 1800, False, "requires a human response"),
+    ("unblock", 1800, True, ""),
     ("releaser-run", 900, False, "release autonomy is off for GetBill"),
 )
 

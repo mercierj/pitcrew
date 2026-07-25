@@ -114,6 +114,12 @@ def create_server(
             if parsed.path == "/api/status":
                 self._service_json(service.snapshot)
                 return
+            if parsed.path == "/api/decisions":
+                self._service_json(service.decisions)
+                return
+            if parsed.path == "/api/proposals":
+                self._service_json(service.proposals_snapshot)
+                return
             if parsed.path == "/api/history":
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 skill = query.get("skill", [None])[0]
@@ -210,6 +216,73 @@ def create_server(
                     return
                 try:
                     result = service.global_control(action)
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
+            if action == "answer-decision":
+                if (
+                    set(request) != {"action", "ticket_id", "answer", "notes"}
+                    or not all(isinstance(request.get(field), str) for field in ("ticket_id", "answer", "notes"))
+                    or not request["ticket_id"]
+                    or not request["answer"]
+                    or len(request["notes"]) > 4000
+                ):
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.submit_decision(
+                        request["ticket_id"], request["answer"], request["notes"]
+                    )
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
+            if action == "decide-proposal":
+                if (
+                    set(request) != {"action", "proposal_id", "decision", "reason"}
+                    or not all(isinstance(request.get(field), str) for field in ("proposal_id", "decision", "reason"))
+                    or not request["proposal_id"]
+                    or request["decision"] not in {"approve", "reject", "investigate"}
+                    or len(request["reason"]) > 4000
+                ):
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                if request["decision"] == "reject" and not request["reason"].strip():
+                    self._send_json(400, {"error": "rejection reason required"})
+                    return
+                try:
+                    result = service.decide_proposal(
+                        request["proposal_id"], request["decision"], request["reason"]
+                    )
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
+            if action == "merge-merge-request":
+                iid = request.get("iid")
+                if (
+                    set(request) != {"action", "iid"}
+                    or isinstance(iid, bool)
+                    or not isinstance(iid, int)
+                    or iid <= 0
+                ):
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.merge_merge_request(iid)
                 except DashboardError:
                     self._send_json(403, {"error": "action rejected"})
                     return

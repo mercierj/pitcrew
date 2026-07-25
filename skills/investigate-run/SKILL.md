@@ -115,7 +115,7 @@ Do NOT enumerate the open questions. Do NOT explain the findings. Do NOT engage 
 3. **NEVER call third-party suppliers, prod URLs, or anything that costs money.** Dev BFF / dev MCP / local-only is fine. If a flow file requires real third-party-provider traffic, skip that path.
 5. **NEVER take more than 15 minutes per investigation.** If you can't reach a conclusion, post a partial-findings comment with "could not converge — recommend human pickup" and bail. Better to escalate fast than to spin.
 6. **NEVER drop the `$INVESTIGATE_LABEL` label** on the ticket when changing state. Label-replace gotcha applies (re-pass full label set on every `save_issue`).
-7. **NEVER pick up tickets without BOTH `$AGENT_LABEL` AND `$INVESTIGATE_LABEL` labels.** Those are the routing gate.
+7. **Pick up tickets with `$INVESTIGATE_LABEL`.** This route intentionally does not require `$AGENT_LABEL`: `manager-run` omits the implementer label from risky findings so they cannot be implemented unattended. `$INVESTIGATE_LABEL` is the routing gate for this role.
 
 ═══ STATE FILE ═══
 
@@ -169,7 +169,7 @@ fi
 LIST_ELIGIBLE_WORK(label="$INVESTIGATE_LABEL", state="$STATE_TODO", team="$TRACKER_TEAM", limit=30)
 ```
 
-Then filter: also must have `$AGENT_LABEL`. (`list_issues` only accepts one label filter at a time; verify both client-side.)
+The query already selects the investigation route. Do not filter these tickets out for lacking `$AGENT_LABEL`; that label is intentionally absent from risky findings routed here. (`list_issues` only accepts one label filter at a time; verify the configured investigation label client-side.)
 
 If zero candidates, log `[investigate-run] No investigation tickets queued. Done.`,
 return the structured no-op, and exit cleanly.

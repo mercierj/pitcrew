@@ -14,6 +14,8 @@ primary installation, runtime, and documentation path.
 | Skill | Role |
 |---|---|
 | `$pitcrew:research-run` | Record one grounded codebase finding. |
+| `$pitcrew:security-run` | Record one grounded security proposal. |
+| `$pitcrew:product-discovery-run` | Record one feature proposal for dashboard approval. |
 | `$pitcrew:qa-run` | Exercise one configured QA flow. |
 | `$pitcrew:manager-run` | Pace findings into the configured tracker. |
 | `$pitcrew:implementer-run` | Claim and implement one eligible item. |
@@ -107,8 +109,16 @@ confirmation. While stopped, it displays **Exécutions bloquées** and disables
 per-agent controls. Resuming is explicit and reinstalls schedules without
 starting an immediate pass.
 
-The installer deliberately omits human-gated, release, production, and
-not-yet-configured QA/ops roles. Each installed job performs one bounded pass,
+The GitLab panel also lists open merge requests with their source and target
+branches, author, and pipeline status. **Fusionner et supprimer la branche**
+merges the selected MR even when its pipeline is not green, then deletes the
+source branch after a successful merge. Merge requests targeting `preprod` or
+`prod` remain blocked and require the release workflow.
+
+The installer deliberately omits release, production, and not-yet-configured
+QA/ops roles. `unblock` is scheduled, but remains human-gated: its automatic
+pass only publishes a pending question and never chooses an answer. Each
+installed job performs one bounded pass,
 uses a non-overlapping per-role lock, and returns. Scheduled transcripts are
 discarded; only the latest bounded role summary is retained.
 

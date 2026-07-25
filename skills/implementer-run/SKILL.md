@@ -273,7 +273,8 @@ If you build the digest WITHOUT running the per-change `INSPECT_CHANGE --json re
 
 ```text
 EVENTS_FILE=$(mktemp /tmp/implementer-events.XXXXXX)
-trap 'rm -f "$EVENTS_FILE"' EXIT
+# Do not run shell deletion from the Codex pass. The file is a bounded /tmp
+# artifact; the host cleans it up, and finalization must not fail on cleanup.
 
 log_event() {
   printf '%s\n' "$*" >> "$EVENTS_FILE"

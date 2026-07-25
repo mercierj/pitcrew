@@ -5,6 +5,8 @@
   "repos": [],
   "release": {"autonomy": "off"},
   "agents": {
+    "security-run": {"model": "gpt-5.6-sol"},
+    "product-discovery-run": {"model": "gpt-5.6-terra"},
     "research-run": {"model": "gpt-5.6-terra"},
     "manager-run": {"model": "gpt-5.6-luna"},
     "implementer-run": {"model": "gpt-5.6-sol"},

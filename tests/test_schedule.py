@@ -48,6 +48,7 @@ class ScheduleTest(unittest.TestCase):
             "validator-run",
             "investigate-run",
             "stale-sweep",
+            "unblock",
         ):
             self.assertTrue(schedule[skill]["enabled"], skill)
 
@@ -56,7 +57,6 @@ class ScheduleTest(unittest.TestCase):
             "coverage-run",
             "dev-verify-run",
             "ops-run",
-            "unblock",
             "releaser-run",
         ):
             self.assertFalse(schedule[skill]["enabled"], skill)
@@ -117,7 +117,7 @@ class ScheduleTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             plists = sorted(output.glob("io.getbill.pitcrew.getbill.*.plist"))
-            self.assertEqual(7, len(plists))
+            self.assertEqual(10, len(plists))
 
             research = output / "io.getbill.pitcrew.getbill.research-run.plist"
             with research.open("rb") as handle:
@@ -204,7 +204,7 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(payload)
             self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
             bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
-            self.assertEqual(7, len(bootouts))
+            self.assertEqual(10, len(bootouts))
 
     def test_install_is_rejected_while_globally_stopped_and_resume_reinstalls(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -394,11 +394,13 @@ class ScheduleTest(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             status = json.loads(result.stdout)
-            self.assertEqual(13, len(status))
+            self.assertEqual(15, len(status))
             self.assertEqual(
                 {entry["skill"] for entry in status},
                 {
                     "research-run",
+                    "security-run",
+                    "product-discovery-run",
                     "manager-run",
                     "implementer-run",
                     "reviewer-run",
@@ -413,7 +415,7 @@ class ScheduleTest(unittest.TestCase):
                     "releaser-run",
                 },
             )
-            self.assertEqual(13, len(calls.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual(15, len(calls.read_text(encoding="utf-8").splitlines()))
 
     def test_launchctl_failure_scrubs_credential_formats_and_limits_stderr(self):
         cases = (

@@ -1,0 +1,57 @@
+<h2>Décisions à prendre dans Pitcrew</h2>
+<p class="subtitle">Choisis la présentation qui te permettra de comprendre puis valider une décision humaine.</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">Option A · Bandeau prioritaire</div>
+    <div class="mockup-body">
+      <div class="placeholder" style="background:#fff4d6;border-color:#d8a83e">
+        <strong>⚠ 1 décision requise</strong><br>
+        <span>getbill1/getbill#1 · Investigation terminée</span>
+      </div>
+      <div class="section">
+        <h3>Décision à prendre</h3>
+        <p>Les résultats de l’agent sont prêts. Que veux-tu faire ?</p>
+        <div style="display:grid;gap:8px">
+          <button class="mock-button">Lancer la correction proposée</button>
+          <button class="mock-button">Approfondir l’investigation</button>
+          <button class="mock-button">Fermer sans action</button>
+        </div>
+      </div>
+      <div class="placeholder">Findings · cause · risques · fichiers concernés</div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">Option B · Centre de décisions</div>
+    <div class="mockup-body">
+      <div class="mock-nav">Vue d’ensemble · Agents · Décisions <strong>1</strong> · GitLab</div>
+      <div class="section">
+        <h3>Décisions à prendre</h3>
+        <div class="card" style="border-left:4px solid #a32620">
+          <strong>#1 · Stripe webhook validation</strong>
+          <p>Investigation terminée · 3 findings · risque élevé</p>
+          <button class="mock-button">Ouvrir le contexte</button>
+        </div>
+        <div class="card">
+          <strong>#2 · Autre ticket bloqué</strong>
+          <p>Réponse en attente</p>
+        </div>
+      </div>
+      <div class="placeholder">Le contexte complet s’ouvre dans un panneau détaillé.</div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">Les deux options gardent les choix et le contexte. A met la décision sous tes yeux immédiatement ; B sépare la file de décisions du reste du dashboard.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Bandeau prioritaire</h3><p>Recommandé : impossible de manquer une décision urgente.</p></div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>Centre de décisions</h3><p>Plus propre si plusieurs tickets sont bloqués en même temps.</p></div>
+  </div>
+</div>

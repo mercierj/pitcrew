@@ -1,6 +1,7 @@
 import http.client
 import importlib.util
 import json
+import os
 import re
 import socket
 import subprocess
@@ -158,6 +159,10 @@ def gitlab_merge_requests():
             "title": "First MR",
             "state": "opened",
             "web_url": "https://gitlab.com/getbill1/getbill/-/merge_requests/11",
+            "source_branch": "fix/payment-summary",
+            "target_branch": "develop",
+            "author": {"username": "agent-sol"},
+            "head_pipeline": {"status": "failed"},
             "description": "Closes #1",
             "references": {
                 "short": "!11",
@@ -170,6 +175,8 @@ def gitlab_merge_requests():
             "title": "Second MR",
             "state": "merged",
             "web_url": "https://gitlab.com/getbill1/getbill/-/merge_requests/12",
+            "source_branch": "fix/old-work",
+            "target_branch": "develop",
             "description": "",
             "references": {
                 "short": "!12",
@@ -337,6 +344,26 @@ class DashboardServiceTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_pending_decision(self):
+        (self.runtime / "unblock-state.json").write_text(
+            json.dumps(
+                {
+                    "asked": {},
+                    "pending_question": {
+                        "ticket_id": "getbill1/getbill#1",
+                        "asked_at": "2026-07-25T12:00:00Z",
+                        "status": "blocked",
+                        "question": "What should happen next?",
+                        "choices": ["Ship it", "Investigate more"],
+                        "shape": "generic",
+                        "context": {"ticket_id": "getbill1/getbill#1"},
+                    },
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def test_snapshot_normalizes_schedule_history_health_and_next_pass(self):
         self.write_history()
         runner = FakeRunner()
@@ -362,6 +389,10 @@ class DashboardServiceTest(unittest.TestCase):
             ):
                 self.assertIn(field, role)
         research = roles["research-run"]
+        self.assertEqual(
+            "Use when scanning one configured repository for high-confidence drift or hardening findings.",
+            research["role_description"],
+        )
         self.assertTrue(research["loaded"])
         self.assertFalse(research["running"])
         self.assertEqual(1800, research["interval_seconds"])
@@ -416,6 +447,70 @@ class DashboardServiceTest(unittest.TestCase):
             runner.calls[0][1],
         )
 
+    def test_decisions_returns_pending_question_with_context(self):
+        self.write_pending_decision()
+        service = self.service(FakeRunner())
+
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            side_effect=[
+                {
+                    "title": "Stripe webhook validation",
+                    "description": "Investigate the validation path.",
+                    "web_url": "https://gitlab.com/getbill1/getbill/-/issues/1",
+                },
+                [{"body": "## Findings\nRoot cause is in webhook handling."}],
+            ],
+        ):
+            decision = service.decisions()
+
+        pending = decision["pending"]
+        self.assertEqual("getbill1/getbill#1", pending["ticket_id"])
+        self.assertEqual("What should happen next?", pending["question"])
+        self.assertEqual(["Ship it", "Investigate more"], pending["choices"])
+        self.assertEqual("Stripe webhook validation", pending["ticket"]["title"])
+        self.assertIn("Root cause", pending["findings"])
+
+    def test_proposals_are_listed_and_rejection_is_persisted(self):
+        proposal_path = self.runtime / "proposals.json"
+        proposal_path.write_text(json.dumps([{
+            "id": "feature-1", "category": "feature", "severity": "medium",
+            "title": "Payment summary", "summary": "Users need the total first.",
+            "evidence": ["templates/payment/show.html.twig:42"],
+            "recommendation": "Show the total above the detail.",
+            "status": "suggested", "source": "product-discovery-run",
+        }]), encoding="utf-8")
+        service = self.service(FakeRunner())
+        self.assertEqual(["feature-1"], [item["id"] for item in service.proposals_snapshot()["proposals"]])
+        result = service.decide_proposal("feature-1", "reject", "Not in current scope")
+        self.assertEqual("dismissed", result["proposal"]["status"])
+        self.assertEqual([], service.proposals_snapshot()["proposals"])
+
+    def test_submit_decision_persists_answer_and_triggers_unblock(self):
+        self.write_pending_decision()
+        service = self.service(FakeRunner())
+        process = mock.Mock(pid=2468)
+
+        with mock.patch(
+            "scripts.pitcrew_dashboard.subprocess.Popen",
+            return_value=process,
+        ) as starter:
+            result = service.submit_decision(
+                "getbill1/getbill#1",
+                "Ship it",
+                "Approved from dashboard",
+            )
+
+        self.assertEqual({"accepted": True, "pid": 2468}, result)
+        pending = json.loads((self.runtime / "unblock-state.json").read_text())[
+            "pending_question"
+        ]
+        self.assertEqual("answered", pending["status"])
+        self.assertEqual("Ship it", pending["answer"])
+        self.assertEqual("Approved from dashboard", pending["notes"])
+        self.assertEqual("unblock", starter.call_args.args[0][1])
+
     def test_snapshot_exposes_live_status_for_running_agents(self):
         live_dir = self.runtime / "live"
         live_dir.mkdir()
@@ -426,14 +521,23 @@ class DashboardServiceTest(unittest.TestCase):
                     "skill": "manager-run",
                     "model": "gpt-5.6-sol",
                     "started_at": "2026-07-24T11:58:00+00:00",
-                    "pid": 4321,
+                    "pid": os.getpid(),
                     "phase": "Exécution du passage courant",
                 }
             ),
             encoding="utf-8",
         )
 
-        snapshot = self.service(FakeRunner()).snapshot()
+        schedule = [
+            {
+                **entry,
+                "running": False,
+            }
+            if entry["skill"] == "manager-run"
+            else entry
+            for entry in schedule_status()
+        ]
+        snapshot = self.service(FakeRunner(schedule=schedule)).snapshot()
         roles = {role["skill"]: role for role in snapshot["agents"]}
 
         self.assertEqual(
@@ -442,11 +546,12 @@ class DashboardServiceTest(unittest.TestCase):
                 "skill": "manager-run",
                 "model": "gpt-5.6-sol",
                 "started_at": "2026-07-24T11:58:00+00:00",
-                "pid": 4321,
+                "pid": os.getpid(),
                 "phase": "Exécution du passage courant",
             },
             roles["manager-run"]["live_status"],
         )
+        self.assertTrue(roles["manager-run"]["running"])
 
     def test_snapshot_keeps_latest_history_but_uses_latest_measured_usage(self):
         records = (
@@ -577,7 +682,7 @@ class DashboardServiceTest(unittest.TestCase):
             "https://attacker.invalid/other/project/-/merge_requests/999",
             todo["related_merge_requests"],
         )
-        self.assertEqual(2, len(work["merge_requests"]))
+        self.assertEqual(1, len(work["merge_requests"]))
         encoded = "getbill1%2Fgetbill"
         self.assertEqual(
             [
@@ -591,10 +696,104 @@ class DashboardServiceTest(unittest.TestCase):
             [
                 "glab",
                 "api",
-                f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
+            f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
             ],
             runner.calls[1][0],
         )
+
+    def test_gitlab_work_lists_only_open_merge_requests_with_display_fields(self):
+        runner = FakeRunner()
+        work = self.service(runner).gitlab_work(force_refresh=True)
+
+        self.assertEqual([11], [mr["iid"] for mr in work["merge_requests"]])
+        merge_request = work["merge_requests"][0]
+        self.assertEqual("fix/payment-summary", merge_request["source_branch"])
+        self.assertEqual("develop", merge_request["target_branch"])
+        self.assertEqual("agent-sol", merge_request["author_username"])
+        self.assertEqual("failed", merge_request["pipeline_status"])
+        self.assertIn(
+            "merge_requests?scope=all&per_page=100&page=1",
+            runner.calls[1][0][2],
+        )
+
+    def test_merge_merge_request_merges_then_deletes_source_branch(self):
+        service = self.service(FakeRunner())
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            return_value={
+                "iid": 11,
+                "state": "opened",
+                "source_branch": "fix/payment-summary",
+                "target_branch": "develop",
+                "sha": "head-sha-11",
+            },
+        ), mock.patch.object(service, "_gitlab_mutation", return_value="") as mutation:
+            result = service.merge_merge_request(11)
+
+        self.assertEqual(
+            {
+                "accepted": True,
+                "partial": False,
+                "iid": 11,
+                "source_branch": "fix/payment-summary",
+                "target_branch": "develop",
+            },
+            result,
+        )
+        self.assertEqual(
+            [
+                mock.call(
+                    "projects/getbill1%2Fgetbill/merge_requests/11/merge",
+                    "PUT",
+                    {"sha": "head-sha-11"},
+                ),
+                mock.call(
+                    "projects/getbill1%2Fgetbill/repository/branches/fix%2Fpayment-summary",
+                    "DELETE",
+                ),
+            ],
+            mutation.call_args_list,
+        )
+
+    def test_merge_merge_request_does_not_delete_after_failed_merge(self):
+        service = self.service(FakeRunner())
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            return_value={
+                "state": "opened",
+                "source_branch": "fix/payment-summary",
+                "target_branch": "develop",
+                "sha": "head-sha-11",
+            },
+        ), mock.patch.object(
+            service,
+            "_gitlab_mutation",
+            side_effect=DashboardError("merge failed"),
+        ) as mutation:
+            with self.assertRaises(DashboardError):
+                service.merge_merge_request(11)
+
+        mutation.assert_called_once_with(
+            "projects/getbill1%2Fgetbill/merge_requests/11/merge", "PUT", {"sha": "head-sha-11"}
+        )
+
+    def test_merge_merge_request_rejects_deployment_targets(self):
+        service = self.service(FakeRunner())
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            return_value={
+                "state": "opened",
+                "source_branch": "fix/payment-summary",
+                "target_branch": "prod",
+            },
+        ), mock.patch.object(service, "_gitlab_mutation") as mutation:
+            with self.assertRaises(DashboardError):
+                service.merge_merge_request(11)
+
+        mutation.assert_not_called()
 
     def test_gitlab_collects_all_issue_and_merge_request_pages(self):
         issues = []
@@ -1074,6 +1273,18 @@ class FakeDashboardService:
             raise DashboardError("action rejected")
         return {"accepted": True, "pid": 6789, "model": model}
 
+    def decisions(self):
+        self.calls.append(("decisions",))
+        return {"pending": None}
+
+    def submit_decision(self, ticket_id, answer, notes):
+        self.calls.append(("submit_decision", ticket_id, answer, notes))
+        return {"accepted": True, "pid": 2468}
+
+    def merge_merge_request(self, iid):
+        self.calls.append(("merge_merge_request", iid))
+        return {"accepted": True, "partial": False, "iid": iid}
+
 
 class DashboardEntryPointTest(unittest.TestCase):
     def test_executable_imports_project_modules_outside_repository(self):
@@ -1179,6 +1390,76 @@ class DashboardHttpTest(unittest.TestCase):
             self.service.calls,
         )
         self.assertNotIn(self.token.encode(), payload)
+
+    def test_api_decisions_returns_pending_data(self):
+        status, _, payload = self.request("GET", "/api/decisions")
+        self.assertEqual(200, status)
+        self.assertIsNone(json.loads(payload)["pending"])
+        self.assertEqual([("decisions",)], self.service.calls)
+
+    def test_post_answer_decision_requires_session_and_forwards_payload(self):
+        body = json.dumps({
+            "action": "answer-decision",
+            "ticket_id": "getbill1/getbill#1",
+            "answer": "Ship it",
+            "notes": "Approved",
+        }).encode()
+        status, _, _ = self.request("POST", "/api/actions", body, {"Content-Type": "application/json"})
+        self.assertEqual(403, status)
+        status, _, payload = self.request(
+            "POST", "/api/actions", body,
+            {"Content-Type": "application/json", "X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(202, status)
+        self.assertTrue(json.loads(payload)["accepted"])
+        self.assertEqual([("submit_decision", "getbill1/getbill#1", "Ship it", "Approved")], self.service.calls)
+
+    def test_post_answer_decision_rejects_extra_or_missing_fields(self):
+        body = json.dumps({"action": "answer-decision", "ticket_id": "x", "answer": "y"}).encode()
+        status, _, _ = self.request(
+            "POST", "/api/actions", body,
+            {"Content-Type": "application/json", "X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(400, status)
+        self.assertEqual([], self.service.calls)
+
+    def test_post_merge_merge_request_requires_session_and_validates_request(self):
+        body = json.dumps({"action": "merge-merge-request", "iid": 11}).encode()
+        status, _, _ = self.request(
+            "POST", "/api/actions", body, {"Content-Type": "application/json"}
+        )
+        self.assertEqual(403, status)
+        self.assertEqual([], self.service.calls)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/actions",
+            body,
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(202, status)
+        self.assertEqual(11, json.loads(payload)["iid"])
+        self.assertEqual([("merge_merge_request", 11)], self.service.calls)
+
+        for invalid in (
+            {"action": "merge-merge-request", "iid": True},
+            {"action": "merge-merge-request", "iid": 0},
+            {"action": "merge-merge-request", "iid": 11, "extra": "x"},
+        ):
+            with self.subTest(invalid=invalid):
+                status, _, _ = self.request(
+                    "POST",
+                    "/api/actions",
+                    json.dumps(invalid).encode(),
+                    {
+                        "Content-Type": "application/json",
+                        "X-Pitcrew-Session": self.token,
+                    },
+                )
+                self.assertEqual(400, status)
 
     def test_favicon_probe_returns_empty_no_content(self):
         status, headers, payload = self.request("GET", "/favicon.ico")
@@ -1610,10 +1891,12 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
         for identifier in (
             "overview",
+            "decision-banner",
             "live-agents",
             "agents",
             "activity",
             "gitlab-work",
+            "merge-requests",
             "disabled-roles",
         ):
             self.assertIn(f'id="{identifier}"', self.html)
@@ -1658,6 +1941,16 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.assertIn(f'id="{identifier}"', self.html)
         self.assertIn("Arrêter tous les agents et bloquer les futures exécutions ?", self.javascript)
         self.assertIn('body: JSON.stringify({ action })', self.javascript)
+        self.assertIn("source_branch", self.javascript)
+        self.assertIn("target_branch", self.javascript)
+        self.assertIn("Fusionner et supprimer la branche", self.javascript)
+        self.assertIn('action: "merge-merge-request"', self.javascript)
+        self.assertIn("window.confirm", self.javascript)
+        self.assertIn("mergeMergeRequest(mergeRequest, work)", self.javascript)
+        self.assertIn("renderMergeRequests(work)", self.javascript)
+        self.assertIn('await refresh({ manual: true });', self.javascript)
+        self.assertIn('/api/decisions', self.javascript)
+        self.assertIn('answer-decision', self.javascript)
         for function_name in (
             "fetchJson",
             "renderOverview",
@@ -1665,6 +1958,10 @@ class DashboardAssetContractTest(unittest.TestCase):
             "renderAgents",
             "renderHistory",
             "renderGitLab",
+            "renderMergeRequests",
+            "mergeMergeRequest",
+            "renderDecision",
+            "submitDecision",
             "control",
             "refresh",
         ):

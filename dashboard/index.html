@@ -28,6 +28,28 @@
   <p id="operational-status" class="sr-only" aria-live="polite">Initialisation du tableau de bord.</p>
 
   <main>
+    <section id="proposals" class="panel proposal-panel" aria-labelledby="proposals-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Validation humaine</p>
+          <h2 id="proposals-title">Propositions à examiner</h2>
+        </div>
+        <p id="proposal-state" class="section-note">Aucune proposition chargée</p>
+      </div>
+      <div id="proposal-list" class="proposal-list" aria-live="polite"></div>
+    </section>
+
+    <section id="decision-banner" class="panel decision-panel" aria-labelledby="decision-title" hidden>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Action requise</p>
+          <h2 id="decision-title">Décision à prendre</h2>
+        </div>
+        <p class="section-note">L’agent reprendra automatiquement après votre réponse</p>
+      </div>
+      <div id="decision-content" aria-live="polite"></div>
+    </section>
+
     <section id="overview" class="panel overview" aria-labelledby="overview-title">
       <div class="section-heading">
         <div>
@@ -111,6 +133,16 @@
         </div>
         <p id="gitlab-state" class="section-note">En attente du premier relevé</p>
       </div>
+      <section id="merge-requests" class="merge-requests-panel" aria-labelledby="merge-requests-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Validation</p>
+            <h3 id="merge-requests-title">Merge requests ouvertes</h3>
+          </div>
+          <p id="merge-requests-state" class="section-note">Aucune MR chargée</p>
+        </div>
+        <div id="merge-request-list" class="merge-request-list" aria-live="polite"></div>
+      </section>
       <div id="gitlab-groups" class="work-grid"></div>
     </section>
   </main>

@@ -257,6 +257,40 @@ section {
   gap: 18px;
 }
 
+.decision-panel {
+  border-color: #e2a52e;
+  background: #fff8e6;
+}
+
+.proposal-panel { border-color: #4d78b8; background: #f4f8ff; }
+.proposal-list { display: grid; gap: 14px; }
+.proposal-card { padding: 16px; border: 1px solid #cbd9ef; border-radius: 14px; background: var(--surface); }
+.proposal-card h3 { margin: 0 0 6px; }
+.proposal-card p { margin: 8px 0; }
+.proposal-meta { color: var(--muted); font-size: .85rem; font-weight: 700; }
+.proposal-detail { padding: 8px 0; }
+.proposal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.merge-requests-panel { margin: 18px 0 24px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.merge-request-list { display: grid; gap: 12px; }
+.merge-request-card { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-raised, var(--surface)); }
+.merge-request-card h4 { margin: 0 0 8px; }
+.merge-request-branches { margin: 0 0 6px; font-weight: 800; overflow-wrap: anywhere; }
+.merge-request-meta { margin: 0; color: var(--muted); font-size: .88rem; }
+.merge-request-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+.decision-ticket,
+.decision-question { margin: 0 0 14px; }
+.decision-question { font-size: 1.15rem; font-weight: 700; }
+.decision-context {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid #ead9aa;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .65);
+}
+.decision-context-body pre { max-height: 280px; overflow: auto; white-space: pre-wrap; font: inherit; }
+.decision-choices { display: flex; flex-wrap: wrap; gap: 10px; }
+
 .live-agent-card {
   display: flex;
   min-width: 0;
@@ -319,6 +353,13 @@ section {
   gap: 7px 14px;
   margin: 0;
   font-size: 0.86rem;
+}
+
+.agent-role-description {
+  margin: -8px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
 }
 
 .agent-facts dt {

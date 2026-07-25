@@ -107,12 +107,20 @@ A "cell" = a (repo, mode) tuple. Modes:
 
 **State file:** `$STATE_DIR/researcher-state.json`
 
+**Coverage helper:** The launcher provides the Pitcrew checkout through the
+prompt and grants read access to it. Use
+`python3 <pitcrew-root>/scripts/research_coverage.py`; do not reimplement the
+area discovery or atomic JSON-writing logic inline.
+
 Schema (read at start of run, write at end):
 
 ```json
 {
   "cells": {
-    "<repo>:hygiene":           { "last_run_at": "2026-05-07T11:00:00Z", "last_findings_count": 2 },
+    "<repo>:hygiene":           { "last_run_at": "2026-05-07T11:00:00Z", "last_findings_count": 2,
+      "coverage": { "areas": ["src", "tests"], "next_area": "src", "epoch": 0,
+        "visited": { "src": "2026-05-07T11:00:00Z" },
+        "fingerprints": { "src": "<git-tree-id>" } } },
     "<repo>:hardening":         { "last_run_at": null, "last_findings_count": 0 },
     "<repo>:doc-sync":          { "last_run_at": null, "last_findings_count": 0 },
     "architecture:cross-repo":  { "last_run_at": null, "last_findings_count": 0 }
@@ -180,7 +188,20 @@ prepare_worktree() {
 After selection, do all subsequent reads and tooling in that scan checkout. For GetBill this is
 read-only access to the configured checkout unless an approved isolated checkout already exists.
 
-**STEP 2. Run the analysis for the picked cell.**
+**STEP 1.6. Pick the coverage area.**
+- Run the coverage helper's `discover` command against the selected scan
+  checkout. It returns stable, sorted top-level areas and excludes generated,
+  ignored, hidden, and dependency directories.
+- Run the helper's `select` command for the selected cell. It migrates legacy
+  cells with no `coverage` field, removes stale areas, selects the least recently visited area,
+  prioritizes areas whose current Git tree fingerprint differs from the recorded fingerprint,
+  and starts a new epoch after all unchanged areas were visited.
+- Print: `Coverage area: <area> (epoch: <epoch>)`.
+- The selected area is the primary scope for all subsequent reads and tooling.
+  Do not scan another area merely because it is convenient. Cross-repository
+  architecture checks use the selected area of the consumer under inspection.
+
+**STEP 2. Run the analysis for the picked cell and coverage area.**
 
 Treat the selected scan checkout as the canonical read source and do not modify it.
 
@@ -258,9 +279,17 @@ state, routes it, and paces work-item creation under the `research` bucket.
 
 **STEP 5. Update state.**
 
+Before updating `last_run_at`, record a successfully completed scan with the
+helper's `record` command. A run that fails during setup or analysis must not
+advance `visited`; a successful run with zero findings still advances it. The
+helper records the selected area's current Git tree fingerprint and writes the
+state atomically. Git-unavailable repositories use timestamp rotation only.
+
 Update the cell's entry in `$STATE_DIR/researcher-state.json`:
 - `last_run_at`: now (ISO 8601 UTC)
 - `last_findings_count`: total findings produced by analysis (before filtering)
+- preserve the helper-written `coverage` object and include `coverage_area` and
+  `coverage_epoch` in the history entry.
 
 Append to `history` (keep last 100 entries). Write atomically (`<file>.tmp` → `mv`).
 
@@ -268,7 +297,7 @@ Append to `history` (keep last 100 entries). Write atomically (`<file>.tmp` → 
 
 Format:
 ```
-[research:$PROJECT] <repo>:<mode> — analyzed N findings, recorded M to ledger (skipped L low-conf, K dupes). State + ledger updated.
+[research:$PROJECT] <repo>:<mode>:<area> — analyzed N findings, recorded M to ledger (skipped L low-conf, K dupes). State + ledger updated.
 ```
 
 ═══ FAILURE MODES ═══

@@ -6,6 +6,8 @@ performs one bounded pass for one validated project.
 | Skill | Reads | Produces |
 |---|---|---|
 | `$pitcrew:research-run` | repository and architecture references | one local finding |
+| `$pitcrew:security-run` | security reference and repository | one security proposal |
+| `$pitcrew:product-discovery-run` | product references and repository | one feature proposal |
 | `$pitcrew:qa-run` | configured test flows | one QA result/finding |
 | `$pitcrew:manager-run` | curated findings | paced tracker work |
 | `$pitcrew:implementer-run` | one eligible tracker item | one code change |
@@ -33,7 +35,8 @@ explicit; a skill never invents work or switches projects when the queue is empt
 ## Handoffs
 
 ```text
-research/qa -> findings -> manager -> tracker
+research/qa/security -> findings -> manager -> tracker
+product-discovery -> dashboard approval -> manager -> tracker
                                       |
                                       v
 investigate <-> unblock <- blocked <- implementer -> change (PR/MR)

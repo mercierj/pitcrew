@@ -38,6 +38,8 @@ MODEL_CATALOG = {
 }
 
 DEFAULT_MODELS = {
+    "security-run": "gpt-5.6-sol",
+    "product-discovery-run": "gpt-5.6-terra",
     "research-run": "gpt-5.6-terra",
     "manager-run": "gpt-5.6-luna",
     "implementer-run": "gpt-5.6-sol",

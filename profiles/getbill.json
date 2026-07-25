@@ -16,14 +16,23 @@
         "investigate": "pitcrew-route::investigate",
         "quick_win": "pitcrew-size::quick-win",
         "bug": "pitcrew-type::bug",
-        "improvement": "pitcrew-type::improvement"
+        "improvement": "pitcrew-type::improvement",
+        "proposal": "pitcrew-proposal",
+        "proposal_suggested": "pitcrew-proposal::suggested",
+        "proposal_approved": "pitcrew-proposal::approved",
+        "proposal_dismissed": "pitcrew-proposal::dismissed",
+        "category_security": "pitcrew-category::security",
+        "category_feature": "pitcrew-category::feature"
       },
       "states": {
         "todo": "pitcrew-state::todo",
         "processing": "pitcrew-state::processing",
         "review": "pitcrew-state::review",
         "blocked": "pitcrew-state::blocked",
-        "done": "pitcrew-state::done"
+        "done": "pitcrew-state::done",
+        "suggested": "pitcrew-state::suggested",
+        "approved": "pitcrew-state::approved",
+        "dismissed": "pitcrew-state::dismissed"
       }
     }
   },
@@ -38,6 +47,9 @@
   ],
   "researcher": {
     "findings_ledger": "/Users/jo/.codex/pitcrew/getbill/findings/research-findings.json"
+  },
+  "proposals": {
+    "ledger": "/Users/jo/.codex/pitcrew/getbill/proposals.json"
   },
   "manager": {
     "target_queue_depth": 3,
@@ -56,6 +68,8 @@
   },
   "release": {"autonomy": "off"},
   "agents": {
+    "security-run": {"model": "gpt-5.6-sol"},
+    "product-discovery-run": {"model": "gpt-5.6-terra"},
     "research-run": {"model": "gpt-5.6-terra"},
     "manager-run": {"model": "gpt-5.6-luna"},
     "implementer-run": {"model": "gpt-5.6-sol"},

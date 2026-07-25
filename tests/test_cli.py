@@ -98,6 +98,87 @@ class CliTest(unittest.TestCase):
             self.assertIn("global stop", json.loads(result.stdout)["reason"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
 
+    def test_runner_refuses_to_start_during_provider_cooldown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_CODEX_MARKER": str(root / "codex-started"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            recorded = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/pitcrew_preflight.py"),
+                    "record-provider-failure",
+                    "--project", "getbill",
+                    "--reason", "provider authentication failure",
+                ],
+                cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, recorded.returncode, recorded.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\ntouch \"$FAKE_CODEX_MARKER\"\n", encoding="utf-8"
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "reviewer-run", "getbill", "--scheduled", env=env
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual("noop", payload["status"])
+            self.assertIn("cooldown", payload["reason"])
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+
+    def test_authentication_failure_opens_provider_cooldown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_CODEX_MARKER": str(root / "codex-started"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' 'GitLab authentication unavailable: invalid_grant' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n"
+                "touch \"$FAKE_CODEX_MARKER\"\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            first = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", "--scheduled", env=env
+            )
+            self.assertEqual(0, first.returncode, first.stderr)
+            circuit = root / ".codex/pitcrew/getbill/state/provider-circuit.json"
+            self.assertTrue(circuit.is_file())
+            Path(env["FAKE_CODEX_MARKER"]).unlink()
+            second = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", "--scheduled", env=env
+            )
+            self.assertEqual(0, second.returncode, second.stderr)
+            self.assertEqual("noop", json.loads(second.stdout)["status"])
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+
     def run_cli(self, *args, env=None):
         return subprocess.run(
             [str(ROOT / args[0]), *args[1:]],
@@ -135,6 +216,60 @@ class CliTest(unittest.TestCase):
             self.assertIn("Use $pitcrew:research-run", result.stdout)
             self.assertNotIn("danger-full-access", result.stdout)
             self.assertIn("/Users/jo/Prog/getbill", result.stdout)
+
+    def test_scheduled_unblock_prompt_requires_persisted_dashboard_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "CODEX_HOME": str(Path(temp).resolve())}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "unblock",
+                "getbill",
+                "--scheduled",
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("unblock-state.json", result.stdout)
+            self.assertIn("dashboard reads that file", result.stdout)
+
+    def test_implementer_uses_git_metadata_capable_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_CODEX_ARGS": str(root / "codex-args"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' 'bounded summary' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "implementer-run", "getbill", "--scheduled", env=env
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            args = (root / "codex-args").read_text(encoding="utf-8")
+            self.assertIn("--sandbox\ndanger-full-access", args)
 
     def test_scheduled_runner_is_ephemeral_networked_and_never_overlaps(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -210,6 +345,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("--model", args)
             self.assertIn("gpt-5.6-terra", args)
             self.assertIn("--json", args)
+            self.assertIn("--add-dir\n/Users/jo/Prog/getbill", args)
             self.assertIn("--sandbox", args)
             self.assertIn("workspace-write", args)
             self.assertIn("sandbox_workspace_write.network_access=true", args)
@@ -538,6 +674,42 @@ class CliTest(unittest.TestCase):
             history = [json.loads(line) for line in (root / "history.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(1, len(history))
             self.assertEqual(1, history[0]["usage"]["input_tokens"])
+
+    def test_locked_helper_writes_fallback_summary_when_child_omits_summary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            child = root / "child.py"
+            child.write_text("raise SystemExit(7)\n", encoding="utf-8")
+            summary = root / "summary.txt"
+            live = root / "live.json"
+            helper = ROOT / "scripts/pitcrew_locked_exec.py"
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "--lock-file", str(root / "role.lock"),
+                    "--project", "getbill",
+                    "--skill", "implementer-run",
+                    "--model", "gpt-5.6-sol",
+                    "--summary-file", str(summary),
+                    "--history-file", str(root / "history.jsonl"),
+                    "--live-file", str(live),
+                    "--", sys.executable, str(child),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=3,
+            )
+
+            self.assertEqual(7, result.returncode, result.stderr)
+            self.assertTrue(summary.is_file())
+            fallback = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual("failed", fallback["status"])
+            self.assertEqual(7, fallback["exit_code"])
+            self.assertFalse(live.exists())
 
     def test_locked_helper_discards_oversized_event_and_keeps_later_usage(self):
         with tempfile.TemporaryDirectory() as temp:

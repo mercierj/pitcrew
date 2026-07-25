@@ -170,6 +170,11 @@ fi
 
 For a fresh complete `pending_question`:
 
+- If `pending_question.status=answered`, consume the stored `answer` and optional
+  `notes` from the dashboard handoff. The answer must match one of the stored
+  `choices`; rehydrate the stored context and skip STEP 6, then continue at STEP 7.
+  Do not re-emit the question or ask the operator again. The dashboard is the
+  human decision writer; this skill is the consumer.
 - In unattended `codex exec`, re-emit its stored `status=blocked`, exact `question`,
   exact `choices`, and `next_action`, then stop without changing the lock.
 - In an interactive Codex thread, do not query another ticket. Rehydrate the ticket
@@ -389,7 +394,7 @@ After surfacing the question, await your answer.
 
 **STEP 7. Process the answer.**
 
-The user response includes both an `answer` (the selected label or "Other" + custom text) and optional `notes` per question. Branch on the answer:
+The user response includes both an `answer` (the selected label or "Other" + custom text) and optional `notes` per question. A dashboard-submitted answer is already stored in `pending_question`; validate it against the exact stored `choices` before branching. Branch on the answer:
 
 ### If action is `split-children`:
 

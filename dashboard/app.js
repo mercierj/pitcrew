@@ -16,6 +16,10 @@ const elements = {
   globalResumeButton: document.querySelector("#global-resume-button"),
   globalState: document.querySelector("#global-state"),
   operationalStatus: document.querySelector("#operational-status"),
+  decisionBanner: document.querySelector("#decision-banner"),
+  decisionContent: document.querySelector("#decision-content"),
+  proposalState: document.querySelector("#proposal-state"),
+  proposalList: document.querySelector("#proposal-list"),
   globalBanner: document.querySelector("#global-banner"),
   overviewUsageNote: document.querySelector("#overview-usage-note"),
   liveAgentGrid: document.querySelector("#live-agent-grid"),
@@ -28,6 +32,8 @@ const elements = {
   historyOutcome: document.querySelector("#history-outcome"),
   gitlabGroups: document.querySelector("#gitlab-groups"),
   gitlabState: document.querySelector("#gitlab-state"),
+  mergeRequestList: document.querySelector("#merge-request-list"),
+  mergeRequestsState: document.querySelector("#merge-requests-state"),
   metrics: {
     active: document.querySelector("#metric-active"),
     stopped: document.querySelector("#metric-stopped"),
@@ -58,6 +64,9 @@ const lifecycleLabels = {
 let refreshPromise = null;
 let lastGitLabRefresh = 0;
 const pendingSkills = new Set();
+let decisionSubmitting = false;
+let proposalSubmitting = false;
+let mergeSubmitting = false;
 
 async function fetchJson(path, options = {}) {
   const response = await fetch(path, {
@@ -308,12 +317,12 @@ function renderLiveAgents(snapshot) {
 
     const phase = document.createElement("p");
     phase.className = "live-agent-phase";
-    phase.textContent = status?.phase || "Exécution du passage courant";
+    phase.textContent = status?.phase || "Exécution du passage courant · résumé disponible à la fin";
 
     const facts = document.createElement("dl");
     facts.className = "live-agent-facts";
     [
-      ["Depuis", formatDate(status?.started_at)],
+      ["Depuis", status?.started_at ? formatDate(status.started_at) : "Début non enregistré"],
       ["Durée", formatElapsed(status?.started_at)],
       ["Modèle", modelLabel(snapshot?.model_catalog, status?.model || agent.configured_model)],
       ["PID", status?.pid || agent.pid || "Indisponible"],
@@ -359,6 +368,10 @@ function renderAgents(snapshot) {
     title.textContent = agent.skill || "Agent sans nom";
     heading.append(title, makeBadge(agent.health));
 
+    const roleDescription = document.createElement("p");
+    roleDescription.className = "agent-role-description";
+    roleDescription.textContent = agent.role_description || "Rôle non documenté.";
+
     const facts = document.createElement("dl");
     facts.className = "agent-facts";
     const factValues = [
@@ -388,6 +401,7 @@ function renderAgents(snapshot) {
     );
     card.append(
       heading,
+      roleDescription,
       facts,
       createModelControl(agent, snapshot?.model_catalog, globalStopped),
       summary,
@@ -517,8 +531,157 @@ function safeExternalLink(value, label) {
   return link;
 }
 
+function renderDecision(payload) {
+  const pending = payload?.pending;
+  if (!elements.decisionBanner || !elements.decisionContent) return;
+  elements.decisionContent.replaceChildren();
+  if (!pending || typeof pending !== "object") {
+    elements.decisionBanner.hidden = true;
+    return;
+  }
+  elements.decisionBanner.hidden = false;
+  const ticket = document.createElement("p");
+  ticket.className = "decision-ticket";
+  const link = safeExternalLink(pending.ticket?.web_url, pending.ticket?.title || pending.ticket_id);
+  if (link) ticket.append(link);
+  else ticket.textContent = pending.ticket?.title || pending.ticket_id || "Ticket inconnu";
+  elements.decisionContent.append(ticket);
+  const question = document.createElement("p");
+  question.className = "decision-question";
+  question.textContent = pending.question || "Quelle action faut-il prendre ?";
+  elements.decisionContent.append(question);
+  const context = document.createElement("details");
+  context.className = "decision-context";
+  context.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = "Contexte et findings";
+  context.append(summary);
+  const body = document.createElement("div");
+  body.className = "decision-context-body";
+  if (pending.ticket?.description) {
+    const description = document.createElement("p");
+    description.textContent = pending.ticket.description;
+    body.append(description);
+  }
+  if (pending.findings) {
+    const findings = document.createElement("pre");
+    findings.textContent = pending.findings;
+    body.append(findings);
+  }
+  if (!body.childNodes.length) body.textContent = "Aucun contexte complémentaire disponible.";
+  context.append(body);
+  elements.decisionContent.append(context);
+  const choices = document.createElement("div");
+  choices.className = "decision-choices";
+  (Array.isArray(pending.choices) ? pending.choices : []).forEach((answer) => {
+    if (typeof answer !== "string" || !answer) return;
+    const button = document.createElement("button");
+    button.className = "button button-primary";
+    button.type = "button";
+    button.textContent = answer;
+    button.disabled = decisionSubmitting;
+    button.addEventListener("click", () => submitDecision(pending, answer));
+    choices.append(button);
+  });
+  elements.decisionContent.append(choices);
+}
+
+function renderProposals(payload) {
+  if (!elements.proposalList) return;
+  elements.proposalList.replaceChildren();
+  const proposals = Array.isArray(payload?.proposals) ? payload.proposals : [];
+  setText(elements.proposalState, proposals.length ? `${proposals.length} en attente` : "Aucune proposition en attente");
+  if (!proposals.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "Aucune proposition ne nécessite une décision.";
+    elements.proposalList.append(empty);
+    return;
+  }
+  proposals.forEach((proposal) => {
+    const card = document.createElement("article");
+    card.className = "proposal-card";
+    const heading = document.createElement("h3");
+    heading.textContent = proposal.title || "Proposition sans titre";
+    card.append(heading);
+    const meta = document.createElement("p");
+    meta.className = "proposal-meta";
+    meta.textContent = `${proposal.category || "—"} · ${proposal.severity || "—"} · ${proposal.source || "—"}`;
+    card.append(meta);
+    const summary = document.createElement("p");
+    summary.textContent = proposal.summary || "";
+    card.append(summary);
+    const details = document.createElement("details");
+    const label = document.createElement("summary");
+    label.textContent = "Voir les preuves et la recommandation";
+    details.append(label);
+    const body = document.createElement("div");
+    body.className = "proposal-detail";
+    const evidence = document.createElement("p");
+    evidence.textContent = `Preuves : ${(Array.isArray(proposal.evidence) ? proposal.evidence : []).join(" · ")}`;
+    const recommendation = document.createElement("p");
+    recommendation.textContent = `Recommandation : ${proposal.recommendation || "—"}`;
+    body.append(evidence, recommendation);
+    details.append(body);
+    card.append(details);
+    const actions = document.createElement("div");
+    actions.className = "proposal-actions";
+    [["approve", "Approuver", "button-primary"], ["investigate", "Investiguer", "button-quiet"], ["reject", "Rejeter", "button-danger"]].forEach(([decision, text, style]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `button ${style}`;
+      button.textContent = text;
+      button.disabled = proposalSubmitting;
+      button.addEventListener("click", () => decideProposal(proposal, decision));
+      actions.append(button);
+    });
+    card.append(actions);
+    elements.proposalList.append(card);
+  });
+}
+
+async function decideProposal(proposal, decision) {
+  if (proposalSubmitting) return;
+  const reason = decision === "reject" ? window.prompt("Pourquoi rejeter cette proposition ?", "") : "";
+  if (decision === "reject" && (!reason || !reason.trim())) return;
+  proposalSubmitting = true;
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
+      body: JSON.stringify({ action: "decide-proposal", proposal_id: proposal.id, decision, reason: reason || "" }),
+    });
+    await refresh({ manual: true });
+  } catch {
+    setText(elements.operationalStatus, "Impossible d’enregistrer la décision sur la proposition.");
+  } finally {
+    proposalSubmitting = false;
+  }
+}
+
+async function submitDecision(pending, answer) {
+  if (decisionSubmitting) return;
+  decisionSubmitting = true;
+  renderDecision({ pending });
+  setText(elements.operationalStatus, "Transmission de votre décision…");
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
+      body: JSON.stringify({ action: "answer-decision", ticket_id: pending.ticket_id, answer, notes: "" }),
+    });
+    setText(elements.operationalStatus, "Décision enregistrée ; unblock est lancé.");
+    await refresh({ manual: true });
+  } catch {
+    setText(elements.operationalStatus, "Impossible d’enregistrer la décision.");
+  } finally {
+    decisionSubmitting = false;
+  }
+}
+
 function renderGitLab(work) {
   elements.gitlabGroups.replaceChildren();
+  renderMergeRequests(work);
   if (work?.degraded) {
     setText(elements.gitlabState, "GitLab indisponible, données locales maintenues");
   } else {
@@ -559,6 +722,82 @@ function renderGitLab(work) {
     });
     elements.gitlabGroups.append(column);
   });
+}
+
+function renderMergeRequests(work) {
+  if (!elements.mergeRequestList) return;
+  elements.mergeRequestList.replaceChildren();
+  const mergeRequests = Array.isArray(work?.merge_requests) ? work.merge_requests : [];
+  setText(elements.mergeRequestsState, mergeRequests.length ? `${mergeRequests.length} ouverte(s)` : "Aucune MR ouverte");
+  if (!mergeRequests.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = work?.degraded ? "Données GitLab indisponibles." : "Aucune merge request ouverte.";
+    elements.mergeRequestList.append(empty);
+    return;
+  }
+  mergeRequests.forEach((mergeRequest) => {
+    const card = document.createElement("article");
+    card.className = "merge-request-card";
+    const title = document.createElement("h4");
+    const link = safeExternalLink(mergeRequest.web_url, `${mergeRequest.title || "MR sans titre"} · !${mergeRequest.iid || "?"}`);
+    if (link) title.append(link);
+    else title.textContent = `${mergeRequest.title || "MR sans titre"} · !${mergeRequest.iid || "?"}`;
+    card.append(title);
+
+    const branches = document.createElement("p");
+    branches.className = "merge-request-branches";
+    branches.textContent = `${mergeRequest.source_branch || "Branche source inconnue"} → ${mergeRequest.target_branch || "Branche cible inconnue"}`;
+    card.append(branches);
+
+    const metadata = document.createElement("p");
+    metadata.className = "merge-request-meta";
+    metadata.textContent = [
+      mergeRequest.author_username ? `Auteur : ${mergeRequest.author_username}` : "Auteur : inconnu",
+      `Pipeline : ${mergeRequest.pipeline_status || "absent"}`,
+    ].join(" · ");
+    card.append(metadata);
+
+    const actions = document.createElement("div");
+    actions.className = "merge-request-actions";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button button-danger";
+    button.textContent = "Fusionner et supprimer la branche";
+    button.disabled = mergeSubmitting;
+    button.addEventListener("click", () => mergeMergeRequest(mergeRequest, work));
+    actions.append(button);
+    card.append(actions);
+    elements.mergeRequestList.append(card);
+  });
+}
+
+async function mergeMergeRequest(mergeRequest, work) {
+  if (mergeSubmitting || typeof mergeRequest?.iid !== "number") return;
+  const sourceBranch = mergeRequest.source_branch || "la branche source";
+  if (!window.confirm(`Fusionner !${mergeRequest.iid} dans ${mergeRequest.target_branch || "la branche cible"} et supprimer ${sourceBranch} ?`)) return;
+  mergeSubmitting = true;
+  renderMergeRequests(work);
+  setText(elements.operationalStatus, `Fusion de la MR !${mergeRequest.iid} en cours.`);
+  try {
+    const result = await fetchJson("/api/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
+      body: JSON.stringify({ action: "merge-merge-request", iid: mergeRequest.iid }),
+    });
+    setText(
+      elements.operationalStatus,
+      result?.partial
+        ? `MR !${mergeRequest.iid} fusionnée ; suppression de ${sourceBranch} à vérifier.`
+        : `MR !${mergeRequest.iid} fusionnée et branche ${sourceBranch} supprimée.`,
+    );
+    mergeSubmitting = false;
+    await refresh({ manual: true });
+  } catch {
+    setText(elements.operationalStatus, `Impossible de fusionner la MR !${mergeRequest.iid}.`);
+    mergeSubmitting = false;
+    renderMergeRequests(work);
+  }
 }
 
 async function control(action, skill) {
@@ -689,14 +928,18 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     elements.refreshButton.disabled = true;
     setText(elements.refreshState, "Actualisation en cours…");
     try {
-      const [snapshot, history] = await Promise.all([
+      const [snapshot, history, decisions, proposals] = await Promise.all([
         fetchJson("/api/status"),
         fetchJson(historyPath()),
+        fetchJson("/api/decisions"),
+        fetchJson("/api/proposals"),
       ]);
       renderOverview(snapshot);
       renderLiveAgents(snapshot);
       renderAgents(snapshot);
       renderHistory(history, snapshot?.model_catalog);
+      renderDecision(decisions);
+      renderProposals(proposals);
 
       const now = Date.now();
       if (!skipGitLab && (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS)) {

@@ -19,6 +19,8 @@ profiles pin all roles so model selection stays explicit:
 
 | Role | Model |
 |---|---|
+| `security-run` | `gpt-5.6-sol` |
+| `product-discovery-run` | `gpt-5.6-terra` |
 | `research-run` | `gpt-5.6-terra` |
 | `manager-run` | `gpt-5.6-luna` |
 | `implementer-run` | `gpt-5.6-sol` |
@@ -103,10 +105,18 @@ and does not trigger an immediate pass. The dashboard's **Tout arrêter** button
 performs the same action after confirmation and shows **Exécutions bloquées**
 while the switch is active.
 
+The runner also has a deterministic provider-failure circuit breaker. When a
+scheduled pass reports an authentication failure, later passes for the same
+project are returned as no-ops for 30 minutes before Codex starts. This avoids
+repeating an expensive model call while GitLab authentication is known to be
+invalid; the cooldown state is local, atomic, and owner-only.
+
 The safe GetBill core enables research, manager, implementer, reviewer,
-validator, investigate, and stale-sweep. QA, coverage, dev verification, and ops
-remain defined but disabled until their required configuration exists. Unblock
-remains human-driven, and releaser remains disabled.
+validator, investigate, stale-sweep, and unblock. QA, coverage, dev verification,
+and ops remain defined but disabled until their required configuration exists.
+Unblock runs automatically to publish one pending question when a blocked item
+needs a human decision; it never selects the answer itself. Releaser remains
+disabled.
 
 Each job invokes `bin/pitcrew-codex.sh` with `--scheduled`. The runner uses a
 per-role lock, an ephemeral Codex session, workspace-write sandboxing, explicit

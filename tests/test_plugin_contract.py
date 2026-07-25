@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = {
+    "product-discovery-run",
+    "security-run",
     "coverage-run",
     "dev-verify-run",
     "implementer-run",

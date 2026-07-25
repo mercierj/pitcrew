@@ -31,6 +31,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--model", required=True)
     result.add_argument("--summary-file", required=True, type=Path)
     result.add_argument("--history-file", required=True, type=Path)
+    result.add_argument("--live-file", type=Path)
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
 
@@ -47,6 +48,49 @@ def read_summary(path: Path) -> str:
         return NO_SUMMARY
     decoded = contents.decode("utf-8", errors="replace").strip()
     return decoded or NO_SUMMARY
+
+
+def write_fallback_summary(path: Path, exit_code: int | None) -> None:
+    """Leave an inspectable result when the bounded child produced no summary."""
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "reason": "bounded command exited without producing a final summary",
+                    "exit_code": exit_code,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+    except OSError:
+        # History still records NO_SUMMARY; finalization must not mask the child result.
+        return
+
+
+def write_live_status(path: Path | None, status: dict) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(status, separators=(",", ":")), encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def clear_live_status(path: Path | None) -> None:
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # A stale live marker must never hide the bounded command result.
+            return
 
 
 USAGE_FIELDS = (
@@ -195,6 +239,17 @@ def main() -> int:
             return 0
 
         started_monotonic = time.monotonic_ns()
+        write_live_status(
+            args.live_file,
+            {
+                "project": args.project,
+                "skill": args.skill,
+                "model": args.model,
+                "started_at": started_at,
+                "pid": os.getpid(),
+                "phase": "Exécution du passage courant",
+            },
+        )
         try:
             args.summary_file.unlink(missing_ok=True)
             os.set_inheritable(descriptor, True)
@@ -207,6 +262,7 @@ def main() -> int:
                 pass_fds=(descriptor,),
             )
         except OSError:
+            clear_live_status(args.live_file)
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,
@@ -247,20 +303,24 @@ def main() -> int:
             outcome = "interrupted"
         else:
             outcome = "failed"
-        HistoryStore(args.history_file).append(
-            {
-                "project": args.project,
-                "skill": args.skill,
-                "model": args.model,
-                "started_at": started_at,
-                "finished_at": utc_now(),
-                "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000,
-                "outcome": outcome,
-                "exit_code": return_code,
-                "summary": read_summary(args.summary_file),
-                **({"usage": usage} if usage is not None else {}),
-            }
-        )
+        try:
+            write_fallback_summary(args.summary_file, return_code)
+            HistoryStore(args.history_file).append(
+                {
+                    "project": args.project,
+                    "skill": args.skill,
+                    "model": args.model,
+                    "started_at": started_at,
+                    "finished_at": utc_now(),
+                    "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000,
+                    "outcome": outcome,
+                    "exit_code": return_code,
+                    "summary": read_summary(args.summary_file),
+                    **({"usage": usage} if usage is not None else {}),
+                }
+            )
+        finally:
+            clear_live_status(args.live_file)
         return return_code
 
 

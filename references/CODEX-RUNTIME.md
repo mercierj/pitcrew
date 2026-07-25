@@ -23,11 +23,14 @@ repository resolution must use the hardened `scripts/pitcrew_config.py` helper
 `O_NOFOLLOW` / no-symlink implementation. Reject symlinked runtime, project,
 default, and config components and fail closed before invoking Codex.
 
-After that validation, `bin/pitcrew-codex.sh` deliberately grants Codex access only
-to the selected project's runtime directory through `--add-dir`, so the skill can
-read its configuration and atomically persist local state. This boundary preserves
-the caller's sandbox and approval policy; it does not claim to pin filesystem
-objects across the process handoff.
+After that validation, `bin/pitcrew-codex.sh` grants Codex access to the selected
+project's runtime directory and configured repository through `--add-dir`. The
+runtime directory lets skills persist local state; the repository grant lets
+Git-backed worktrees update metadata such as `.git/FETCH_HEAD`. The
+`implementer-run` role additionally uses Codex's `danger-full-access` sandbox
+because macOS can reject Git metadata writes outside the Pitcrew workspace;
+this exception is limited to the configured local repository and implementer
+role. All other roles retain `workspace-write`.
 
 ## Execution boundary
 
@@ -41,6 +44,14 @@ Cadence remains caller-controlled: a skill neither schedules itself nor changes 
 scheduler's interval.
 
 ## State and no-ops
+
+Scheduled runs perform a deterministic preflight before resolving the repository
+or launching Codex. A project-scoped provider circuit-breaker state suppresses
+repeat launches for 30 minutes after a summary reports an authentication failure.
+The state is stored atomically under `state/provider-circuit.json` with owner-only
+permissions. An active cooldown returns the structured no-op directly; it does not
+consume model tokens. The cooldown is a cost-control guard, not an authentication
+replacement: the first provider failure still reports the configured remediation.
 
 Write state atomically: write a temporary sibling with restrictive permissions,
 validate it, then rename it into place. Do not partially update a queue or retry an
