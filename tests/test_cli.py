@@ -67,6 +67,37 @@ class CliTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("model=gpt-5.6-luna", result.stdout)
 
+    def test_runner_refuses_to_start_when_global_stop_is_active(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_CODEX_MARKER": str(root / "codex-started"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            stopped = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "stop", "--project", "getbill"],
+                cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, stopped.returncode, stopped.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text("#!/usr/bin/env bash\ntouch \"$FAKE_CODEX_MARKER\"\n", encoding="utf-8")
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", "--scheduled", env=env
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("noop", json.loads(result.stdout)["status"])
+            self.assertIn("global stop", json.loads(result.stdout)["reason"])
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+
     def run_cli(self, *args, env=None):
         return subprocess.run(
             [str(ROOT / args[0]), *args[1:]],

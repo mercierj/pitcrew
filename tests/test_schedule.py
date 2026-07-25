@@ -188,6 +188,45 @@ class ScheduleTest(unittest.TestCase):
             self.assertIn("enable failed", result.stderr)
             self.assertNotIn("installed", result.stdout)
 
+    def test_stop_all_stops_enabled_jobs_and_status_reports_global_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"printf '%s\\n' \"$*\" >> {calls}\n",
+            )
+            stopped = self.run_scheduler("stop-all", "--project", "getbill", env=env)
+            self.assertEqual(0, stopped.returncode, stopped.stderr)
+            status = self.run_scheduler("status", "--project", "getbill", env=env)
+            self.assertEqual(0, status.returncode, status.stderr)
+            payload = json.loads(status.stdout)
+            self.assertTrue(payload)
+            self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
+            bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
+            self.assertEqual(7, len(bootouts))
+
+    def test_install_is_rejected_while_globally_stopped_and_resume_reinstalls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / "LaunchAgents"
+            env = self.fake_launchctl_env(root, "")
+            self.assertEqual(0, self.run_scheduler("stop-all", "--project", "getbill", env=env).returncode)
+            blocked = self.run_scheduler(
+                "install", "--project", "getbill", "--output-dir", str(output), env=env
+            )
+            self.assertEqual(2, blocked.returncode)
+            self.assertIn("stopped", blocked.stderr)
+            resumed = self.run_scheduler(
+                "resume-all", "--project", "getbill", "--output-dir", str(output), env=env
+            )
+            self.assertEqual(0, resumed.returncode, resumed.stderr)
+            state = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "status", "--project", "getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual("running", state.stdout.strip())
+
     def test_status_for_one_skill_reports_launchd_state_and_pid(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

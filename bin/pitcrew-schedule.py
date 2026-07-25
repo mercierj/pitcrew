@@ -12,8 +12,16 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from scripts.pitcrew_runtime_state import read_state, write_state
+except ModuleNotFoundError:
+    from pitcrew_runtime_state import read_state, write_state
+
+
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 LABEL_PREFIX = "io.getbill.pitcrew"
 
@@ -176,6 +184,13 @@ def install(
     env: dict[str, str],
     skill: str | None = None,
 ) -> int:
+    try:
+        if read_state(project, env) == "stopped":
+            print("scheduler is globally stopped", file=sys.stderr)
+            return 2
+    except (OSError, ValueError):
+        print("scheduler execution state is unavailable", file=sys.stderr)
+        return 2
     paths = render(project, output_dir, env, skill)
     domain = f"gui/{os.getuid()}"
     for path in paths:
@@ -199,6 +214,11 @@ def launchd_state(output: str) -> tuple[bool, int | None]:
 
 def status(project: str, skill: str | None = None) -> int:
     domain = f"gui/{os.getuid()}"
+    try:
+        global_state = read_state(project)
+    except (OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
     result = []
     selected = [enabled_entry(skill)] if skill else entries()
     for entry in selected:
@@ -214,6 +234,7 @@ def status(project: str, skill: str | None = None) -> int:
                 "loaded": loaded,
                 "running": running,
                 "pid": pid,
+                "global_state": global_state,
             }
         )
     print(json.dumps(result, indent=2))
@@ -231,15 +252,40 @@ def stop(project: str, skill: str) -> int:
     return 0
 
 
+def stop_all(project: str) -> int:
+    write_state(project, "stopped")
+    domain = f"gui/{os.getuid()}"
+    first_failure = 0
+    for entry in entries():
+        if not entry["enabled"]:
+            continue
+        label = launchd_label(project, str(entry["skill"]))
+        result = launchctl("bootout", f"{domain}/{label}", check=False)
+        if result.returncode and not first_failure:
+            first_failure = result.returncode
+    if first_failure:
+        print("one or more scheduled agents could not be stopped", file=sys.stderr)
+    return first_failure
+
+
+def resume_all(
+    project: str,
+    output_dir: Path,
+    env: dict[str, str],
+) -> int:
+    write_state(project, "running", env)
+    return install(project, output_dir, env)
+
+
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(description="Manage recurring Pitcrew Codex jobs")
     commands = top.add_subparsers(dest="command", required=True)
-    for command in ("list", "render", "install", "status", "stop"):
+    for command in ("list", "render", "install", "status", "stop", "stop-all", "resume-all"):
         child = commands.add_parser(command)
         child.add_argument("--project", type=validated_project, default="getbill")
         if command == "list":
             child.add_argument("--json", action="store_true")
-        if command in {"render", "install"}:
+        if command in {"render", "install", "resume-all"}:
             child.add_argument(
                 "--output-dir",
                 type=Path,
@@ -274,6 +320,10 @@ def main() -> int:
             return status(args.project, args.skill)
         if args.command == "stop":
             return stop(args.project, args.skill)
+        if args.command == "stop-all":
+            return stop_all(args.project)
+        if args.command == "resume-all":
+            return resume_all(args.project, args.output_dir.expanduser(), env)
     except ValueError as error:
         print(error, file=sys.stderr)
         return 2

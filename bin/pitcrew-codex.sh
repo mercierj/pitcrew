@@ -61,6 +61,14 @@ if [[ -n "$PROJECT" ]]; then
 else
   PROJECT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" project)"
 fi
+if ! EXECUTION_STATE="$(python3 "$REPO_ROOT/scripts/pitcrew_runtime_state.py" status --project "$PROJECT")"; then
+  echo "pitcrew-codex: execution state is unavailable" >&2
+  exit 2
+fi
+if [[ "$EXECUTION_STATE" == "stopped" ]]; then
+  printf '%s\n' '{"status":"noop","reason":"global stop is active"}'
+  exit 0
+fi
 CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
 REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
 MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")"
