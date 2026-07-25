@@ -204,6 +204,20 @@ def create_server(
                 self._send_json(400, {"error": "invalid request"})
                 return
             action = request.get("action")
+            if action in {"stop-all", "resume-all"}:
+                if set(request) != {"action"}:
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.global_control(action)
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
             skill = request.get("skill")
             if (
                 not isinstance(action, str)

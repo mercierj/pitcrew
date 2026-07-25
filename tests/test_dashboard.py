@@ -416,6 +416,38 @@ class DashboardServiceTest(unittest.TestCase):
             runner.calls[0][1],
         )
 
+    def test_snapshot_exposes_live_status_for_running_agents(self):
+        live_dir = self.runtime / "live"
+        live_dir.mkdir()
+        (live_dir / "manager-run.json").write_text(
+            json.dumps(
+                {
+                    "project": "getbill",
+                    "skill": "manager-run",
+                    "model": "gpt-5.6-sol",
+                    "started_at": "2026-07-24T11:58:00+00:00",
+                    "pid": 4321,
+                    "phase": "Exécution du passage courant",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = self.service(FakeRunner()).snapshot()
+        roles = {role["skill"]: role for role in snapshot["agents"]}
+
+        self.assertEqual(
+            {
+                "project": "getbill",
+                "skill": "manager-run",
+                "model": "gpt-5.6-sol",
+                "started_at": "2026-07-24T11:58:00+00:00",
+                "pid": 4321,
+                "phase": "Exécution du passage courant",
+            },
+            roles["manager-run"]["live_status"],
+        )
+
     def test_snapshot_keeps_latest_history_but_uses_latest_measured_usage(self):
         records = (
             {
@@ -984,6 +1016,22 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertNotIn("local-secret", str(raised.exception))
         self.assertLessEqual(len(str(raised.exception)), 2048)
 
+    def test_global_control_uses_scheduler_actions_and_reports_state(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        self.assertEqual(
+            {"accepted": True, "global_state": "stopped"},
+            service.global_control("stop-all"),
+        )
+        self.assertEqual(
+            {"accepted": True, "global_state": "running"},
+            service.global_control("resume-all"),
+        )
+        self.assertEqual(
+            ["stop-all", "resume-all"],
+            [call[0][2] for call in runner.calls if "pitcrew-schedule.py" in call[0][1]],
+        )
+
 
 class FakeDashboardService:
     def __init__(self):
@@ -992,7 +1040,7 @@ class FakeDashboardService:
 
     def snapshot(self):
         self.calls.append(("snapshot",))
-        return {"project": "getbill", "counts": {"enabled": 7, "disabled": 6}}
+        return {"project": "getbill", "global_state": "running", "counts": {"enabled": 7, "disabled": 6}}
 
     def history(self, skill, outcome):
         self.calls.append(("history", skill, outcome))
@@ -1012,6 +1060,13 @@ class FakeDashboardService:
             raise DashboardError("disabled role: qa-run")
         self.accepted_controls.append((action, skill))
         return {"accepted": True, "pid": 9876}
+
+    def global_control(self, action):
+        self.calls.append(("global_control", action))
+        if action not in {"stop-all", "resume-all"}:
+            raise DashboardError(f"unknown action: {action}")
+        self.accepted_controls.append((action,))
+        return {"accepted": True, "global_state": "stopped" if action == "stop-all" else "running"}
 
     def change_model(self, skill, model):
         self.calls.append(("change_model", skill, model))
@@ -1225,6 +1280,31 @@ class DashboardHttpTest(unittest.TestCase):
             [("trigger", "research-run")],
             self.service.accepted_controls,
         )
+
+    def test_post_action_accepts_global_stop_without_skill(self):
+        status, _, payload = self.request(
+            "POST",
+            "/api/actions",
+            json.dumps({"action": "stop-all"}).encode(),
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(202, status)
+        self.assertEqual("stopped", json.loads(payload)["global_state"])
+        self.assertEqual([("global_control", "stop-all")], self.service.calls[-1:])
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/actions",
+            json.dumps({"action": "resume-all", "skill": "research-run"}).encode(),
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(400, status)
 
     def test_post_change_model_accepts_exact_request_and_forwards_model(self):
         body = json.dumps(
@@ -1530,6 +1610,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
         for identifier in (
             "overview",
+            "live-agents",
             "agents",
             "activity",
             "gitlab-work",
@@ -1576,6 +1657,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         for function_name in (
             "fetchJson",
             "renderOverview",
+            "renderLiveAgents",
             "renderAgents",
             "renderHistory",
             "renderGitLab",

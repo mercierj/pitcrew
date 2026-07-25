@@ -39,6 +39,7 @@ SCHEDULER = ROOT / "bin/pitcrew-schedule.py"
 RUNNER = ROOT / "bin/pitcrew-codex.sh"
 LIFECYCLES = ("todo", "processing", "review", "blocked", "done")
 CONTROL_ACTIONS = {"trigger", "stop", "restart"}
+GLOBAL_CONTROL_ACTIONS = {"stop-all", "resume-all"}
 MR_URL = re.compile(r"https?://[^\s<>'\"]+/-/merge_requests/\d+")
 MR_REFERENCE = re.compile(r"(?<![\w!])!(\d+)\b")
 
@@ -169,6 +170,39 @@ class DashboardService:
                 _redacted_error(str(error), "history unavailable")
             ) from error
 
+    def _live_status(self, skill: str, running: bool) -> dict | None:
+        if not running:
+            return None
+        path = self.runtime_dir / "live" / f"{skill}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                return None
+            started_at = value.get("started_at")
+            pid = value.get("pid")
+            if (
+                value.get("project") != self.project
+                or value.get("skill") != skill
+                or not isinstance(started_at, str)
+                or not isinstance(pid, int)
+                or isinstance(pid, bool)
+                or pid <= 0
+                or not isinstance(value.get("phase"), str)
+            ):
+                return None
+            _timestamp(started_at)
+            model = value.get("model")
+            return {
+                "project": self.project,
+                "skill": skill,
+                "model": model if isinstance(model, str) else None,
+                "started_at": started_at,
+                "pid": pid,
+                "phase": value["phase"][:200],
+            }
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
     def snapshot(self) -> dict:
         schedule = self._schedule_entries(force_refresh=True)
         records = self.history(None, None)
@@ -193,6 +227,7 @@ class DashboardService:
             )
             loaded = bool(entry.get("loaded"))
             interval = int(entry.get("interval_seconds", 0))
+            running = bool(entry.get("running"))
             estimated = None
             if loaded and latest is not None and interval > 0:
                 try:
@@ -205,7 +240,8 @@ class DashboardService:
             normalized = {
                 **entry,
                 "loaded": loaded,
-                "running": bool(entry.get("running")),
+                "running": running,
+                "live_status": self._live_status(skill, running),
                 "interval_seconds": interval,
                 "latest_history": latest,
                 "health": "stopped" if not loaded else classify_record(latest),
@@ -225,6 +261,7 @@ class DashboardService:
         return {
             "project": self.project,
             "generated_at": self._now().isoformat(),
+            "global_state": self._global_state(schedule),
             "counts": {
                 "enabled": len(agents),
                 "disabled": len(disabled_roles),
@@ -288,6 +325,11 @@ class DashboardService:
         if not entry["enabled"]:
             raise DashboardError(f"disabled role: {skill}")
         return entry
+
+    def _global_state(self, schedule: list[dict] | None = None) -> str:
+        entries = schedule if schedule is not None else self._schedule_entries(force_refresh=True)
+        states = {entry.get("global_state", "running") for entry in entries}
+        return "stopped" if states == {"stopped"} else "running"
 
     def _degraded_gitlab(self, error: str) -> dict:
         return {
@@ -469,6 +511,22 @@ class DashboardService:
             )
         self._schedule_cache = None
 
+    def _scheduler_global_control(self, action: str) -> None:
+        result = self._run(
+            [
+                "python3",
+                str(SCHEDULER),
+                action,
+                "--project",
+                self.project,
+            ]
+        )
+        if result.returncode:
+            raise DashboardError(
+                _redacted_error(result.stderr, f"failed to {action}")
+            )
+        self._schedule_cache = None
+
     def _trigger(self, skill: str) -> int:
         try:
             process = subprocess.Popen(
@@ -496,6 +554,16 @@ class DashboardService:
                 error_action=action,
             )
             return {"accepted": True}
+
+    def global_control(self, action: str) -> dict:
+        with self._control_lock:
+            if action not in GLOBAL_CONTROL_ACTIONS:
+                raise DashboardError(f"unknown action: {action}")
+            self._scheduler_global_control(action)
+            return {
+                "accepted": True,
+                "global_state": "stopped" if action == "stop-all" else "running",
+            }
 
     def change_model(self, skill: str, model: str) -> dict:
         with self._control_lock:
