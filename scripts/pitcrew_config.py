@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+import fcntl
 import json
 import os
 import re
@@ -375,18 +376,38 @@ def load_runtime_config(
     values = os.environ if env is None else env
     project_fd = _open_runtime_project_for_read(project, values)
     try:
-        try:
-            config_fd = os.open(
-                "config.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=project_fd
-            )
-            with os.fdopen(config_fd, "r", encoding="utf-8") as config_file:
-                config = json.load(config_file)
-        except OSError as error:
-            raise ConfigError("runtime config path must not be a symlink or missing") from error
+        return _load_runtime_config_from_fd(project_fd)
     finally:
         os.close(project_fd)
+
+
+def _load_runtime_config_from_fd(project_fd: int) -> dict[str, Any]:
+    try:
+        config_fd = os.open("config.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=project_fd)
+        with os.fdopen(config_fd, "r", encoding="utf-8") as config_file:
+            config = json.load(config_file)
+    except OSError as error:
+        raise ConfigError("runtime config path must not be a symlink or missing") from error
     validate(config)
     return dict(config)
+
+
+def _lock_runtime_config(parent_fd: int) -> int:
+    try:
+        lock_fd = os.open(
+            "config.json.lock",
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            os.close(lock_fd)
+            raise ConfigError("runtime config lock must be a regular file")
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return lock_fd
+    except OSError as error:
+        raise ConfigError("runtime config lock must not be a symlink or unavailable") from error
 
 
 def _replace_runtime_config(parent_fd: int, serialized: str) -> None:
@@ -452,17 +473,22 @@ def update_runtime_model(
     if model not in MODEL_CATALOG:
         raise ConfigError(f"model is unsupported: {model}")
     values = os.environ if env is None else env
-    config = load_runtime_config(project, values)
-    agents = dict(config.get("agents", {}))
-    agents[skill] = {"model": model}
-    updated = dict(config)
-    updated["agents"] = agents
-    validate(updated)
-    serialized = json.dumps(updated, indent=2) + "\n"
     project_fd = _open_runtime_project_for_read(project, values)
+    lock_fd: int | None = None
     try:
+        lock_fd = _lock_runtime_config(project_fd)
+        config = _load_runtime_config_from_fd(project_fd)
+        agents = dict(config.get("agents", {}))
+        agents[skill] = {"model": model}
+        updated = dict(config)
+        updated["agents"] = agents
+        validate(updated)
+        serialized = json.dumps(updated, indent=2) + "\n"
         _replace_runtime_config(project_fd, serialized)
     finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
         os.close(project_fd)
 
 

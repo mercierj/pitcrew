@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -89,6 +90,61 @@ class ConfigTest(unittest.TestCase):
 
             self.assertEqual(original, destination.read_text(encoding="utf-8"))
             self.assertEqual([], list(destination.parent.glob(".config-*")))
+
+    def test_update_runtime_model_serializes_concurrent_role_updates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/generic.json", "example", env)
+            first_write_entered = threading.Event()
+            second_write_entered = threading.Event()
+            release_first_write = threading.Event()
+            write_count = 0
+            write_count_lock = threading.Lock()
+            original_replace = __import__(
+                "scripts.pitcrew_config", fromlist=["_replace_runtime_config"]
+            )._replace_runtime_config
+
+            def delay_first_write(parent_fd, serialized):
+                nonlocal write_count
+                with write_count_lock:
+                    write_count += 1
+                    position = write_count
+                if position == 1:
+                    first_write_entered.set()
+                    self.assertTrue(release_first_write.wait(timeout=2))
+                else:
+                    second_write_entered.set()
+                original_replace(parent_fd, serialized)
+
+            errors = []
+
+            def update(skill, model):
+                try:
+                    update_runtime_model("example", skill, model, env)
+                except Exception as error:  # pragma: no cover - asserted below
+                    errors.append(error)
+
+            with mock.patch("scripts.pitcrew_config._replace_runtime_config", delay_first_write):
+                first = threading.Thread(
+                    target=update, args=("research-run", "gpt-5.6-luna")
+                )
+                first.start()
+                self.assertTrue(first_write_entered.wait(timeout=2))
+                second = threading.Thread(
+                    target=update, args=("qa-run", "gpt-5.6-sol")
+                )
+                second.start()
+                second_write_entered.wait(timeout=0.2)
+                release_first_write.set()
+                first.join(timeout=2)
+                second.join(timeout=2)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual([], errors)
+            agents = json.loads(destination.read_text(encoding="utf-8"))["agents"]
+            self.assertEqual({"model": "gpt-5.6-luna"}, agents["research-run"])
+            self.assertEqual({"model": "gpt-5.6-sol"}, agents["qa-run"])
 
     def test_runtime_root_uses_codex_home(self):
         with tempfile.TemporaryDirectory() as temp:
