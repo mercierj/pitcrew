@@ -23,6 +23,13 @@ REQUIRED_STRING_FIELDS = (
     "summary",
 )
 VALID_OUTCOMES = {"success", "noop", "failed", "interrupted"}
+USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "total_tokens",
+)
 BENIGN_NOOP_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -77,14 +84,29 @@ def _parse_timestamp(value: str) -> datetime:
 def _validate_record(record: object) -> dict:
     if not isinstance(record, dict):
         raise ValueError("history record must be an object")
+    normalized = dict(record)
     for field in REQUIRED_STRING_FIELDS:
-        if not isinstance(record.get(field), str) or not record[field]:
+        if not isinstance(normalized.get(field), str) or not normalized[field]:
             raise ValueError(f"history record field {field} must be a non-empty string")
-    if record["outcome"] not in VALID_OUTCOMES:
-        raise ValueError(f"invalid history outcome: {record['outcome']}")
-    _parse_timestamp(record["started_at"])
-    _parse_timestamp(record["finished_at"])
-    return record
+    if normalized["outcome"] not in VALID_OUTCOMES:
+        raise ValueError(f"invalid history outcome: {normalized['outcome']}")
+    _parse_timestamp(normalized["started_at"])
+    _parse_timestamp(normalized["finished_at"])
+    if not isinstance(normalized.get("model"), str) or not normalized.get("model"):
+        normalized.pop("model", None)
+    usage = normalized.get("usage")
+    if not isinstance(usage, dict) or set(usage) != set(USAGE_FIELDS):
+        normalized.pop("usage", None)
+    elif any(
+        isinstance(usage[field], bool)
+        or not isinstance(usage[field], int)
+        or usage[field] < 0
+        for field in USAGE_FIELDS
+    ):
+        normalized.pop("usage", None)
+    else:
+        normalized["usage"] = dict(usage)
+    return normalized
 
 
 class HistoryStore:
@@ -154,11 +176,11 @@ class HistoryStore:
             raise
 
     def append(self, record: dict, now: str | None = None) -> None:
-        _validate_record(record)
+        normalized = _validate_record(record)
         current_time = _parse_timestamp(now) if now is not None else datetime.now(UTC)
         with self._locked():
             records = self._read_valid_records()
-            records.append(record)
+            records.append(normalized)
             self._replace(self._retained(records, current_time))
 
     def read(

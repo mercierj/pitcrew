@@ -125,6 +125,8 @@ class CliTest(unittest.TestCase):
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n"
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\n"
+                "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":120,\"cached_input_tokens\":40,\"cache_write_tokens\":10,\"output_tokens\":30,\"total_tokens\":200}}'\n"
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
                 "  if [ \"$previous\" = '--output-last-message' ]; then\n"
@@ -217,11 +219,23 @@ class CliTest(unittest.TestCase):
                 self.assertTrue(record["started_at"].endswith("Z"))
                 self.assertTrue(record["finished_at"].endswith("Z"))
                 self.assertGreaterEqual(record["duration_ms"], 0)
+                self.assertEqual("gpt-5.6-terra", record["model"])
             latest = history[-1]
             self.assertEqual("research-run", latest["skill"])
             self.assertEqual("success", latest["outcome"])
             self.assertEqual("bounded summary", latest["summary"])
             self.assertGreaterEqual(latest["duration_ms"], 0)
+            self.assertEqual(
+                {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 40,
+                    "cache_write_tokens": 10,
+                    "output_tokens": 30,
+                    "total_tokens": 200,
+                },
+                latest["usage"],
+            )
+            self.assertNotIn("thread_1", history_path.read_text(encoding="utf-8"))
 
     def test_scheduled_runner_records_failed_codex_exit(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -240,6 +254,10 @@ class CliTest(unittest.TestCase):
             fake_codex = root / "fake-codex"
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
+                "printf '%s\\n' '{not-json'\n"
+                "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\n"
+                "printf '%s\\n' '{\"usage\":{\"input_tokens\":1}}'\n"
+                "printf '%s\\n' '{\"usage\":{\"input_tokens\":7,\"cached_input_tokens\":2,\"cache_write_tokens\":3,\"output_tokens\":4}}'\n"
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
                 "  if [ \"$previous\" = '--output-last-message' ]; then\n"
@@ -271,6 +289,18 @@ class CliTest(unittest.TestCase):
             latest = history[-1]
             self.assertEqual("failed", latest["outcome"])
             self.assertEqual(17, latest["exit_code"])
+            self.assertEqual("gpt-5.6-terra", latest["model"])
+            self.assertEqual(
+                {
+                    "input_tokens": 7,
+                    "cached_input_tokens": 2,
+                    "cache_write_tokens": 3,
+                    "output_tokens": 4,
+                    "total_tokens": 16,
+                },
+                latest["usage"],
+            )
+            self.assertNotIn("thread_1", history_path.read_text(encoding="utf-8"))
 
     def test_scheduled_runner_records_command_launch_failure(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -314,6 +344,8 @@ class CliTest(unittest.TestCase):
                 latest["summary"],
             )
             self.assertNotIn(secret, latest["summary"])
+            self.assertEqual("gpt-5.6-terra", latest["model"])
+            self.assertNotIn("usage", latest)
 
     def test_scheduled_runner_reuses_unlocked_file_after_crash(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -386,6 +418,8 @@ class CliTest(unittest.TestCase):
                     "getbill",
                     "--skill",
                     "research-run",
+                    "--model",
+                    "gpt-5.6-terra",
                     "--summary-file",
                     str(root / "first-summary.txt"),
                     "--history-file",
@@ -415,6 +449,8 @@ class CliTest(unittest.TestCase):
                         "getbill",
                         "--skill",
                         "research-run",
+                        "--model",
+                        "gpt-5.6-terra",
                         "--summary-file",
                         str(root / "second-summary.txt"),
                         "--history-file",

@@ -88,6 +88,49 @@ class HistoryStoreTest(unittest.TestCase):
 
             self.assertEqual([valid], records)
 
+    def test_history_round_trips_valid_model_and_usage_without_mutating_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl")
+            now = "2026-07-24T12:00:00Z"
+            record = _record(
+                "research-run",
+                now,
+                model="gpt-5.6-terra",
+                usage={
+                    "input_tokens": 120,
+                    "cached_input_tokens": 40,
+                    "cache_write_tokens": 10,
+                    "output_tokens": 30,
+                    "total_tokens": 200,
+                },
+            )
+
+            store.append(record, now=now)
+
+            self.assertEqual(record, store.read(now=now)[0])
+
+    def test_history_keeps_legacy_records_but_removes_unknown_model_and_bad_usage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl")
+            now = "2026-07-24T12:00:00Z"
+            cases = (
+                _record("legacy", now),
+                _record("unknown-model", now, model=["not-a-model"]),
+                _record("negative", now, usage={"input_tokens": -1}),
+                _record("non-int", now, usage={"input_tokens": "1"}),
+                _record("bool", now, usage={"input_tokens": True}),
+                _record("incomplete", now, usage={"input_tokens": 1}),
+                _record("malformed", now, usage="not-an-object"),
+            )
+            for record in cases:
+                store.append(record, now=now)
+
+            by_skill = {record["skill"]: record for record in store.read(now=now)}
+            self.assertNotIn("model", by_skill["legacy"])
+            for skill in ("unknown-model", "negative", "non-int", "bool", "incomplete", "malformed"):
+                self.assertNotIn("usage", by_skill[skill])
+            self.assertNotIn("model", by_skill["unknown-model"])
+
     def test_two_processes_append_two_valid_records(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "history.jsonl"

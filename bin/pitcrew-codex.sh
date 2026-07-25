@@ -112,6 +112,7 @@ if "$SCHEDULED"; then
     --lock-file "$LOCK_FILE" \
     --project "$PROJECT" \
     --skill "$SKILL" \
+    --model "$MODEL" \
     --summary-file "$SUMMARY_FILE" \
     --history-file "$HISTORY_FILE" \
     -- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
