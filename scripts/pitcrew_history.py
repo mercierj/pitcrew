@@ -13,6 +13,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
+try:
+    from scripts.pitcrew_models import MODEL_CATALOG
+except ModuleNotFoundError:
+    from pitcrew_models import MODEL_CATALOG
+
 
 REQUIRED_STRING_FIELDS = (
     "project",
@@ -92,8 +97,12 @@ def _validate_record(record: object) -> dict:
         raise ValueError(f"invalid history outcome: {normalized['outcome']}")
     _parse_timestamp(normalized["started_at"])
     _parse_timestamp(normalized["finished_at"])
-    if not isinstance(normalized.get("model"), str) or not normalized.get("model"):
+    model = normalized.get("model")
+    if "model" in normalized and (
+        not isinstance(model, str) or model not in MODEL_CATALOG
+    ):
         normalized.pop("model", None)
+        normalized.pop("usage", None)
     usage = normalized.get("usage")
     if not isinstance(usage, dict) or set(usage) != set(USAGE_FIELDS):
         normalized.pop("usage", None)

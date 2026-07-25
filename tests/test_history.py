@@ -115,12 +115,28 @@ class HistoryStoreTest(unittest.TestCase):
             now = "2026-07-24T12:00:00Z"
             cases = (
                 _record("legacy", now),
-                _record("unknown-model", now, model=["not-a-model"]),
+                _record(
+                    "unknown-model",
+                    now,
+                    model="invented",
+                    usage={
+                        "input_tokens": 120,
+                        "cached_input_tokens": 40,
+                        "cache_write_tokens": 10,
+                        "output_tokens": 30,
+                        "total_tokens": 200,
+                    },
+                ),
                 _record("negative", now, usage={"input_tokens": -1}),
                 _record("non-int", now, usage={"input_tokens": "1"}),
                 _record("bool", now, usage={"input_tokens": True}),
                 _record("incomplete", now, usage={"input_tokens": 1}),
-                _record("malformed", now, usage="not-an-object"),
+                _record(
+                    "malformed",
+                    now,
+                    model="gpt-5.6-terra",
+                    usage="not-an-object",
+                ),
             )
             for record in cases:
                 store.append(record, now=now)
@@ -130,6 +146,8 @@ class HistoryStoreTest(unittest.TestCase):
             for skill in ("unknown-model", "negative", "non-int", "bool", "incomplete", "malformed"):
                 self.assertNotIn("usage", by_skill[skill])
             self.assertNotIn("model", by_skill["unknown-model"])
+            self.assertNotIn("usage", by_skill["unknown-model"])
+            self.assertEqual("gpt-5.6-terra", by_skill["malformed"]["model"])
 
     def test_two_processes_append_two_valid_records(self):
         with tempfile.TemporaryDirectory() as temp:
