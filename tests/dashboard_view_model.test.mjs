@@ -1,0 +1,104 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { buildActionQueue, buildWorkflow, resourceKey } from "../dashboard/view-model.mjs";
+
+const issue = (lifecycle, iid, extra = {}) => ({
+  resource_type: "issue",
+  canonical_url: `https://gitlab.example/group/app/-/issues/${iid}`,
+  web_url: `https://gitlab.example/group/app/-/issues/${iid}`,
+  iid,
+  lifecycle,
+  title: `${lifecycle} ${iid}`,
+  updated_at: `2026-07-2${iid}T10:00:00Z`,
+  ...extra,
+});
+
+test("resourceKey uses the resource type and canonical URL", () => {
+  assert.equal(
+    resourceKey(issue("todo", 1)),
+    "issue:https://gitlab.example/group/app/-/issues/1",
+  );
+});
+
+test("buildWorkflow orders active lifecycle keys and only keeps today's done issues", () => {
+  const workflow = buildWorkflow(
+    {
+      issues: [
+        issue("review", 3),
+        issue("closed", 1, { closed_at: "2026-07-26T08:00:00Z" }),
+        issue("todo", 2),
+        issue("blocked", 4),
+        issue("processing", 5),
+        issue("closed", 6, { closed_at: "2026-07-25T08:00:00Z" }),
+      ],
+    },
+    { doneDay: "2026-07-26" },
+  );
+
+  assert.deepEqual(Object.keys(workflow), ["todo", "processing", "review", "blocked", "done"]);
+  assert.deepEqual(workflow.todo.map(({ lifecycle }) => lifecycle), ["todo"]);
+  assert.deepEqual(workflow.processing.map(({ lifecycle }) => lifecycle), ["processing"]);
+  assert.deepEqual(workflow.review.map(({ lifecycle }) => lifecycle), ["review"]);
+  assert.deepEqual(workflow.blocked.map(({ lifecycle }) => lifecycle), ["blocked"]);
+  assert.deepEqual(workflow.done.map(({ iid }) => iid), [1]);
+  assert.equal(workflow.todo[0].key, "issue:https://gitlab.example/group/app/-/issues/2");
+  assert.equal(workflow.todo[0].kind, "issue");
+  assert.equal(workflow.todo[0].lifecycle, "todo");
+});
+
+test("buildWorkflow filters active cards by text and agent role", () => {
+  const workflow = buildWorkflow(
+    {
+      issues: [
+        issue("todo", 1, { title: "Payments need review", agent_action: { skill: "implementer-run" } }),
+        issue("todo", 2, { title: "Payments without matching role", agent_action: { route: "qa-run" } }),
+        issue("review", 3, { title: "Invoices", agent_action: { route: "implementer-run" } }),
+      ],
+    },
+    { query: "payments", role: "implementer-run", doneDay: "2026-07-26" },
+  );
+
+  assert.deepEqual(workflow.todo.map(({ iid }) => iid), [1]);
+  assert.deepEqual(workflow.processing, []);
+  assert.deepEqual(workflow.review, []);
+  assert.deepEqual(workflow.blocked, []);
+});
+
+test("buildActionQueue orders action kinds by priority and timestamps", () => {
+  const queue = buildActionQueue({
+    decisions: { decisions: [
+      { ticket_id: 2, created_at: "2026-07-26T11:00:00Z" },
+      { ticket_id: 1, created_at: "2026-07-26T09:00:00Z" },
+    ] },
+    snapshot: { agents: [
+      { skill: "qa-run", health: "warning", updated_at: "2026-07-26T12:00:00Z" },
+      { skill: "implementer-run", health: "failed", updated_at: "2026-07-26T10:00:00Z" },
+    ] },
+    work: { merge_requests: [issue("opened", 3, {
+      resource_type: "merge_request",
+      canonical_url: "https://gitlab.example/group/app/-/merge_requests/3",
+      target_branch: "develop",
+      updated_at: "2026-07-26T13:00:00Z",
+    })] },
+    proposals: { proposals: [{ id: "proposal-1", created_at: "2026-07-26T14:00:00Z" }] },
+  });
+
+  assert.deepEqual(queue.map(({ kind }) => kind), [
+    "decision", "decision", "agent-failure", "agent-failure", "merge-request", "proposal",
+  ]);
+  assert.deepEqual(queue.slice(0, 2).map(({ key }) => key), ["decision:1", "decision:2"]);
+  assert.deepEqual(queue.slice(2, 4).map(({ key }) => key), ["agent:implementer-run", "agent:qa-run"]);
+  assert.deepEqual(queue.map(({ label }) => label), ["Répondre", "Répondre", "Diagnostiquer", "Diagnostiquer", "Fusionner", "Examiner"]);
+});
+
+test("buildActionQueue excludes merge requests targeting protected deployment branches", () => {
+  const queue = buildActionQueue({
+    work: { merge_requests: [
+      issue("opened", 1, { resource_type: "merge_request", target_branch: "prod" }),
+      issue("opened", 2, { resource_type: "merge_request", target_branch: "preprod" }),
+    ] },
+  });
+
+  assert.deepEqual(queue, []);
+});
