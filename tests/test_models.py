@@ -58,6 +58,15 @@ class ModelCatalogTest(unittest.TestCase):
         }
         self.assertEqual(Decimal("20.875"), estimate_cost("gpt-5.6-terra", usage))
 
+    def test_cost_treats_empty_usage_as_zero(self):
+        self.assertEqual(Decimal("0"), estimate_cost("gpt-5.6-terra", {}))
+
+    def test_cost_treats_missing_usage_categories_as_zero(self):
+        self.assertEqual(
+            Decimal("15"),
+            estimate_cost("gpt-5.6-terra", {"output_tokens": 1_000_000}),
+        )
+
     def test_aggregate_usage_keeps_legacy_records_unmeasured(self):
         aggregated = aggregate_usage(
             [

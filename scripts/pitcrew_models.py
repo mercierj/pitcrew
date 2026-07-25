@@ -112,7 +112,7 @@ def _cost_precision(usages: tuple[Mapping[str, int], ...]) -> int:
         (
             1,
             *(
-                Decimal(usage[field]).adjusted() + 1
+                Decimal(usage.get(field, 0)).adjusted() + 1
                 for usage in usages
                 for field in USAGE_FIELDS
             ),
