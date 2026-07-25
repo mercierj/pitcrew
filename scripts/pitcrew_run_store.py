@@ -228,6 +228,44 @@ class RunStore:
             if actual != expected:
                 raise RunStoreError(f"database schema mismatch for {table}")
 
+        expected_checks = {
+            ("runs", "source"): ("dashboard", "scheduled", "reconcile"),
+            ("runs", "state"): ALL_STATES,
+            ("project_controls", "state"): ("running", "stopped"),
+        }
+        for (table, column), expected_values in expected_checks.items():
+            table_row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if table_row is None or not isinstance(table_row["sql"], str):
+                raise RunStoreError(f"database schema mismatch for {table}")
+            identifier = (
+                rf'(?:{re.escape(column)}|"{re.escape(column)}"|'
+                rf"`{re.escape(column)}`|\[{re.escape(column)}\])"
+            )
+            bodies = re.findall(
+                rf"check\s*\(\s*{identifier}\s+in\s*\(([^()]*)\)\s*\)",
+                table_row["sql"],
+                flags=re.IGNORECASE,
+            )
+            found = False
+            for body in bodies:
+                values: list[str] = []
+                for token in body.split(","):
+                    match = re.fullmatch(r"""\s*(['"])(.*?)\1\s*""", token)
+                    if match is None:
+                        break
+                    values.append(match.group(2))
+                else:
+                    if tuple(values) == expected_values:
+                        found = True
+                        break
+            if not found:
+                raise RunStoreError(
+                    f"database schema mismatch for {table}.{column} check"
+                )
+
         indexes = {
             row["name"]: row
             for row in connection.execute("PRAGMA index_list(runs)")

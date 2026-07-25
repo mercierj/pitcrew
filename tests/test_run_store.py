@@ -395,6 +395,64 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
+    def test_version_one_without_state_and_source_checks_is_rejected_unchanged(self):
+        path = Path(self.temp.name).resolve() / "unchecked-v1.sqlite"
+        with closing(sqlite3.connect(path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE "runs" (
+                    "run_id" text PRIMARY KEY,
+                    "project" text NOT NULL,
+                    "skill" text NOT NULL,
+                    "source" text NOT NULL,
+                    "target" text,
+                    "dedupe_key" text NOT NULL,
+                    "state" text NOT NULL,
+                    "queue_sequence" integer NOT NULL,
+                    "pid" integer,
+                    "created_at" text NOT NULL,
+                    "started_at" text,
+                    "heartbeat_at" text,
+                    "finished_at" text,
+                    "phase" text NOT NULL,
+                    "cancel_requested" integer NOT NULL DEFAULT 0,
+                    "error_code" text,
+                    "error_message" text,
+                    "predecessor_run_id" text
+                );
+                CREATE TABLE "project_controls" (
+                    "project" text PRIMARY KEY,
+                    "state" text NOT NULL,
+                    "generation" integer NOT NULL DEFAULT 0
+                );
+                CREATE UNIQUE INDEX "active_run_dedupe"
+                ON "runs" (project, dedupe_key)
+                WHERE state IN ('queued', 'running');
+                CREATE INDEX "queue_by_project_skill"
+                ON "runs" ("project", "skill", "state", "queue_sequence");
+                PRAGMA user_version = 1;
+                """
+            )
+            before = list(connection.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                "ORDER BY type,name"
+            ))
+        path.chmod(0o600)
+
+        with self.assertRaisesRegex(RunStoreError, "schema"):
+            RunStore(path)
+
+        with closing(sqlite3.connect(path)) as connection:
+            after = list(connection.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                "ORDER BY type,name"
+            ))
+            self.assertEqual(before, after)
+            self.assertEqual(
+                1,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+
     def test_schema_constants_tables_and_indexes_match_version_one(self):
         self.assertEqual(("queued", "running"), ACTIVE_STATES)
         self.assertEqual(("succeeded", "failed", "cancelled"), TERMINAL_STATES)
