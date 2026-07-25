@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 
 MODEL_CATALOG = {
@@ -74,10 +74,12 @@ def resolve_model(config: Mapping, skill: str) -> str:
 
 def estimate_cost(model: str, usage: Mapping[str, int]) -> Decimal:
     prices = MODEL_CATALOG[model]["pricing"]
-    return sum(
-        Decimal(usage.get(field, 0)) * prices[field] / Decimal(1_000_000)
-        for field in prices
-    )
+    with localcontext() as context:
+        context.prec = _cost_precision((usage,))
+        return sum(
+            Decimal(usage.get(field, 0)) * prices[field] / Decimal(1_000_000)
+            for field in prices
+        )
 
 
 def empty_usage() -> dict[str, int]:
@@ -89,7 +91,11 @@ def _measured_usage(record: object) -> tuple[str, Mapping[str, int]] | None:
         return None
     model = record.get("model")
     usage = record.get("usage")
-    if model not in MODEL_CATALOG or not isinstance(usage, Mapping):
+    if (
+        not isinstance(model, str)
+        or model not in MODEL_CATALOG
+        or not isinstance(usage, Mapping)
+    ):
         return None
     if set(usage) != set(USAGE_FIELDS) or any(
         isinstance(usage[field], bool)
@@ -101,26 +107,55 @@ def _measured_usage(record: object) -> tuple[str, Mapping[str, int]] | None:
     return model, usage
 
 
+def _cost_precision(usages: tuple[Mapping[str, int], ...]) -> int:
+    token_digits = max(
+        (
+            1,
+            *(
+                Decimal(usage[field]).adjusted() + 1
+                for usage in usages
+                for field in USAGE_FIELDS
+            ),
+        ),
+    )
+    price_digits = max(
+        len(price.as_tuple().digits)
+        for details in MODEL_CATALOG.values()
+        for price in details["pricing"].values()
+    )
+    return max(
+        28,
+        token_digits + price_digits + Decimal(len(usages)).adjusted() + 13,
+    )
+
+
 def aggregate_usage(records: list[object]) -> dict:
     tokens = empty_usage()
     measured_runs = 0
     unmeasured_runs = 0
-    cost = Decimal(0)
+    measured_records = []
     for record in records:
         measured = _measured_usage(record)
         if measured is None:
             unmeasured_runs += 1
             continue
         model, usage = measured
+        measured_records.append((model, usage))
         measured_runs += 1
         for field in USAGE_FIELDS:
             tokens[field] += usage[field]
-        cost += estimate_cost(model, usage)
+    with localcontext() as context:
+        context.prec = _cost_precision(tuple(usage for _, usage in measured_records))
+        cost = sum(
+            (estimate_cost(model, usage) for model, usage in measured_records),
+            Decimal(0),
+        )
+        estimated_cost = str(cost.quantize(Decimal("0.000001")))
     return {
         "measured_runs": measured_runs,
         "unmeasured_runs": unmeasured_runs,
         "tokens": tokens,
-        "estimated_cost_usd": str(cost.quantize(Decimal("0.000001"))),
+        "estimated_cost_usd": estimated_cost,
     }
 
 

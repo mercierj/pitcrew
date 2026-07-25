@@ -112,6 +112,38 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(1, aggregated["unmeasured_runs"])
         self.assertEqual("0.000031", aggregated["estimated_cost_usd"])
 
+    def test_aggregate_usage_treats_unhashable_models_as_unmeasured(self):
+        aggregated = aggregate_usage(
+            [
+                {"model": [], "usage": {}},
+                {"model": {}, "usage": {}},
+            ]
+        )
+
+        self.assertEqual(0, aggregated["measured_runs"])
+        self.assertEqual(2, aggregated["unmeasured_runs"])
+
+    def test_aggregate_usage_handles_very_large_valid_token_counts(self):
+        tokens = 10**100
+        aggregated = aggregate_usage(
+            [
+                {
+                    "model": "gpt-5.6-luna",
+                    "usage": {
+                        "input_tokens": tokens,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": tokens,
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(1, aggregated["measured_runs"])
+        self.assertEqual(tokens, aggregated["tokens"]["total_tokens"])
+        self.assertEqual(f"{10**94}.000000", aggregated["estimated_cost_usd"])
+
     def test_empty_aggregate_has_fixed_zeroes_and_safe_catalog(self):
         self.assertEqual(
             {
