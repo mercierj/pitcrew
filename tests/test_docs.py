@@ -1,7 +1,15 @@
 import unittest
 import subprocess
 import sys
+import re
 from pathlib import Path
+
+from scripts.pitcrew_models import (
+    DEFAULT_MODELS,
+    MODEL_CATALOG,
+    PRICING_CURRENCY,
+    PRICING_EFFECTIVE_DATE,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,6 +135,44 @@ class DocsTest(unittest.TestCase):
             self.assertIn(term, scheduled)
         self.assertIn("API-equivalent", readme)
         self.assertIn("seven-day", readme)
+
+    def test_model_catalog_documentation_tracks_runtime_constants(self):
+        scheduled = (ROOT / "references/SCHEDULED-TASKS.md").read_text(
+            encoding="utf-8"
+        )
+        section = re.search(
+            r"(?ms)^## Agent model and usage controls$.*?(?=^## |\Z)", scheduled
+        )
+        self.assertIsNotNone(section)
+        text = section.group(0)
+
+        for role, model in DEFAULT_MODELS.items():
+            self.assertRegex(
+                text,
+                rf"(?m)^\| `{re.escape(role)}` \| `{re.escape(model)}` \|$",
+            )
+
+        for model, details in MODEL_CATALOG.items():
+            prices = details["pricing"]
+            rates = " | ".join(
+                format(prices[field], "f")
+                for field in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "cache_write_tokens",
+                    "output_tokens",
+                )
+            )
+            self.assertRegex(
+                text,
+                rf"(?m)^\| `{re.escape(model)}` \| {re.escape(rates)} \|.*\|$",
+            )
+
+        self.assertRegex(
+            text,
+            rf"(?m)^Pricing snapshot effective {re.escape(PRICING_EFFECTIVE_DATE)}, "
+            rf"in {re.escape(PRICING_CURRENCY)} per million tokens\.$",
+        )
 
     def test_documented_migration_options_are_supported(self):
         result = subprocess.run(

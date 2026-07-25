@@ -11,16 +11,29 @@ Each configured role can pin `agents.<role>.model` to one of the catalog slugs.
 configuration omits that role; it is not a writable configuration field. The
 profiles pin all roles so model selection stays explicit:
 
-| Model | Intended use | Why |
-|---|---|---|
-| `gpt-5.6-sol` | quality-critical implementation, review, investigation, unblock | strongest quality profile |
-| `gpt-5.6-terra` | research, validation, QA, coverage, dev verification, release | balanced quality and cost |
-| `gpt-5.6-luna` | management, stale sweep, operations | fastest, lowest-cost profile |
+| Model | Input | Cache read | Cache write | Output | Why |
+|---|---:|---:|---:|---:|---|
+| `gpt-5.6-sol` | 5 | 0.5 | 6.25 | 30 | strongest quality profile |
+| `gpt-5.6-terra` | 2.5 | 0.25 | 3.125 | 15 | balanced quality and cost |
+| `gpt-5.6-luna` | 1 | 0.1 | 1.25 | 6 | fastest, lowest-cost profile |
 
-The fallback mapping is: research `gpt-5.6-terra`; manager `gpt-5.6-luna`;
-implementer, reviewer, investigate, and unblock `gpt-5.6-sol`; validator, QA,
-coverage, dev verification, and releaser `gpt-5.6-terra`; stale sweep and ops
-`gpt-5.6-luna`. The dashboard submits the selected slug with `--model`.
+| Role | Model |
+|---|---|
+| `research-run` | `gpt-5.6-terra` |
+| `manager-run` | `gpt-5.6-luna` |
+| `implementer-run` | `gpt-5.6-sol` |
+| `reviewer-run` | `gpt-5.6-sol` |
+| `validator-run` | `gpt-5.6-terra` |
+| `investigate-run` | `gpt-5.6-sol` |
+| `stale-sweep` | `gpt-5.6-luna` |
+| `qa-run` | `gpt-5.6-terra` |
+| `coverage-run` | `gpt-5.6-terra` |
+| `dev-verify-run` | `gpt-5.6-terra` |
+| `ops-run` | `gpt-5.6-luna` |
+| `unblock` | `gpt-5.6-sol` |
+| `releaser-run` | `gpt-5.6-terra` |
+
+The dashboard submits the selected slug with `--model`.
 
 The runtime records the selected model and token usage in JSONL history, without
 retaining a full transcript. When usage is available, each record includes
@@ -29,9 +42,7 @@ retaining a full transcript. When usage is available, each record includes
 subtotal. This is API-equivalent metering, not a subscription charge. It excludes
 tools, container execution, regional pricing, and priority pricing.
 
-Pricing snapshot effective 2026-07-24, in USD per million tokens (input / cache
-read / cache write / output): Sol 5 / .5 / 6.25 / 30; Terra 2.5 / .25 / 3.125 /
-15; Luna 1 / .1 / 1.25 / 6.
+Pricing snapshot effective 2026-07-24, in USD per million tokens.
 
 ## Research template
 
