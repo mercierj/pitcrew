@@ -649,6 +649,20 @@ select {
   overflow-wrap: anywhere;
 }
 
+.ticket-agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.ticket-agent-unavailable {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
 .empty-state {
   grid-column: 1 / -1;
   margin: 0;

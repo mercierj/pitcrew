@@ -291,6 +291,28 @@ def create_server(
                     return
                 self._send_json(202, result)
                 return
+            if action == "launch-ticket-agent":
+                if (
+                    set(request) != {"action", "skill", "target"}
+                    or not isinstance(request.get("skill"), str)
+                    or not isinstance(request.get("target"), str)
+                    or not request["skill"]
+                    or not request["target"]
+                ):
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.launch_ticket_agent(
+                        request["skill"], request["target"]
+                    )
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
             skill = request.get("skill")
             if (
                 not isinstance(action, str)

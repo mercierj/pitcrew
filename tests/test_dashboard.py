@@ -696,10 +696,57 @@ class DashboardServiceTest(unittest.TestCase):
             [
                 "glab",
                 "api",
-            f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
+                f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=1",
             ],
             runner.calls[1][0],
         )
+
+    def test_gitlab_work_ticket_agent_actions(self):
+        work = self.service(FakeRunner()).gitlab_work(force_refresh=True)
+
+        self.assertEqual(
+            {
+                "skill": "implementer-run",
+                "label": "Lancer l’implémentation",
+                "target": "https://gitlab.com/getbill1/getbill/-/issues/1",
+                "available": True,
+                "unavailable_reason": None,
+            },
+            work["groups"]["todo"][0]["agent_action"],
+        )
+        self.assertEqual("unblock", work["groups"]["blocked"][0]["agent_action"]["skill"])
+        self.assertFalse(work["groups"]["blocked"][0]["agent_action"]["available"])
+        self.assertEqual("stale-sweep", work["groups"]["done"][0]["agent_action"]["skill"])
+        self.assertIsNone(work["groups"]["processing"][0]["agent_action"])
+        self.assertIsNone(work["groups"]["review"][0]["agent_action"])
+
+    def test_launch_ticket_agent_targets_validated_issue(self):
+        runner = FakeRunner()
+        service = self.service(runner)
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        process = mock.Mock(pid=7654)
+        with mock.patch("scripts.pitcrew_dashboard.subprocess.Popen", return_value=process) as starter:
+            result = service.launch_ticket_agent("implementer-run", target)
+
+        self.assertEqual(
+            {"accepted": True, "pid": 7654, "skill": "implementer-run", "target": target},
+            result,
+        )
+        starter.assert_called_once()
+        self.assertEqual(
+            [str(service.RUNNER) if hasattr(service, "RUNNER") else mock.ANY],
+            [starter.call_args.args[0][0]],
+        )
+        self.assertEqual(["--target", target, "--scheduled"], starter.call_args.args[0][-3:])
+
+        for invalid in (
+            "https://evil.example/getbill1/getbill/-/issues/1",
+            "https://gitlab.com/other/project/-/issues/1",
+            "https://gitlab.com/getbill1/getbill/-/issues/0",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(DashboardError):
+                    service.launch_ticket_agent("implementer-run", invalid)
 
     def test_gitlab_work_lists_only_open_merge_requests_with_display_fields(self):
         runner = FakeRunner()
@@ -867,7 +914,7 @@ class DashboardServiceTest(unittest.TestCase):
                     f"projects/{encoded}/merge_requests?scope=all&per_page=100&page=2",
                 ],
             ],
-            [call[0] for call in runner.calls],
+            [call[0] for call in runner.calls if call[0][0] == "glab"],
         )
 
     def test_gitlab_cache_lasts_sixty_seconds_and_force_refresh_bypasses_it(self):
@@ -883,7 +930,7 @@ class DashboardServiceTest(unittest.TestCase):
         forced = service.gitlab_work(force_refresh=True)
 
         self.assertEqual(first, cached)
-        self.assertEqual(6, len(runner.calls))
+        self.assertEqual(9, len(runner.calls))
         self.assertEqual(FIXED_NOW.isoformat(), first["last_successful_refresh"])
         self.assertEqual(
             (FIXED_NOW + timedelta(seconds=60)).isoformat(),
@@ -1285,6 +1332,12 @@ class FakeDashboardService:
         self.calls.append(("merge_merge_request", iid))
         return {"accepted": True, "partial": False, "iid": iid}
 
+    def launch_ticket_agent(self, skill, target):
+        self.calls.append(("launch_ticket_agent", skill, target))
+        if skill not in {"implementer-run", "unblock", "stale-sweep"}:
+            raise DashboardError("action rejected")
+        return {"accepted": True, "pid": 9753, "skill": skill, "target": target}
+
 
 class DashboardEntryPointTest(unittest.TestCase):
     def test_executable_imports_project_modules_outside_repository(self):
@@ -1448,6 +1501,51 @@ class DashboardHttpTest(unittest.TestCase):
             {"action": "merge-merge-request", "iid": True},
             {"action": "merge-merge-request", "iid": 0},
             {"action": "merge-merge-request", "iid": 11, "extra": "x"},
+        ):
+            with self.subTest(invalid=invalid):
+                status, _, _ = self.request(
+                    "POST",
+                    "/api/actions",
+                    json.dumps(invalid).encode(),
+                    {
+                        "Content-Type": "application/json",
+                        "X-Pitcrew-Session": self.token,
+                    },
+                )
+                self.assertEqual(400, status)
+
+    def test_post_launch_ticket_agent_requires_session_and_exact_request(self):
+        body = json.dumps({
+            "action": "launch-ticket-agent",
+            "skill": "implementer-run",
+            "target": "https://gitlab.com/getbill1/getbill/-/issues/1",
+        }).encode()
+        status, _, _ = self.request(
+            "POST", "/api/actions", body, {"Content-Type": "application/json"}
+        )
+        self.assertEqual(403, status)
+        self.assertEqual([], self.service.calls)
+
+        status, _, payload = self.request(
+            "POST",
+            "/api/actions",
+            body,
+            {
+                "Content-Type": "application/json",
+                "X-Pitcrew-Session": self.token,
+            },
+        )
+        self.assertEqual(202, status)
+        self.assertEqual("implementer-run", json.loads(payload)["skill"])
+        self.assertEqual(
+            [("launch_ticket_agent", "implementer-run", "https://gitlab.com/getbill1/getbill/-/issues/1")],
+            self.service.calls,
+        )
+
+        for invalid in (
+            {"action": "launch-ticket-agent", "skill": "implementer-run"},
+            {"action": "launch-ticket-agent", "skill": "implementer-run", "target": ""},
+            {"action": "launch-ticket-agent", "skill": "implementer-run", "target": "x", "extra": "x"},
         ):
             with self.subTest(invalid=invalid):
                 status, _, _ = self.request(
@@ -1948,6 +2046,11 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("window.confirm", self.javascript)
         self.assertIn("mergeMergeRequest(mergeRequest, work)", self.javascript)
         self.assertIn("renderMergeRequests(work)", self.javascript)
+        self.assertIn("issue.agent_action", self.javascript)
+        self.assertIn("ticket-agent-actions", self.javascript)
+        self.assertIn('action: "launch-ticket-agent"', self.javascript)
+        self.assertIn("pendingTicketActions", self.javascript)
+        self.assertIn("Agent indisponible", self.javascript)
         self.assertIn('await refresh({ manual: true });', self.javascript)
         self.assertIn('/api/decisions', self.javascript)
         self.assertIn('answer-decision', self.javascript)
@@ -1960,6 +2063,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             "renderGitLab",
             "renderMergeRequests",
             "mergeMergeRequest",
+            "launchTicketAgent",
             "renderDecision",
             "submitDecision",
             "control",

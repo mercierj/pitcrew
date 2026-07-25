@@ -217,6 +217,26 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("danger-full-access", result.stdout)
             self.assertIn("/Users/jo/Prog/getbill", result.stdout)
 
+    def test_runner_dry_run_forwards_directed_ticket_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "CODEX_HOME": str(Path(temp).resolve())}
+            init = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, init.returncode, init.stderr)
+            target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "implementer-run",
+                "getbill",
+                "--target",
+                target,
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"directed target: {target}", result.stdout)
+
     def test_scheduled_unblock_prompt_requires_persisted_dashboard_state(self):
         with tempfile.TemporaryDirectory() as temp:
             env = {**os.environ, "CODEX_HOME": str(Path(temp).resolve())}

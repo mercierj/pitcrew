@@ -64,6 +64,7 @@ const lifecycleLabels = {
 let refreshPromise = null;
 let lastGitLabRefresh = 0;
 const pendingSkills = new Set();
+const pendingTicketActions = new Set();
 let decisionSubmitting = false;
 let proposalSubmitting = false;
 let mergeSubmitting = false;
@@ -718,10 +719,55 @@ function renderGitLab(work) {
           card.append(link);
         }
       });
+      const agentAction = issue.agent_action;
+      if (agentAction && typeof agentAction === "object") {
+        const actions = document.createElement("div");
+        actions.className = "ticket-agent-actions";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button button-primary";
+        button.textContent = agentAction.label || "Lancer l’agent";
+        const target = typeof agentAction.target === "string" ? agentAction.target : "";
+        const pending = pendingTicketActions.has(target);
+        button.disabled = !agentAction.available || pending || !target;
+        button.addEventListener("click", () => launchTicketAgent(issue));
+        actions.append(button);
+        if (!agentAction.available) {
+          const unavailable = document.createElement("span");
+          unavailable.className = "ticket-agent-unavailable";
+          unavailable.textContent = agentAction.unavailable_reason || "Agent indisponible";
+          actions.append(unavailable);
+        }
+        card.append(actions);
+      }
       column.append(card);
     });
     elements.gitlabGroups.append(column);
   });
+}
+
+async function launchTicketAgent(issue) {
+  const agentAction = issue?.agent_action;
+  const target = typeof agentAction?.target === "string" ? agentAction.target : "";
+  const skill = typeof agentAction?.skill === "string" ? agentAction.skill : "";
+  if (!target || !skill || pendingTicketActions.has(target) || !agentAction?.available) {
+    return;
+  }
+  pendingTicketActions.add(target);
+  setText(elements.operationalStatus, `Lancement de ${skill} pour le ticket en cours.`);
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
+      body: JSON.stringify({ action: "launch-ticket-agent", skill, target }),
+    });
+    setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
+    await refresh({ manual: true });
+  } catch {
+    setText(elements.operationalStatus, `Impossible de lancer ${skill} pour ce ticket.`);
+  } finally {
+    pendingTicketActions.delete(target);
+  }
 }
 
 function renderMergeRequests(work) {

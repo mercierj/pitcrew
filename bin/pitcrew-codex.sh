@@ -11,7 +11,7 @@ readonly SKILLS=(
 )
 
 usage() {
-  echo "usage: pitcrew-codex.sh <skill> [project] [--dry-run] [--scheduled]" >&2
+  echo "usage: pitcrew-codex.sh <skill> [project] [--target <ticket>] [--dry-run] [--scheduled]" >&2
 }
 
 is_allowed_skill() {
@@ -34,6 +34,7 @@ shift
 PROJECT=""
 DRY_RUN=false
 SCHEDULED=false
+TARGET=""
 while (($#)); do
   case "$1" in
     --dry-run)
@@ -41,6 +42,11 @@ while (($#)); do
       ;;
     --scheduled)
       SCHEDULED=true
+      ;;
+    --target)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      TARGET="$1"
       ;;
     --*)
       echo "pitcrew-codex: unknown argument: $1" >&2
@@ -96,6 +102,9 @@ REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT"
 }
 
 PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. The Pitcrew coverage helper is at $REPO_ROOT/scripts/research_coverage.py; use it when the research skill requires coverage rotation. Fail closed when a configured provider or permission is unavailable."
+if [[ -n "$TARGET" ]]; then
+  PROMPT+=" Operate on exactly this directed target: $TARGET. Validate it with references/DIRECTED-TARGET.md before any provider lookup."
+fi
 if "$SCHEDULED" && [[ "$SKILL" == "unblock" ]]; then
   PROMPT+=" This is an unattended scheduled run. When a human decision is required, do not leave the question only in the final response: atomically persist the exact pending question, choices, ticket context, and status=blocked in $RUNTIME_ROOT/$PROJECT/unblock-state.json as required by skills/unblock/SKILL.md, then stop. The dashboard reads that file and cannot read this log."
 fi

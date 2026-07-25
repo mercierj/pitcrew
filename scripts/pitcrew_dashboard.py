@@ -11,7 +11,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from scripts.pitcrew_config import ConfigError, update_runtime_model, validate
 from scripts.pitcrew_history import HistoryStore, classify_record
@@ -43,6 +43,11 @@ RUNNER = ROOT / "bin/pitcrew-codex.sh"
 LIFECYCLES = ("todo", "processing", "review", "blocked", "done")
 CONTROL_ACTIONS = {"trigger", "stop", "restart"}
 GLOBAL_CONTROL_ACTIONS = {"stop-all", "resume-all"}
+TICKET_AGENT_ACTIONS = {
+    "todo": ("implementer-run", "Lancer l’implémentation"),
+    "blocked": ("unblock", "Débloquer ce ticket"),
+    "done": ("stale-sweep", "Vérifier la clôture"),
+}
 MR_URL = re.compile(r"https?://[^\s<>'\"]+/-/merge_requests/\d+")
 MR_REFERENCE = re.compile(r"(?<![\w!])!(\d+)\b")
 TICKET_REFERENCE = re.compile(r"#(\d+)$")
@@ -692,6 +697,10 @@ class DashboardService:
                 for merge_request in all_merge_requests
                 if merge_request.get("state") == "opened"
             ]
+            schedule_by_skill = {
+                entry["skill"]: entry
+                for entry in self._schedule_entries(force_refresh=True)
+            }
             groups = {state: [] for state in LIFECYCLES}
             mr_urls = {
                 int(mr["iid"]): str(mr["web_url"])
@@ -704,6 +713,24 @@ class DashboardService:
                 if lifecycle not in groups:
                     continue
                 related = self._related_merge_requests(issue, all_merge_requests, mr_urls)
+                agent_action = None
+                action_spec = TICKET_AGENT_ACTIONS.get(lifecycle)
+                if action_spec is not None and isinstance(issue.get("web_url"), str):
+                    skill, label = action_spec
+                    entry = schedule_by_skill.get(skill)
+                    available = bool(
+                        entry
+                        and entry.get("enabled")
+                        and not entry.get("running")
+                        and self._global_state(list(schedule_by_skill.values())) != "stopped"
+                    )
+                    agent_action = {
+                        "skill": skill,
+                        "label": label,
+                        "target": issue["web_url"],
+                        "available": available,
+                        "unavailable_reason": None if available else "Agent indisponible",
+                    }
                 groups[lifecycle].append(
                     {
                         **issue,
@@ -717,6 +744,7 @@ class DashboardService:
                             "pitcrew-source::",
                         ),
                         "related_merge_requests": related,
+                        "agent_action": agent_action,
                     }
                 )
             self._last_successful_refresh = current.isoformat()
@@ -840,9 +868,16 @@ class DashboardService:
         self._schedule_cache = None
 
     def _trigger(self, skill: str) -> int:
+        return self._trigger_target(skill)
+
+    def _trigger_target(self, skill: str, target: str | None = None) -> int:
+        args = [str(RUNNER), skill, self.project]
+        if target is not None:
+            args.extend(["--target", target])
+        args.append("--scheduled")
         try:
             process = subprocess.Popen(
-                [str(RUNNER), skill, self.project, "--scheduled"],
+                args,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -852,6 +887,40 @@ class DashboardService:
                 _redacted_error(str(error), "failed to trigger agent")
             ) from error
         return process.pid
+
+    def _validate_ticket_target(self, target: str) -> int:
+        parsed = urlsplit(target)
+        configured_host = str(self.config["gitlab"].get("host", ""))
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != configured_host
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DashboardError("invalid ticket target")
+        prefix = f"/{self.gitlab_project}/-/issues/"
+        if not parsed.path.startswith(prefix):
+            raise DashboardError("invalid ticket target")
+        iid = parsed.path.removeprefix(prefix)
+        if not iid.isdigit() or int(iid) <= 0:
+            raise DashboardError("invalid ticket target")
+        return int(iid)
+
+    def launch_ticket_agent(self, skill: str, target: str) -> dict:
+        with self._control_lock:
+            mapped_skills = {value[0] for value in TICKET_AGENT_ACTIONS.values()}
+            if skill not in mapped_skills:
+                raise DashboardError("skill is not available for ticket launch")
+            self._validate_ticket_target(target)
+            entry = self._enabled_entry(skill)
+            if entry.get("running"):
+                raise DashboardError("agent is already running")
+            return {
+                "accepted": True,
+                "pid": self._trigger_target(skill, target),
+                "skill": skill,
+                "target": target,
+            }
 
     def control(self, action: str, skill: str) -> dict:
         with self._control_lock:

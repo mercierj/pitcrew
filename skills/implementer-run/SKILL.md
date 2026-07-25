@@ -398,14 +398,14 @@ classify_pr_diff() {
 
 **GO action:**
 - Run `READ_CHANGE_CHECKS <N>` — must be all green/passing. If anything failing or pending: comment on configured tracker "CI not green yet, holding merge"; `log_event held`; skip (leave state at `$STATE_REVIEW`).
-- If green: `MERGE_CHANGE <N> --squash --delete-branch`. Change configured tracker state to `$STATE_DONE` (per HARD RULE 10: pass `state=$STATE_DONE_ID`, then `get_issue` and verify). Comment: `Merged ✓ <change URL>`. Keep all labels intact.
+- If green: `MERGE_CHANGE <N> --squash --delete-branch`. After the merge succeeds, call `CLOSE_LIFECYCLE <TICKET-id>` through the configured tracker provider. This applies `$STATE_DONE`, preserves all labels, posts the required `Merged ✓ <change URL>` audit comment, and closes the issue. Immediately re-read the ticket and verify the issue is closed and has `$STATE_DONE`; if either check fails, retry once, then log `close-broken:<TICKET-id>` and stop without claiming completion.
 - Clean up worktree: `cd <main-repo-path> && git worktree remove --force "$WORKTREE_ROOT/<repo>-<TICKET-id>" 2>/dev/null && git branch -D <feature-branch> 2>/dev/null; git worktree prune || true`
 - `log_event merged <TICKET-id> <repo> <change-N> <change-url> "<title>"`
 
 **LOW_RISK_AUTO_MERGE action (per HARD RULE 13):**
 - Capture the diff bucket: `BUCKET=$(classify_pr_diff <N> <repo>)` — will be `docs` or `tests`.
 - Run `READ_CHANGE_CHECKS <N>` — must be all green/passing. If anything failing or pending: comment on configured tracker "CI not green yet, holding auto-merge (low-risk: $BUCKET)"; `log_event held`; skip (leave state at `$STATE_REVIEW`). The change will be re-evaluated next fire and auto-merged then if CI flips green.
-- If green: `MERGE_CHANGE <N> --squash --delete-branch`. Change configured tracker state to `$STATE_DONE` (per HARD RULE 10: pass `state=$STATE_DONE_ID`, then `get_issue` and verify). Comment: `Auto-merged ✓ <change URL> — low-risk diff (${BUCKET}) per HARD RULE 13. No human "go" required for docs-only / test-only changes once reviewer signed off.`. Keep all labels intact.
+- If green: `MERGE_CHANGE <N> --squash --delete-branch`. After the merge succeeds, call `CLOSE_LIFECYCLE <TICKET-id>` through the configured tracker provider. This applies `$STATE_DONE`, preserves all labels, posts the required `Auto-merged ✓ <change URL> — low-risk diff (${BUCKET}) per HARD RULE 13. No human "go" required for docs-only / test-only changes once reviewer signed off.` audit comment, and closes the issue. Immediately re-read the ticket and verify the issue is closed and has `$STATE_DONE`; if either check fails, retry once, then log `close-broken:<TICKET-id>` and stop without claiming completion.
 - Clean up worktree: same as GO action.
 - `log_event auto-merged <TICKET-id> <repo> <change-N> <change-url> "<title>" "$BUCKET"`
 
@@ -556,7 +556,11 @@ The plan was written by a human deliberately to make this ticket agent-actionabl
 
 **STEP D. Implement (in an ISOLATED worktree).**
 
-NEVER touch the user's main checkout. Always work in a fresh git worktree.
+NEVER touch the user's main checkout. Always work in a fresh isolated checkout.
+Prefer a git worktree when the configured checkout's metadata is writable. If Git
+reports `permission denied` while updating `.git/FETCH_HEAD` or another metadata
+file, use the **sandbox-safe isolated clone** fallback below; do not bail merely
+because the shared checkout's Git metadata is protected.
 
 - Mark configured tracker ticket state = `$STATE_PROCESSING` (per HARD RULE 10: pass `state=$STATE_PROCESSING_ID`, then `get_issue` and verify `.status == $STATE_PROCESSING`; retry once with ID if not, bail to `$STATE_BLOCKED_ID` if still wrong). If unassigned, set `assignee=$ASSIGNEE_EMAIL`. Comment: `Picked up. Implementing in <repo>.` (If a plan was matched in STEP B, append: ` Following PLAN.md section: <section-name>.`)
 
@@ -572,10 +576,18 @@ The plan's matched section IS your spec. Specifically:
 After implementation, **before committing**: append a line to the plan's Status checklist on disk (the `- [ ] change X` bullet at the bottom of PLAN.md) marking this change done with the change number once it's opened. Commit that PLAN.md edit alongside your code changes in the same change (the plan-update commit can be its own commit but in the same change).
 - **Identify target repo from ticket content using the repo `tags` from config.** For each `repos[]` entry, the `tags` field carries semantic labels (e.g. `["widgets","ui"]`, `["api","bff"]`). Pick the repo whose tags best match the ticket's stated surface / capability / area. When ambiguous, lean toward the repo with the closest single-tag match; if still ambiguous, bail per STEP C.
 
-- **Detect default branch:**
+- **Detect default branch and the configured remote:**
   ```sh
-  cd "$(repo_path <repo>)"
-  git fetch origin
+  REPO_PATH="$(repo_path <repo>)"
+  cd "$REPO_PATH"
+  REMOTE_URL=$(git remote get-url origin)
+  FETCH_ERROR=""
+  if ! FETCH_ERROR=$(git fetch origin 2>&1); then
+    case "$FETCH_ERROR" in
+      *"permission denied"*|*"Permission denied"*|*"FETCH_HEAD"*) : ;;
+      *) echo "$FETCH_ERROR" >&2; exit 1 ;;
+    esac
+  fi
   DEFAULT_BRANCH=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|^origin/||')
   if [ -z "$DEFAULT_BRANCH" ] || [ "$DEFAULT_BRANCH" = "HEAD" ]; then
     DEFAULT_BRANCH=$(git ls-remote --symref origin HEAD | head -1 | awk '{print $2}' | sed 's|^refs/heads/||')
@@ -583,12 +595,36 @@ After implementation, **before committing**: append a line to the plan's Status 
   [ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(repo_default_branch <repo>)
   ```
 
+  If `git fetch origin` fails specifically with a metadata permission error, set
+  `ISOLATED_CLONE=true`, remove only the exact target directory below, and clone
+  from `REMOTE_URL` into it. The clone must use the configured remote URL; never
+  use the configured checkout as the clone's push target:
+
+  ```sh
+  WORKTREE_DIR="$WORKTREE_ROOT/<repo>-<TICKET-id>"
+  ISOLATED_CLONE=false
+  if [ -z "$FETCH_ERROR" ]; then
+    git worktree prune
+    rm -rf "$WORKTREE_DIR" 2>/dev/null
+    git worktree add "$WORKTREE_DIR" "origin/$DEFAULT_BRANCH"
+  else
+    ISOLATED_CLONE=true
+    rm -rf "$WORKTREE_DIR" 2>/dev/null
+    git clone --origin origin "$REMOTE_URL" "$WORKTREE_DIR"
+    git -C "$WORKTREE_DIR" fetch origin
+    git -C "$WORKTREE_DIR" checkout --detach "origin/$DEFAULT_BRANCH"
+    test "$(git -C "$WORKTREE_DIR" remote get-url origin)" = "$REMOTE_URL"
+  fi
+  ```
+
 - **Create the worktree** at a clean snapshot of the default branch:
   ```sh
   WORKTREE_DIR="$WORKTREE_ROOT/<repo>-<TICKET-id>"
-  git worktree prune
-  rm -rf "$WORKTREE_DIR" 2>/dev/null
-  git worktree add "$WORKTREE_DIR" "origin/$DEFAULT_BRANCH"
+  if [ "$ISOLATED_CLONE" = false ]; then
+    git worktree prune
+    rm -rf "$WORKTREE_DIR" 2>/dev/null
+    git worktree add "$WORKTREE_DIR" "origin/$DEFAULT_BRANCH"
+  fi
   cd "$WORKTREE_DIR"
   git checkout -b <type>/<TICKET-id>-<short-slug>
   ```
@@ -636,13 +672,13 @@ Trigger if ANY become true during STEP D:
 
 **Rollback procedure:**
 
-1. **No commits yet**: `git worktree remove --force "$WORKTREE_DIR" && git branch -D <feature-branch>` from main checkout.
+1. **No commits yet**: remove the isolated checkout with `git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"`; delete only the local feature branch when it was created in the main checkout.
 
 2. **Local commits but NOT pushed**: same as 1.
 
 3. **Already pushed but NO change**: `git push origin --delete <feature-branch>` then same cleanup.
 
-4. **change already opened**: `CLOSE_CHANGE <N> --delete-branch --comment "Closing — work bigger than expected. Bailing per implementer guardrails."` then `git worktree remove --force "$WORKTREE_DIR" && git branch -D <feature-branch> 2>/dev/null || true`.
+4. **change already opened**: `CLOSE_CHANGE <N> --delete-branch --comment "Closing — work bigger than expected. Bailing per implementer guardrails."` then `git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || rm -rf "$WORKTREE_DIR"`.
 
 **Then update configured tracker:**
 - Change ticket state to `$STATE_BLOCKED`. **Do NOT remove any labels** (keep `$AGENT_LABEL` + category labels intact so a human can re-evaluate and move it back to `$STATE_TODO` after their triage).

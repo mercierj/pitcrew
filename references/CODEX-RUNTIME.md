@@ -30,7 +30,10 @@ Git-backed worktrees update metadata such as `.git/FETCH_HEAD`. The
 `implementer-run` role additionally uses Codex's `danger-full-access` sandbox
 because macOS can reject Git metadata writes outside the Pitcrew workspace;
 this exception is limited to the configured local repository and implementer
-role. All other roles retain `workspace-write`.
+role. All other roles retain `workspace-write`. This boundary does not claim to pin filesystem
+objects across the process handoff; implementers have a
+sandbox-safe isolated-clone fallback when the checkout's Git metadata is
+protected.
 
 ## Execution boundary
 

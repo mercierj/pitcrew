@@ -175,6 +175,29 @@ class ReferenceContractTest(unittest.TestCase):
             "Never fall back",
         )
 
+    def test_implementer_has_sandbox_safe_clone_fallback(self):
+        implementer = (ROOT / "skills/implementer-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sandbox-safe isolated clone", implementer)
+        self.assertIn("git remote get-url origin", implementer)
+        self.assertIn("git clone", implementer)
+        self.assertIn(
+            "use the configured checkout as the clone's push target", implementer
+        )
+        self.assertIn("permission denied", implementer)
+
+    def test_implementer_closes_tracker_after_successful_merge(self):
+        implementer = (ROOT / "skills/implementer-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CLOSE_LIFECYCLE <TICKET-id>", implementer)
+        self.assertIn("verify the issue is closed", implementer)
+        self.assertIn(
+            "state_event=close",
+            (ROOT / "references/providers/gitlab.md").read_text(encoding="utf-8"),
+        )
+
     def test_secondary_roles_are_provider_neutral_and_getbill_safe(self):
         secondary = (
             "research-run",
