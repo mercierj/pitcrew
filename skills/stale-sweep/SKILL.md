@@ -104,7 +104,10 @@ When the active profile is GetBill:
 
 ═══ HARD RULES ═══
 
-1. NEVER move a ticket to `$STATE_DONE` unless you can verify the change is **both merged AND closed** via `INSPECT_CHANGE`. A change can be in state=MERGED while its corresponding ticket is genuinely still in active review — verify before moving.
+1. NEVER move a ticket to `$STATE_DONE` unless `INSPECT_CHANGE` proves the
+   provider's terminal merged signal. For GitLab, require `state=merged` and
+   non-null `merged_at`; `closed_at` may be null. A bare closed state is not
+   merge evidence.
 2. NEVER move a ticket to `$STATE_BLOCKED` based on change state alone — only when the change is **closed without merging** (rejected/abandoned). The state-machine intent of `$STATE_BLOCKED` is "needs human triage", which is the right signal for a closed-not-merged change.
 3. NEVER edit code, push branches, or open changes. This is a state-cleanup skill — configured tracker state changes + comments + closing stale deploy changes (STEP 4) only.
 4. NEVER touch tickets that don't have the `$AGENT_LABEL`. This sweep is for agent-managed tickets only.
@@ -124,53 +127,97 @@ When the active profile is GetBill:
 
 **STEP 1. Query candidates.**
 
-Sweep three categories of tickets, all with `$AGENT_LABEL`:
+Sweep five categories of tickets, all with `$AGENT_LABEL`. Every query is
+limited to tracker items whose built-in lifecycle is open:
 
 ```
 LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_REVIEW",     limit=100)
 LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_PROCESSING", limit=100)
 LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_TODO",       limit=100)
+LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_BLOCKED",    limit=100)
+LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_DONE",       limit=100)
 ```
 
-The first set is the main concern (changes awaiting human "go"). The second catches tickets that implementer started but crashed during. The third catches edge cases where an agent-todo ticket somehow has a merged change (shouldn't happen but cheap to check).
+The review set is the main concern (changes awaiting human "go"). Processing
+catches an implementer that crashed mid-run. Todo catches a change merged
+outside the loop before pickup. Blocked catches changes that a human merged
+after CI or implementation triage. Done catches interrupted closeouts where
+the scoped state label changed but the tracker issue stayed open. A
+`$STATE_DONE` label alone is never sufficient evidence to close an issue.
 
 **STEP 2. For each candidate, find the matching change.**
 
-Look for a change mentioning the ticket ID in title or body:
+Look for a change mentioning the ticket ID in title or body. Query the selected
+provider's terminal merged, closed-without-merge, and open states separately:
 
 ```text
 LIST_ELIGIBLE_CHANGES \
-  --search "<TICKET-id> in:title state:closed" \
+  --search "<TICKET-id>" \
   --repo "$FORGE_OWNER/<repo-name>" \
+  --state merged \
+  --json number,state,url,title,merged_at,closed_at,author \
+  --limit 5
+
+LIST_ELIGIBLE_CHANGES \
+  --search "<TICKET-id>" \
+  --repo "$FORGE_OWNER/<repo-name>" \
+  --state closed \
+  --json number,state,url,title,merged_at,closed_at,author \
+  --limit 5
+
+LIST_ELIGIBLE_CHANGES \
+  --search "<TICKET-id>" \
+  --repo "$FORGE_OWNER/<repo-name>" \
+  --state open \
   --json number,state,url,title,merged_at,closed_at,author \
   --limit 5
 ```
 
-Iterate over each repo in `config.repos[]` for the search since `LIST_ELIGIBLE_CHANGES` is per-repo. To avoid per-repo enumeration cost, prefer `LIST_ELIGIBLE_CHANGES` for cross-repo:
+Iterate over each repo in `config.repos[]` when change listing is per-repo. On
+GitLab, use explicit `state=merged`, `state=closed`, and `state=opened` API
+filters. GitLab `state=merged` and non-null `merged_at` are terminal merge
+evidence even though `closed_at` may be null. On providers where merged changes
+are returned in a closed listing, inspect each result and require the
+provider's explicit merge evidence.
 
-```text
-LIST_ELIGIBLE_CHANGES "<TICKET-id> in:title" --owner "$FORGE_OWNER" --state closed --json number,state,url,title,repository,author --limit 5
-```
+Classify with precedence `merged` → `open` → `closed without merge` → no match.
+This prevents an older abandoned change from blocking a ticket that has a
+newer active change.
 
 For each candidate ticket, classify the matching change (if any) into one of:
 
 | change state | Mapping action |
 |---|---|
-| MERGED + closed | Move ticket → `$STATE_DONE`, comment `Stale-sweep: change merged at <merged_at>, closing ticket.` |
+| MERGED (terminal provider merge evidence) | Close lifecycle → `$STATE_DONE`, audit comment, built-in issue close |
 | CLOSED without merge | Move ticket → `$STATE_BLOCKED`, comment `Stale-sweep: change was closed without merging — needs human triage. change: <url>.` |
 | OPEN | Leave alone (active work, not stale) |
 | No matching change found | Leave alone (might be early-stage; implementer STEP 0 handles `$STATE_PROCESSING` orphans separately) |
 
 **STEP 3. Apply the state changes.**
 
-For each ticket → action mapping from STEP 2:
+For a merged change, use the configured tracker's close-lifecycle capability:
 
-```
-UPDATE_TRACKER_ITEM(id="<TICKET-id>", state="<target-state>")
-COMMENT_ON_TRACKER_ITEM(issueId="<TICKET-id>", body="<comment-from-table-above>")
+```text
+CLOSE_LIFECYCLE(
+  id="<TICKET-id>",
+  change="<change-url>",
+  comment="Stale-sweep: change merged at <merged_at>, closing ticket.",
+  marker="<!-- pitcrew:stale-sweep:done:<ticket-id>:change:<change-id> -->"
+)
 ```
 
-Do NOT modify labels. Do NOT modify assignee. Only state + a single comment.
+The operation must preserve every non-state label and the assignee, replace only
+the scoped lifecycle label with `$STATE_DONE`, search existing notes for the
+operation marker before commenting, and close the built-in tracker issue. Then
+re-read the ticket and verify both that the built-in issue state is closed and
+the `$STATE_DONE` label is present. If either check fails, retry the close
+lifecycle once; if verification still fails, log
+`close-broken:<TICKET-id>` and continue without claiming it done.
+
+For a closed-without-merge change, preserve labels and assignee, apply
+`$STATE_BLOCKED`, and post the triage comment once using marker
+`<!-- pitcrew:stale-sweep:blocked:<ticket-id>:change:<change-id> -->`.
+If the ticket is already blocked and that marker exists, leave it unchanged.
 
 **STEP 4. Deploy-change cleanup (auto-close stale bot-authored deploy changes).**
 

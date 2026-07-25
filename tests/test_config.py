@@ -423,6 +423,20 @@ class ConfigTest(unittest.TestCase):
                 ):
                     validate(invalid)
 
+        for value in (0, 17, True, "3"):
+            with self.subTest(override_value=value):
+                invalid = {
+                    **profile,
+                    "execution": {
+                        "max_concurrent_per_skill": {"implementer-run": value},
+                    },
+                }
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "execution.max_concurrent_per_skill.implementer-run must be an integer from 1 to 16",
+                ):
+                    validate(invalid)
+
         for execution, message in (
             ({"max_concurrent_per_skill": {"unknown-run": 3}}, "execution role is unsupported"),
             ({"burst": 3}, "execution contains unsupported fields"),

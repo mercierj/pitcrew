@@ -98,6 +98,12 @@ Map generic change capabilities as follows:
 - **Merge change:** re-fetch the merge request, pipeline, discussions, and
   expected head SHA immediately before `PUT /merge_requests/:iid/merge`.
 
+GitLab merge request states are mutually distinct: `state=merged` is the
+terminal merged signal and `closed_at` is normally null for that state.
+`state=closed` selects closed-without-merge changes and does not include merged
+changes. Reconciliation must query `state=merged` and `state=closed` separately;
+never require `closed_at` for a merged change.
+
 For GetBill, normal code changes target `develop`. Treat merge requests targeting
 `preprod` or `prod` as deployment changes: reviewer, validator, implementer, and
 stale cleanup must not merge or mutate them unattended.
