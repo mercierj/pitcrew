@@ -14,6 +14,7 @@ const elements = {
   refreshState: document.querySelector("#refresh-state"),
   operationalStatus: document.querySelector("#operational-status"),
   globalBanner: document.querySelector("#global-banner"),
+  overviewUsageNote: document.querySelector("#overview-usage-note"),
   agentGrid: document.querySelector("#agent-grid"),
   disabledList: document.querySelector("#disabled-list"),
   disabledCount: document.querySelector("#disabled-count"),
@@ -29,6 +30,8 @@ const elements = {
     running: document.querySelector("#metric-running"),
     warning: document.querySelector("#metric-warning"),
     failed: document.querySelector("#metric-failed"),
+    tokens7d: document.querySelector("#metric-tokens-7d"),
+    cost7d: document.querySelector("#metric-cost-7d"),
   },
 };
 
@@ -81,6 +84,109 @@ function formatDate(value) {
   return dateFormatter.format(date);
 }
 
+function finiteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function formatTokens(value) {
+  const tokens = finiteNumber(value);
+  return tokens == null ? "Données indisponibles" : new Intl.NumberFormat("fr-FR").format(tokens);
+}
+
+function formatUsd(value) {
+  const numericValue = typeof value === "string" && value.trim() ? Number(value) : value;
+  const cost = finiteNumber(numericValue);
+  return cost == null
+    ? "Données indisponibles"
+    : `${new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 4, maximumFractionDigits: 6 }).format(cost)} USD`;
+}
+
+function usageMeasured(usage) {
+  return finiteNumber(usage?.measured_runs) || 0;
+}
+
+function usageNote(usage) {
+  const unmeasured = finiteNumber(usage?.unmeasured_runs) || 0;
+  return unmeasured > 0 ? `Sous-total mesuré · ${unmeasured} passage(s) non mesuré(s)` : "";
+}
+
+function renderUsage(title, usage) {
+  const section = document.createElement("section");
+  section.className = "usage-section";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  section.append(heading);
+  if (usageMeasured(usage) === 0) {
+    const unavailable = document.createElement("p");
+    unavailable.className = "usage-unavailable";
+    unavailable.textContent = "Données indisponibles";
+    section.append(unavailable);
+    return section;
+  }
+  const grid = document.createElement("dl");
+  grid.className = "usage-grid";
+  [
+    ["Entrée", usage?.tokens?.input_tokens],
+    ["Cache lu", usage?.tokens?.cached_input_tokens],
+    ["Cache écrit", usage?.tokens?.cache_write_tokens],
+    ["Sortie", usage?.tokens?.output_tokens],
+    ["Total", usage?.tokens?.total_tokens],
+    ["Coût estimé", usage?.estimated_cost_usd, formatUsd],
+  ].forEach(([label, value, formatter = formatTokens]) => {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const detail = document.createElement("dd");
+    detail.textContent = formatter(value);
+    grid.append(term, detail);
+  });
+  section.append(grid);
+  const note = usageNote(usage);
+  if (note) {
+    const detail = document.createElement("p");
+    detail.className = "usage-note";
+    detail.textContent = note;
+    section.append(detail);
+  }
+  return section;
+}
+
+function modelLabel(modelCatalog, model) {
+  const entry = modelCatalog && typeof modelCatalog === "object" ? modelCatalog[model] : null;
+  return typeof entry?.label === "string" && entry.label ? `${model} · ${entry.label}` : model || "Indisponible";
+}
+
+function createModelControl(agent, modelCatalog) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "agent-model";
+  const skill = typeof agent.skill === "string" ? agent.skill : "";
+  const label = document.createElement("label");
+  const selectId = `model-${skill}`;
+  label.htmlFor = selectId;
+  label.textContent = "Modèle configuré";
+  const select = document.createElement("select");
+  select.id = selectId;
+  select.dataset.skill = skill;
+  const catalog = modelCatalog && typeof modelCatalog === "object" ? modelCatalog : {};
+  Object.entries(catalog).forEach(([slug, details]) => {
+    if (typeof slug !== "string" || !slug || !details || typeof details !== "object") {
+      return;
+    }
+    const option = document.createElement("option");
+    option.value = slug;
+    option.textContent = modelLabel(catalog, slug);
+    select.append(option);
+  });
+  select.value = typeof agent.configured_model === "string" ? agent.configured_model : "";
+  select.disabled = pendingSkills.has(skill) || !select.value;
+  const previous = select.value;
+  select.addEventListener("change", () => changeModel(skill, select.value, previous));
+  const latest = document.createElement("p");
+  latest.className = "latest-model";
+  latest.textContent = `Dernier modèle : ${modelLabel(catalog, agent.latest_model)}`;
+  wrapper.append(label, select, latest);
+  return wrapper;
+}
+
 function makeBadge(health) {
   const badge = document.createElement("span");
   badge.className = `badge badge-${health || "unknown"}`;
@@ -98,6 +204,15 @@ function renderOverview(snapshot) {
     failed: agents.filter((agent) => agent.health === "failed").length,
   };
   Object.entries(values).forEach(([key, value]) => setText(elements.metrics[key], value));
+  const usage = snapshot?.usage_7d;
+  if (usageMeasured(usage) === 0) {
+    setText(elements.metrics.tokens7d, "—");
+    setText(elements.metrics.cost7d, "—");
+  } else {
+    setText(elements.metrics.tokens7d, formatTokens(usage?.tokens?.total_tokens));
+    setText(elements.metrics.cost7d, formatUsd(usage?.estimated_cost_usd));
+  }
+  setText(elements.overviewUsageNote, usageNote(usage));
 
   elements.globalBanner.className = "banner";
   if (values.failed > 0) {
@@ -124,9 +239,9 @@ function createActionButton(action, skill, label) {
 }
 
 function syncSkillButtons(skill) {
-  elements.agentGrid.querySelectorAll("button[data-skill]").forEach((button) => {
-    if (button.dataset.skill === skill) {
-      button.disabled = pendingSkills.has(skill);
+  elements.agentGrid.querySelectorAll("[data-skill]").forEach((control) => {
+    if (control.dataset.skill === skill) {
+      control.disabled = pendingSkills.has(skill);
     }
   });
 }
@@ -179,7 +294,15 @@ function renderAgents(snapshot) {
       createActionButton("restart", agent.skill, "Réinstaller"),
       createActionButton("stop", agent.skill, "Arrêter"),
     );
-    card.append(heading, facts, summary, actions);
+    card.append(
+      heading,
+      facts,
+      createModelControl(agent, snapshot?.model_catalog),
+      summary,
+      renderUsage("Dernier passage", agent.latest_usage),
+      renderUsage("Usage · 7 jours", agent.usage_7d),
+      actions,
+    );
     elements.agentGrid.append(card);
   });
 
@@ -197,7 +320,10 @@ function renderDisabled(disabledRoles) {
     name.textContent = role.skill || "Rôle sans nom";
     const reason = document.createElement("p");
     reason.textContent = role.reason || "Ce rôle n’est pas configuré.";
-    item.append(name, reason);
+    const model = document.createElement("p");
+    model.className = "latest-model";
+    model.textContent = `Modèle résolu : ${modelLabel(null, role.configured_model)}`;
+    item.append(name, reason, model);
     elements.disabledList.append(item);
   });
 }
@@ -345,6 +471,36 @@ async function control(action, skill) {
   } finally {
     pendingSkills.delete(skill);
     syncSkillButtons(skill);
+  }
+}
+
+async function changeModel(skill, model, previous) {
+  if (pendingSkills.has(skill) || !skill || !model || model === previous) {
+    return;
+  }
+  if (!window.confirm(`Le passage courant sera interrompu puis relancé immédiatement pour appliquer ${model}.`)) {
+    await refresh({ manual: true });
+    return;
+  }
+  pendingSkills.add(skill);
+  syncSkillButtons(skill);
+  setText(elements.operationalStatus, `Changement de modèle en cours pour ${skill}.`);
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Pitcrew-Session": sessionToken,
+      },
+      body: JSON.stringify({ action: "change-model", skill, model }),
+    });
+    setText(elements.operationalStatus, `Changement de modèle accepté pour ${skill}.`);
+  } catch {
+    setText(elements.operationalStatus, `Impossible de changer le modèle pour ${skill}.`);
+  } finally {
+    pendingSkills.delete(skill);
+    syncSkillButtons(skill);
+    await refresh({ manual: true });
   }
 }
 

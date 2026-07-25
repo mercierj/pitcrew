@@ -1517,10 +1517,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("pendingSkills.add(skill);", self.javascript)
         self.assertIn("pendingSkills.delete(skill);", self.javascript)
         self.assertIn('button.dataset.skill = skill;', self.javascript)
-        self.assertIn(
-            'querySelectorAll("button[data-skill]")',
-            self.javascript,
-        )
+        self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertIn(
             "button.disabled = pendingSkills.has(skill);",
             self.javascript,
@@ -1562,6 +1559,36 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("--warning", self.styles)
         self.assertIn("--error", self.styles)
         self.assertIn("text-align: left", self.styles)
+
+    def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
+        for identifier in ("metric-tokens-7d", "metric-cost-7d"):
+            self.assertIn(f'id="{identifier}"', self.html)
+        self.assertIn('document.createElement("select")', self.javascript)
+        self.assertIn("select.dataset.skill = skill;", self.javascript)
+        self.assertIn("renderUsage", self.javascript)
+        self.assertIn("Données indisponibles", self.javascript)
+        self.assertIn("Sous-total mesuré", self.javascript)
+        self.assertIn("formatTokens", self.javascript)
+        self.assertIn("formatUsd", self.javascript)
+        self.assertIn('typeof value === "string" && value.trim()', self.javascript)
+        self.assertNotIn("innerHTML", self.javascript)
+
+    def test_model_change_is_separate_confirmed_and_session_authenticated(self):
+        self.assertRegex(
+            self.javascript,
+            r"async function changeModel\(skill, model, previous\)",
+        )
+        self.assertIn("passage courant sera interrompu", self.javascript)
+        self.assertIn("relancé immédiatement", self.javascript)
+        self.assertIn('JSON.stringify({ action: "change-model", skill, model })', self.javascript)
+        self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
+        self.assertNotIn('"change-model"', self.javascript.split("const ACTIONS", 1)[1].split(";", 1)[0])
+
+    def test_usage_and_model_styles_are_compact_and_responsive(self):
+        for selector in (".agent-model", ".usage-section", ".usage-grid", ".usage-note"):
+            self.assertIn(selector, self.styles)
+        self.assertIn("var(--line)", self.styles)
+        self.assertIn("var(--muted)", self.styles)
 
 
 class DashboardRealAssetsHttpTest(unittest.TestCase):

@@ -279,6 +279,59 @@ section {
   overflow-wrap: anywhere;
 }
 
+.agent-model {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-model label,
+.usage-section h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.agent-model select {
+  width: 100%;
+  min-width: 0;
+}
+
+.latest-model,
+.usage-note,
+.usage-unavailable {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.usage-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+}
+
+.usage-grid dt {
+  color: var(--muted);
+}
+
+.usage-grid dd {
+  margin: 0;
+  font-weight: 650;
+  text-align: right;
+}
+
+.usage-note {
+  margin-top: 8px;
+}
+
 .agent-actions {
   display: flex;
   flex-wrap: wrap;
@@ -553,6 +606,16 @@ footer {
   .agent-grid,
   .disabled-list {
     grid-template-columns: 1fr;
+  }
+
+  .usage-grid {
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
+
+  .usage-grid dd {
+    margin-bottom: 5px;
+    text-align: left;
   }
 
   .filters,
