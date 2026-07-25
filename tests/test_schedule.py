@@ -62,6 +62,46 @@ class ScheduleTest(unittest.TestCase):
             self.assertFalse(schedule[skill]["enabled"], skill)
             self.assertTrue(schedule[skill]["reason"], skill)
 
+    def test_runtime_state_defaults_and_transitions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+
+            status = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "status", "--project", "getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, status.returncode, status.stderr)
+            self.assertEqual("running", status.stdout.strip())
+
+            stopped = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "stop", "--project", "getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, stopped.returncode, stopped.stderr)
+
+            status = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "status", "--project", "getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual("stopped", status.stdout.strip())
+            self.assertEqual(0o600, (root / ".codex/pitcrew/getbill/execution-state.json").stat().st_mode & 0o777)
+
+            resumed = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "resume", "--project", "getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, resumed.returncode, resumed.stderr)
+
+    def test_runtime_state_rejects_unsafe_projects(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "HOME": temp, "CODEX_HOME": str(Path(temp) / ".codex")}
+            result = subprocess.run(
+                ["python3", str(ROOT / "scripts/pitcrew_runtime_state.py"), "status", "--project", "../getbill"],
+                env=env, cwd=ROOT, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(2, result.returncode)
+
     def test_render_writes_only_enabled_launch_agents_with_bounded_logs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
