@@ -377,11 +377,13 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("gpt-5.6-luna", research["configured_model"])
         self.assertEqual("gpt-5.6-terra", research["latest_model"])
         self.assertEqual(1, research["latest_usage"]["measured_runs"])
+        self.assertEqual(0, research["latest_usage"]["unmeasured_runs"])
         self.assertEqual(2, research["usage_7d"]["measured_runs"])
         self.assertEqual("110", research["usage_7d"]["tokens"]["input_tokens"])
         self.assertEqual("0.000488", research["usage_7d"]["estimated_cost_usd"])
         self.assertEqual(0, roles["manager-run"]["latest_usage"]["measured_runs"])
-        self.assertEqual(1, roles["manager-run"]["latest_usage"]["unmeasured_runs"])
+        self.assertEqual(0, roles["manager-run"]["latest_usage"]["unmeasured_runs"])
+        self.assertIsNone(roles["manager-run"]["latest_model"])
         self.assertEqual("gpt-5.6-terra", roles["qa-run"]["configured_model"])
         self.assertEqual("gpt-5.6-luna", roles["qa-run"]["latest_model"])
         self.assertEqual(1, roles["qa-run"]["usage_7d"]["measured_runs"])
@@ -413,6 +415,43 @@ class DashboardServiceTest(unittest.TestCase):
             {"text": True, "capture_output": True, "check": False},
             runner.calls[0][1],
         )
+
+    def test_snapshot_keeps_latest_history_but_uses_latest_measured_usage(self):
+        records = (
+            {
+                "project": "getbill", "skill": "research-run",
+                "started_at": "2026-07-24T11:00:00+00:00",
+                "finished_at": "2026-07-24T11:01:00+00:00",
+                "outcome": "success", "summary": "measured", "exit_code": 0,
+                "model": "gpt-5.6-luna",
+                "usage": {"input_tokens": 12, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": 3, "total_tokens": 15},
+            },
+            {
+                "project": "getbill", "skill": "research-run",
+                "started_at": "2026-07-24T11:30:00+00:00",
+                "finished_at": "2026-07-24T11:31:00+00:00",
+                "outcome": "noop", "summary": "legacy", "exit_code": 0,
+            },
+            {
+                "project": "getbill", "skill": "manager-run",
+                "started_at": "2026-07-24T11:30:00+00:00",
+                "finished_at": "2026-07-24T11:31:00+00:00",
+                "outcome": "success", "summary": "legacy", "exit_code": 0,
+            },
+        )
+        (self.runtime / "history.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+
+        snapshot = self.service(FakeRunner()).snapshot()
+        roles = {role["skill"]: role for role in (*snapshot["agents"], *snapshot["disabled_roles"])}
+
+        self.assertEqual("legacy", roles["research-run"]["latest_history"]["summary"])
+        self.assertEqual("gpt-5.6-luna", roles["research-run"]["latest_model"])
+        self.assertEqual("15", roles["research-run"]["latest_usage"]["tokens"]["total_tokens"])
+        self.assertIsNone(roles["manager-run"]["latest_model"])
+        self.assertEqual(0, roles["manager-run"]["latest_usage"]["measured_runs"])
+        self.assertEqual(0, roles["manager-run"]["latest_usage"]["unmeasured_runs"])
 
     def test_snapshot_serializes_usage_tokens_as_exact_decimal_strings(self):
         huge = 10**100
@@ -1547,6 +1586,18 @@ class DashboardAssetContractTest(unittest.TestCase):
                 self.javascript,
                 rf"(?:async\s+)?function\s+{function_name}\b",
             )
+
+    def test_history_renders_model_and_total_tokens_as_safe_text_metadata(self):
+        history_source = self.javascript.split("function renderHistory", 1)[1].split(
+            "function safeExternalLink", 1
+        )[0]
+
+        self.assertIn('metadata.className = "history-metadata";', history_source)
+        self.assertIn("metadata.textContent", history_source)
+        self.assertIn("Modèle/usage indisponibles", self.javascript)
+        self.assertIn("total_tokens", self.javascript)
+        self.assertIn("Object.hasOwn(modelCatalog, model)", self.javascript)
+        self.assertNotIn("innerHTML", history_source)
 
     def test_javascript_serializes_controls_per_skill(self):
         self.assertIn("const pendingSkills = new Set();", self.javascript)

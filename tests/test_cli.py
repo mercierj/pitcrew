@@ -536,6 +536,34 @@ class CliTest(unittest.TestCase):
             history = [json.loads(line) for line in (root / "history.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(9, history[0]["usage"]["input_tokens"])
 
+    def test_locked_helper_ignores_bounded_json_with_oversized_integer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            child = root / "child.py"
+            child.write_text(
+                "print('{\\\"usage\\\":{\\\"input_tokens\\\":' + '9' * 5000 + '}}')\n"
+                "print('{\"usage\":{\"input_tokens\":9}}')\n",
+                encoding="utf-8",
+            )
+            helper = ROOT / "scripts/pitcrew_locked_exec.py"
+            result = subprocess.run(
+                [
+                    sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
+                    "--project", "getbill", "--skill", "research-run",
+                    "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                    "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=3,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            history = [json.loads(line) for line in (root / "history.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(9, history[0]["usage"]["input_tokens"])
+
     def test_getbill_dry_run_never_requests_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

@@ -75,7 +75,7 @@ def normalize_usage(value: object) -> dict[str, int] | None:
 def parse_usage_event(line: bytes) -> dict[str, int] | None:
     try:
         event = json.loads(line)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         return None
     if not isinstance(event, dict):
         return None

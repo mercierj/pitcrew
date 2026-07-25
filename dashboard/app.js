@@ -361,7 +361,31 @@ function refreshSkillFilter(agents) {
   }
 }
 
-function renderHistory(records) {
+function historyMetadata(record, modelCatalog) {
+  const model = record?.model;
+  const usage = record?.usage;
+  const usageFields = [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "total_tokens",
+  ];
+  if (
+    typeof model !== "string"
+    || !modelCatalog
+    || typeof modelCatalog !== "object"
+    || !Object.hasOwn(modelCatalog, model)
+    || !usage
+    || typeof usage !== "object"
+    || usageFields.some((field) => formatTokens(usage[field]) === "Données indisponibles")
+  ) {
+    return "Modèle/usage indisponibles";
+  }
+  return `Modèle : ${modelLabel(modelCatalog, model)} · Total : ${formatTokens(usage.total_tokens)} jetons`;
+}
+
+function renderHistory(records, modelCatalog) {
   const history = Array.isArray(records) ? records : [];
   elements.activityList.replaceChildren();
   if (history.length === 0) {
@@ -386,7 +410,10 @@ function renderHistory(records) {
     date.textContent = formatDate(record.finished_at);
     const summary = document.createElement("p");
     summary.textContent = record.summary || "Aucun résumé.";
-    item.append(top, date, summary);
+    const metadata = document.createElement("p");
+    metadata.className = "history-metadata";
+    metadata.textContent = historyMetadata(record, modelCatalog);
+    item.append(top, date, summary, metadata);
     elements.activityList.append(item);
   });
 }
@@ -560,7 +587,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
       ]);
       renderOverview(snapshot);
       renderAgents(snapshot);
-      renderHistory(history);
+      renderHistory(history, snapshot?.model_catalog);
 
       const now = Date.now();
       if (!skipGitLab && (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS)) {

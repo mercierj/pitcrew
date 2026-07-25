@@ -183,6 +183,14 @@ class DashboardService:
         for entry in schedule:
             skill = entry["skill"]
             latest = latest_by_skill.get(skill)
+            latest_measured = next(
+                (
+                    record
+                    for record in records_by_skill.get(skill, [])
+                    if aggregate_usage([record])["measured_runs"] == 1
+                ),
+                None,
+            )
             loaded = bool(entry.get("loaded"))
             interval = int(entry.get("interval_seconds", 0))
             estimated = None
@@ -203,8 +211,10 @@ class DashboardService:
                 "health": "stopped" if not loaded else classify_record(latest),
                 "estimated_next_pass": estimated,
                 "configured_model": resolve_model(self.config, skill),
-                "latest_model": latest.get("model") if latest is not None else None,
-                "latest_usage": _present_usage(aggregate_usage([latest]) if latest is not None else aggregate_usage([])),
+                "latest_model": latest_measured["model"] if latest_measured is not None else None,
+                "latest_usage": _present_usage(
+                    aggregate_usage([latest_measured]) if latest_measured is not None else aggregate_usage([])
+                ),
                 "usage_7d": _present_usage(aggregate_usage(records_by_skill.get(skill, []))),
             }
             if entry.get("enabled"):
