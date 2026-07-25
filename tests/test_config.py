@@ -16,6 +16,7 @@ from scripts.pitcrew_config import (
     _write_exclusive_config,
     load_runtime_config,
     load_profile,
+    max_concurrent_for,
     migrate_legacy,
     runtime_root,
     update_runtime_model,
@@ -389,6 +390,47 @@ class ConfigTest(unittest.TestCase):
         ):
             with self.subTest(agents=agents):
                 invalid = {**profile, "agents": agents}
+                with self.assertRaisesRegex(ConfigError, message):
+                    validate(invalid)
+
+    def test_execution_capacity_defaults_and_accepts_per_skill_overrides(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+
+        validate(profile)
+        self.assertEqual(3, max_concurrent_for(profile, "implementer-run"))
+
+        profile["execution"] = {
+            "default_max_concurrent_per_skill": 3,
+            "max_concurrent_per_skill": {"implementer-run": 4, "unblock": 2},
+        }
+        validate(profile)
+        self.assertEqual(4, max_concurrent_for(profile, "implementer-run"))
+        self.assertEqual(2, max_concurrent_for(profile, "unblock"))
+        self.assertEqual(3, max_concurrent_for(profile, "research-run"))
+
+    def test_execution_capacity_rejects_invalid_shapes_roles_and_values(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+
+        for value in (0, 17, True, "3"):
+            with self.subTest(value=value):
+                invalid = {
+                    **profile,
+                    "execution": {"default_max_concurrent_per_skill": value},
+                }
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "execution.default_max_concurrent_per_skill must be an integer from 1 to 16",
+                ):
+                    validate(invalid)
+
+        for execution, message in (
+            ({"max_concurrent_per_skill": {"unknown-run": 3}}, "execution role is unsupported"),
+            ({"burst": 3}, "execution contains unsupported fields"),
+            ([], "execution must be an object"),
+            ({"max_concurrent_per_skill": []}, "execution.max_concurrent_per_skill must be an object"),
+        ):
+            with self.subTest(execution=execution):
+                invalid = {**profile, "execution": execution}
                 with self.assertRaisesRegex(ConfigError, message):
                     validate(invalid)
 

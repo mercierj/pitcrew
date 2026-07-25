@@ -25,10 +25,58 @@ FORGES = {"github", "gitlab"}
 TRACKERS = {"linear", "github", "gitlab", "none"}
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+DEFAULT_MAX_CONCURRENT_PER_SKILL = 3
+MAX_CONCURRENT_PER_SKILL = 16
 
 
 class ConfigError(ValueError):
     pass
+
+
+def _capacity(value: Any, field: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_CONCURRENT_PER_SKILL
+    ):
+        raise ConfigError(f"{field} must be an integer from 1 to 16")
+    return value
+
+
+def _execution(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    execution = config.get("execution", {})
+    if not isinstance(execution, Mapping):
+        raise ConfigError("execution must be an object")
+    if set(execution) - {
+        "default_max_concurrent_per_skill",
+        "max_concurrent_per_skill",
+    }:
+        raise ConfigError("execution contains unsupported fields")
+    if "default_max_concurrent_per_skill" in execution:
+        _capacity(
+            execution["default_max_concurrent_per_skill"],
+            "execution.default_max_concurrent_per_skill",
+        )
+    overrides = execution.get("max_concurrent_per_skill", {})
+    if not isinstance(overrides, Mapping):
+        raise ConfigError("execution.max_concurrent_per_skill must be an object")
+    for skill, value in overrides.items():
+        if skill not in DEFAULT_MODELS:
+            raise ConfigError("execution role is unsupported")
+        _capacity(value, f"execution.max_concurrent_per_skill.{skill}")
+    return execution
+
+
+def max_concurrent_for(config: Mapping[str, Any], skill: str) -> int:
+    execution = _execution(config)
+    default = _capacity(
+        execution.get("default_max_concurrent_per_skill", DEFAULT_MAX_CONCURRENT_PER_SKILL),
+        "execution.default_max_concurrent_per_skill",
+    )
+    overrides = execution.get("max_concurrent_per_skill", {})
+    if skill in overrides:
+        return _capacity(overrides[skill], f"execution.max_concurrent_per_skill.{skill}")
+    return default
 
 
 def runtime_root(env: Mapping[str, str] | None = None) -> Path:
@@ -144,6 +192,7 @@ def validate(config: Mapping[str, Any]) -> None:
     ):
         if safety.get(key, False) is not False:
             raise ConfigError(f"safety.{key} must default to false")
+    _execution(config)
     agents = config.get("agents", {})
     if not isinstance(agents, Mapping):
         raise ConfigError("agents must be an object")
