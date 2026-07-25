@@ -76,6 +76,7 @@ def runtime_config():
         },
         "repos": [{"name": "getbill", "path": "/tmp/getbill"}],
         "release": {"autonomy": "off"},
+        "agents": {"research-run": {"model": "gpt-5.6-luna"}},
         "safety": {
             "confirm_each_remote_action": [],
             "allow_database_writes": False,
@@ -261,6 +262,31 @@ class DashboardServiceTest(unittest.TestCase):
                 "outcome": "noop",
                 "summary": json.dumps({"reason": "missing lessons.md"}),
                 "exit_code": 0,
+                "model": "gpt-5.6-terra",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 10,
+                    "total_tokens": 130,
+                },
+            },
+            {
+                "project": "getbill",
+                "skill": "research-run",
+                "started_at": "2026-07-24T10:58:00+00:00",
+                "finished_at": "2026-07-24T10:59:00+00:00",
+                "outcome": "success",
+                "summary": "older work",
+                "exit_code": 0,
+                "model": "gpt-5.6-luna",
+                "usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 10,
+                    "cache_write_tokens": 10,
+                    "output_tokens": 10,
+                    "total_tokens": 40,
+                },
             },
             {
                 "project": "getbill",
@@ -279,6 +305,31 @@ class DashboardServiceTest(unittest.TestCase):
                 "outcome": "success",
                 "summary": "implemented work",
                 "exit_code": 0,
+                "model": "gpt-5.6-sol",
+                "usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 10,
+                },
+            },
+            {
+                "project": "getbill",
+                "skill": "qa-run",
+                "started_at": "2026-07-24T10:43:00+00:00",
+                "finished_at": "2026-07-24T10:45:00+00:00",
+                "outcome": "success",
+                "summary": "tested work",
+                "exit_code": 0,
+                "model": "gpt-5.6-luna",
+                "usage": {
+                    "input_tokens": 5,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 5,
+                },
             },
         )
         (self.runtime / "history.jsonl").write_text(
@@ -323,6 +374,31 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("healthy", roles["manager-run"]["health"])
         self.assertEqual("stopped", roles["implementer-run"]["health"])
         self.assertIsNone(roles["implementer-run"]["estimated_next_pass"])
+        self.assertEqual("gpt-5.6-luna", research["configured_model"])
+        self.assertEqual("gpt-5.6-terra", research["latest_model"])
+        self.assertEqual(1, research["latest_usage"]["measured_runs"])
+        self.assertEqual(2, research["usage_7d"]["measured_runs"])
+        self.assertEqual(110, research["usage_7d"]["tokens"]["input_tokens"])
+        self.assertEqual("0.000488", research["usage_7d"]["estimated_cost_usd"])
+        self.assertEqual(0, roles["manager-run"]["latest_usage"]["measured_runs"])
+        self.assertEqual(1, roles["manager-run"]["latest_usage"]["unmeasured_runs"])
+        self.assertEqual("gpt-5.6-terra", roles["qa-run"]["configured_model"])
+        self.assertEqual("gpt-5.6-luna", roles["qa-run"]["latest_model"])
+        self.assertEqual(1, roles["qa-run"]["usage_7d"]["measured_runs"])
+        self.assertIsNone(roles["coverage-run"]["latest_model"])
+        self.assertEqual(0, roles["coverage-run"]["latest_usage"]["measured_runs"])
+        self.assertEqual(0, roles["coverage-run"]["latest_usage"]["unmeasured_runs"])
+        self.assertEqual(
+            {"currency": "USD", "effective_date": "2026-07-24", "basis": "API standard token pricing estimate"},
+            snapshot["pricing"],
+        )
+        self.assertTrue(
+            all(set(entry) == {"profile", "label"} for entry in snapshot["model_catalog"].values())
+        )
+        self.assertEqual(4, snapshot["usage_7d"]["measured_runs"])
+        self.assertEqual(1, snapshot["usage_7d"]["unmeasured_runs"])
+        self.assertEqual(125, snapshot["usage_7d"]["tokens"]["input_tokens"])
+        self.assertEqual("0.000544", snapshot["usage_7d"]["estimated_cost_usd"])
         self.assertEqual(
             [
                 "python3",
@@ -337,6 +413,16 @@ class DashboardServiceTest(unittest.TestCase):
             {"text": True, "capture_output": True, "check": False},
             runner.calls[0][1],
         )
+
+    def test_snapshot_uses_default_models_when_runtime_agents_are_absent(self):
+        config = runtime_config()
+        config.pop("agents")
+        (self.runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+        snapshot = self.service(FakeRunner()).snapshot()
+
+        roles = {role["skill"]: role for role in snapshot["agents"]}
+        self.assertEqual("gpt-5.6-terra", roles["research-run"]["configured_model"])
 
     def test_history_filters_by_skill_and_outcome(self):
         self.write_history()

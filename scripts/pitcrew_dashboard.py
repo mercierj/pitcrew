@@ -13,6 +13,22 @@ from urllib.parse import quote
 
 from scripts.pitcrew_config import ConfigError, validate
 from scripts.pitcrew_history import HistoryStore, classify_record
+try:
+    from scripts.pitcrew_models import (
+        PRICING_CURRENCY,
+        PRICING_EFFECTIVE_DATE,
+        aggregate_usage,
+        public_catalog,
+        resolve_model,
+    )
+except ModuleNotFoundError:
+    from pitcrew_models import (
+        PRICING_CURRENCY,
+        PRICING_EFFECTIVE_DATE,
+        aggregate_usage,
+        public_catalog,
+        resolve_model,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,8 +157,10 @@ class DashboardService:
         schedule = self._schedule_entries(force_refresh=True)
         records = self.history(None, None)
         latest_by_skill: dict[str, dict] = {}
+        records_by_skill: dict[str, list[dict]] = {}
         for record in records:
             latest_by_skill.setdefault(record["skill"], record)
+            records_by_skill.setdefault(record["skill"], []).append(record)
 
         agents = []
         disabled_roles = []
@@ -168,6 +186,10 @@ class DashboardService:
                 "latest_history": latest,
                 "health": "stopped" if not loaded else classify_record(latest),
                 "estimated_next_pass": estimated,
+                "configured_model": resolve_model(self.config, skill),
+                "latest_model": latest.get("model") if latest is not None else None,
+                "latest_usage": aggregate_usage([latest]) if latest is not None else aggregate_usage([]),
+                "usage_7d": aggregate_usage(records_by_skill.get(skill, [])),
             }
             if entry.get("enabled"):
                 agents.append(normalized)
@@ -183,6 +205,13 @@ class DashboardService:
             },
             "agents": agents,
             "disabled_roles": disabled_roles,
+            "model_catalog": public_catalog(),
+            "pricing": {
+                "currency": PRICING_CURRENCY,
+                "effective_date": PRICING_EFFECTIVE_DATE,
+                "basis": "API standard token pricing estimate",
+            },
+            "usage_7d": aggregate_usage(records),
         }
 
     def _schedule_entries(self, force_refresh: bool = False) -> list[dict]:

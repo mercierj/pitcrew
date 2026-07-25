@@ -78,3 +78,54 @@ def estimate_cost(model: str, usage: Mapping[str, int]) -> Decimal:
         Decimal(usage.get(field, 0)) * prices[field] / Decimal(1_000_000)
         for field in prices
     )
+
+
+def empty_usage() -> dict[str, int]:
+    return {field: 0 for field in USAGE_FIELDS}
+
+
+def _measured_usage(record: object) -> tuple[str, Mapping[str, int]] | None:
+    if not isinstance(record, Mapping):
+        return None
+    model = record.get("model")
+    usage = record.get("usage")
+    if model not in MODEL_CATALOG or not isinstance(usage, Mapping):
+        return None
+    if set(usage) != set(USAGE_FIELDS) or any(
+        isinstance(usage[field], bool)
+        or not isinstance(usage[field], int)
+        or usage[field] < 0
+        for field in USAGE_FIELDS
+    ):
+        return None
+    return model, usage
+
+
+def aggregate_usage(records: list[object]) -> dict:
+    tokens = empty_usage()
+    measured_runs = 0
+    unmeasured_runs = 0
+    cost = Decimal(0)
+    for record in records:
+        measured = _measured_usage(record)
+        if measured is None:
+            unmeasured_runs += 1
+            continue
+        model, usage = measured
+        measured_runs += 1
+        for field in USAGE_FIELDS:
+            tokens[field] += usage[field]
+        cost += estimate_cost(model, usage)
+    return {
+        "measured_runs": measured_runs,
+        "unmeasured_runs": unmeasured_runs,
+        "tokens": tokens,
+        "estimated_cost_usd": str(cost.quantize(Decimal("0.000001"))),
+    }
+
+
+def public_catalog() -> dict[str, dict[str, str]]:
+    return {
+        model: {field: details[field] for field in ("profile", "label")}
+        for model, details in MODEL_CATALOG.items()
+    }

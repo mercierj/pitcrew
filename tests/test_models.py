@@ -4,7 +4,10 @@ from decimal import Decimal
 from scripts.pitcrew_models import (
     DEFAULT_MODELS,
     MODEL_CATALOG,
+    aggregate_usage,
+    empty_usage,
     estimate_cost,
+    public_catalog,
     resolve_model,
 )
 
@@ -54,3 +57,75 @@ class ModelCatalogTest(unittest.TestCase):
             "total_tokens": 4_000_000,
         }
         self.assertEqual(Decimal("20.875"), estimate_cost("gpt-5.6-terra", usage))
+
+    def test_aggregate_usage_keeps_legacy_records_unmeasured(self):
+        aggregated = aggregate_usage(
+            [
+                {
+                    "model": "gpt-5.6-luna",
+                    "usage": {
+                        "input_tokens": 100,
+                        "cached_input_tokens": 20,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 10,
+                        "total_tokens": 130,
+                    },
+                },
+                {"skill": "legacy-run"},
+            ]
+        )
+
+        self.assertEqual(1, aggregated["measured_runs"])
+        self.assertEqual(1, aggregated["unmeasured_runs"])
+        self.assertEqual(100, aggregated["tokens"]["input_tokens"])
+        self.assertEqual(130, aggregated["tokens"]["total_tokens"])
+        self.assertEqual("0.000162", aggregated["estimated_cost_usd"])
+
+    def test_aggregate_usage_prices_each_record_by_its_own_model(self):
+        aggregated = aggregate_usage(
+            [
+                {
+                    "model": "gpt-5.6-luna",
+                    "usage": {
+                        "input_tokens": 1,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 1,
+                    },
+                },
+                {
+                    "model": "gpt-5.6-sol",
+                    "usage": {
+                        "input_tokens": 0,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 1,
+                        "total_tokens": 1,
+                    },
+                },
+                {"model": "unknown", "usage": {}},
+            ]
+        )
+
+        self.assertEqual(2, aggregated["measured_runs"])
+        self.assertEqual(1, aggregated["unmeasured_runs"])
+        self.assertEqual("0.000031", aggregated["estimated_cost_usd"])
+
+    def test_empty_aggregate_has_fixed_zeroes_and_safe_catalog(self):
+        self.assertEqual(
+            {
+                "measured_runs": 0,
+                "unmeasured_runs": 0,
+                "tokens": empty_usage(),
+                "estimated_cost_usd": "0.000000",
+            },
+            aggregate_usage([]),
+        )
+        self.assertEqual(
+            set(MODEL_CATALOG),
+            set(public_catalog()),
+        )
+        self.assertTrue(
+            all(set(entry) == {"profile", "label"} for entry in public_catalog().values())
+        )
