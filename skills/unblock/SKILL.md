@@ -42,6 +42,8 @@ IMPROVEMENT_LABEL="<resolved from configured tracker reference>"
 IMPROVEMENT_LABEL_ID="<resolved from configured tracker reference>"
 BUG_LABEL="<resolved from configured tracker reference>"
 BUG_LABEL_ID="<resolved from configured tracker reference>"
+SENSITIVE_APPROVED_LABEL="<resolved from bugfixer.sensitive_approved_label>"
+SENSITIVE_APPROVED_LABEL_ID="<resolved from configured tracker reference>"
 QUICK_WIN_LABEL="<resolved from configured tracker reference>"
 QUICK_WIN_LABEL_ID="<resolved from configured tracker reference>"
 INVESTIGATE_LABEL="<resolved from configured tracker reference>"
@@ -112,7 +114,10 @@ structured no-op without a tracker mutation or checkout write.
 
 - DO NOT pause to ask the operator for any clarification that isn't a concise question in the current Codex thread (or its plain-text fallback — see STEP 6). The whole point of this skill is the structured Q&A handoff.
 - DO NOT trust conversation memory. State lives in configured tracker + `unblock-state.json` — re-read every fire.
-- DO NOT touch tickets that aren't in `$STATE_BLOCKED` with label `$AGENT_LABEL`. Other states/labels are NOT yours to triage.
+- DO NOT touch tickets that aren't in `$STATE_BLOCKED` with label `$AGENT_LABEL`,
+  except the explicit `sensitive-bug` return path: a bug carrying
+  `$INVESTIGATE_LABEL` with completed investigation findings may intentionally
+  lack `$AGENT_LABEL`.
 - If genuinely stuck (configured tracker down, ticket malformed), log ONE line, exit cleanly. The next fire will retry.
 - **ALWAYS read `$CONFIG_DIR/lessons.md`** at the top of the run (if it exists). Rules under "Unblocker" or general sections apply.
 - **ALSO read `$CONFIG_DIR/TOPOLOGY.md`** at the start of every run (if it exists). It is the skill-family overview: who does what, label-routing rules, handoff flow. Single source of truth — if you're unsure which skill a ticket belongs to or how a handoff is supposed to work, TOPOLOGY answers it.
@@ -195,14 +200,18 @@ For a fresh complete `pending_question`:
 - If the record has `status=selecting`, another pass owns it; exit cleanly unless it
   is stale.
 
-**STEP 1. Query agent-blocked tickets.**
+**STEP 1. Query blocked decision tickets.**
 
 ```
 LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_BLOCKED", team="$TRACKER_TEAM", limit=30)
+LIST_ELIGIBLE_WORK(label="$INVESTIGATE_LABEL", state="$STATE_BLOCKED", team="$TRACKER_TEAM", limit=30)
 ```
 
-If zero: log `[unblock] No agent-blocked tickets. Done.`, return the structured
-no-op, and exit cleanly.
+Combine the two results by canonical ticket ID. From the investigate-labelled
+query, retain only tickets that also carry `$BUG_LABEL`; their completed
+investigation findings are verified in STEP 3. If zero remain, log
+`[unblock] No blocked decisions. Done.`, return the structured no-op, and exit
+cleanly.
 
 **STEP 2. Filter the candidate list.**
 
@@ -240,6 +249,11 @@ ticket = INSPECT_TRACKER_ITEM(id="<TICKET-id>")
   - "[plan-deviation]"
   - "needs human pickup"
   Use `LIST_TRACKER_COMMENTS(issueId="<TICKET-id>")` and scan from the most recent backwards.
+- For a ticket carrying both `$BUG_LABEL` and `$INVESTIGATE_LABEL`, also find
+  the most recent completed investigation findings comment. It must start with
+  `## Findings — <TICKET-id>` and contain `### Root cause`, `### Evidence`, and
+  `### Suggested next step`. Hold its stable comment URL or provider marker;
+  partial progress does not qualify.
 
 If no bail comment is found, this ticket landed in `$STATE_BLOCKED` without a
 qualifying agent bail comment. Set its shape to `missing-bail-context`; do not post
@@ -248,10 +262,14 @@ question. This preserves the ticket while making it actionable from the dashboar
 
 **STEP 4. Classify the bail shape.**
 
-Pick ONE of these shapes by matching keywords in the bail comment + ticket body:
+Classify `sensitive-bug` before `auth-sensitive` or any generic bail matching.
+It applies only when the ticket carries both `$BUG_LABEL` and
+`$INVESTIGATE_LABEL` and STEP 3 found completed investigation findings.
+Otherwise pick ONE shape by matching keywords in the bail comment + ticket body:
 
 | Shape | Detection keywords | Examples |
 |---|---|---|
+| `sensitive-bug` | Bug plus investigate labels and completed investigation findings | Sensitive bug returning from read-only investigation |
 | `multi-discrepancy` | Bail mentions "N issues", "N discrepancies", "N findings", "schema drift on N fields", or the ticket body has 3+ distinct numbered items | EX-553 (5 schema discrepancies on one flow) |
 | `phase-deferred` | Bail starts with `[plan-deviation]` OR mentions "PLAN.md", "Phase X.Y was deferred", "boundary cast placement is human-judgment" | EX-467 (EX-235 Phase 1.5 deferred) |
 | `scope-design` | Bail mentions "deliverable lives in", "out of scope", "skill design", "needs design call", "architectural decision" | EX-469 (skill design, lives outside repos[]) |
@@ -357,6 +375,28 @@ options:
     description: "$STATE_DONE with a comment explaining the decision."
 ```
 
+### Shape: `sensitive-bug`
+
+```
+question:   "<ticket-id> is a sensitive bug with completed investigation findings. What should happen next?"
+header:     "Sensitive bug"
+options:
+  - label: "Authorize bounded bugfix"
+    description: "Requires non-empty scope constraints. Returns only the bounded investigated fix to bugfixer-run."
+  - label: "Human pickup"
+    description: "Leave blocked and remove the agent route so a human owns the fix."
+  - label: "Reject or duplicate"
+    description: "Record the reason, close the lifecycle, and keep the audit trail."
+```
+
+For `Authorize bounded bugfix`, the answer's notes or free-form text must contain
+non-empty scope constraints. Do not accept a bare choice without constraints.
+Map the exact choices before STEP 7:
+
+- "Authorize bounded bugfix" → `authorize-sensitive-bugfix`
+- "Human pickup" → `sensitive-human-pickup`
+- "Reject or duplicate" → `sensitive-reject-or-duplicate`
+
 ### Shape: `auth-sensitive`
 
 ```
@@ -431,6 +471,44 @@ After surfacing the question, await your answer.
 **STEP 7. Process the answer.**
 
 The user response includes both an `answer` (the selected label or "Other" + custom text) and optional `notes` per question. A dashboard-submitted answer is already stored in `pending_question`; validate it against the exact stored `choices` before branching. Branch on the answer:
+
+### If action is `authorize-sensitive-bugfix`:
+
+Require non-empty scope constraints from the human in `notes` or the free-form
+answer. If absent, keep the pending decision and ask for constraints; perform no
+tracker mutation.
+
+Post this approval audit comment, substituting only validated values:
+
+```markdown
+<!-- pitcrew:bugfix-sensitive-approved:v1 ticket=<TICKET-id> -->
+Unblocker: sensitive bugfix authorized by <configured-human>.
+Scope constraints: <verbatim human constraints>
+Investigation findings: <finding marker or comment URL>
+```
+
+Preserve `$BUG_LABEL`, remove `$INVESTIGATE_LABEL`, restore `$AGENT_LABEL`, add
+`$SENSITIVE_APPROVED_LABEL`, preserve every unrelated label, and move the ticket
+to `$STATE_TODO_ID`. Re-read it and verify all four label/state conditions:
+bug retained, investigate absent, agent present, sensitive approval present, and
+state exactly `$STATE_TODO`.
+
+If verification fails, fail closed: restore `$BUG_LABEL` and
+`$INVESTIGATE_LABEL`, remove `$AGENT_LABEL` and
+`$SENSITIVE_APPROVED_LABEL`, return the item to `$STATE_BLOCKED_ID`, post that
+the approval was not activated, and stop without claiming approval.
+
+### If action is `sensitive-human-pickup`:
+
+Leave the ticket in `$STATE_BLOCKED`, remove `$AGENT_LABEL`, preserve
+`$BUG_LABEL` and `$INVESTIGATE_LABEL`, and comment that human pickup owns the
+next action. Re-read and verify the agent route is absent.
+
+### If action is `sensitive-reject-or-duplicate`:
+
+Require a non-empty reason, record it in a tracker comment, then use the selected
+provider's `CLOSE_LIFECYCLE` operation to apply `$STATE_DONE` and close the
+ticket. Re-read and verify both the state and closed status.
 
 ### If action is `split-children`:
 

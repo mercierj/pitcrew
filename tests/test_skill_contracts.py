@@ -147,6 +147,20 @@ class ReferenceContractTest(unittest.TestCase):
             "structured no-op",
         )
 
+    def test_unblock_has_safe_sensitive_bug_return_path(self):
+        self.assert_markers(
+            "skills/unblock/SKILL.md",
+            "sensitive-bug",
+            "Authorize bounded bugfix",
+            "Human pickup",
+            "Reject or duplicate",
+            "pitcrew:bugfix-sensitive-approved:v1",
+            "SENSITIVE_APPROVED_LABEL",
+            "remove `$INVESTIGATE_LABEL`",
+            "restore `$AGENT_LABEL`",
+            "completed investigation findings",
+        )
+
     def test_directed_targets_accept_native_github_issues(self):
         self.assert_markers(
             "references/DIRECTED-TARGET.md",
