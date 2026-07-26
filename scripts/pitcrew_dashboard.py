@@ -14,8 +14,11 @@ from typing import Callable
 from urllib.parse import quote, urlsplit
 
 from scripts.pitcrew_config import ConfigError, update_runtime_model, validate
+from scripts.pitcrew_config import max_concurrent_for
 from scripts.pitcrew_history import HistoryStore, classify_record
 from scripts.pitcrew_proposals import ProposalError, ProposalStore
+from scripts.pitcrew_run_dispatcher import RunDispatcher
+from scripts.pitcrew_run_store import RunStore, RunStoreError
 try:
     from scripts.pitcrew_models import (
         PRICING_CURRENCY,
@@ -132,6 +135,9 @@ class DashboardService:
         runtime_dir: Path,
         command_runner: Callable,
         now: Callable[[], datetime],
+        *,
+        run_store: RunStore | None = None,
+        run_dispatcher: RunDispatcher | None = None,
     ):
         self.project = project
         self.runtime_dir = Path(runtime_dir)
@@ -154,6 +160,22 @@ class DashboardService:
         self._last_successful_refresh: str | None = None
         self._schedule_cache: list[dict] | None = None
         self._control_lock = threading.RLock()
+        self.run_store = run_store
+        self.run_dispatcher = run_dispatcher
+        self._run_store_error: Exception | None = None
+        if self.run_store is None:
+            try:
+                self.run_store = RunStore(
+                    self.runtime_dir / "runs.sqlite3",
+                    now=self.now,
+                )
+            except (OSError, RunStoreError) as error:
+                self._run_store_error = error
+        if self.run_store is not None and self.run_dispatcher is None:
+            self.run_dispatcher = RunDispatcher(
+                store=self.run_store,
+                runner=str(RUNNER),
+            )
 
     def _load_config(self) -> dict:
         try:
@@ -624,6 +646,113 @@ class DashboardService:
         states = {entry.get("global_state", "running") for entry in entries}
         return "stopped" if states == {"stopped"} else "running"
 
+    def _capacity_map(self) -> dict[str, int]:
+        """Return the configured coordinator capacity for every enabled role."""
+        return {
+            entry["skill"]: max_concurrent_for(self.config, entry["skill"])
+            for entry in self._schedule_entries()
+            if entry.get("enabled")
+        }
+
+    def _claim_capacity_map(self) -> dict[str, int]:
+        """Keep one configured slot occupied while a legacy worker is live."""
+        capacities = self._capacity_map()
+        for skill in tuple(capacities):
+            if self._live_status(skill) is not None:
+                capacities[skill] = max(0, capacities[skill] - 1)
+        return capacities
+
+    def runs_snapshot(self) -> dict:
+        """Expose durable runs and account for the legacy single-worker files."""
+        capacities = self._capacity_map()
+        if self.run_store is None:
+            raise DashboardError("ticket runs are unavailable") from self._run_store_error
+        try:
+            snapshot = self.run_store.snapshot(self.project, capacities)
+        except RunStoreError as error:
+            raise DashboardError("ticket runs are unavailable") from error
+        for skill, capacity in snapshot["capacity"].items():
+            if self._live_status(skill) is not None:
+                capacity["running"] += 1
+                capacity["legacy_running"] = 1
+        return snapshot
+
+    def _with_run_overlay(self, payload: dict) -> dict:
+        """Apply volatile coordinator state without making cached GitLab stale."""
+        groups = {
+            lifecycle: [dict(issue) for issue in issues]
+            for lifecycle, issues in payload["groups"].items()
+        }
+        result = {**payload, "groups": groups, "runs_degraded": False}
+        try:
+            active_by_target = {
+                run["target"]: run
+                for run in self.runs_snapshot()["runs"]
+                if run["state"] in {"queued", "running"}
+                and isinstance(run.get("target"), str)
+            }
+        except DashboardError:
+            result["runs_degraded"] = True
+            for issues in groups.values():
+                for issue in issues:
+                    action = issue.get("agent_action")
+                    if isinstance(action, dict):
+                        issue["active_run"] = None
+                        issue["agent_action"] = {
+                            **action,
+                            "available": False,
+                            "unavailable_reason": "État des tickets indisponible",
+                        }
+            return result
+        for issues in groups.values():
+            for issue in issues:
+                target = issue.get("web_url")
+                active_run = active_by_target.get(target) if isinstance(target, str) else None
+                issue["active_run"] = active_run
+                action = issue.get("agent_action")
+                if isinstance(action, dict) and active_run is not None:
+                    issue["agent_action"] = {
+                        **action,
+                        "available": False,
+                        "unavailable_reason": "Ticket en attente ou en cours",
+                    }
+        return result
+
+    def _canonical_ticket_target(self, target: str) -> tuple[str, int]:
+        parsed = urlsplit(target)
+        configured_host = str(self.config["gitlab"].get("host", ""))
+        prefix = f"/{self.gitlab_project}/-/issues/"
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != configured_host
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.startswith(prefix)
+        ):
+            raise DashboardError("invalid ticket target")
+        raw_iid = parsed.path.removeprefix(prefix)
+        if not raw_iid.isdigit() or int(raw_iid) <= 0:
+            raise DashboardError("invalid ticket target")
+        iid = int(raw_iid)
+        return f"https://{configured_host}{prefix}{iid}", iid
+
+    def _ticket_lifecycle(self, issue: object, iid: int) -> str:
+        if not isinstance(issue, dict) or issue.get("iid") != iid or issue.get("state") != "opened":
+            raise DashboardError("ticket is not eligible")
+        lifecycle = _label_value(issue.get("labels"), STATE_LABEL_PREFIX)
+        if lifecycle not in TICKET_AGENT_ACTIONS:
+            raise DashboardError("ticket is not eligible")
+        return lifecycle
+
+    def _validate_ticket_run(self, skill: str, target: str) -> tuple[str, dict]:
+        canonical, iid = self._canonical_ticket_target(target)
+        encoded = quote(self.gitlab_project, safe="")
+        issue = self._gitlab_document(f"projects/{encoded}/issues/{iid}")
+        lifecycle = self._ticket_lifecycle(issue, iid)
+        if TICKET_AGENT_ACTIONS[lifecycle][0] != skill:
+            raise DashboardError("ticket is not eligible")
+        return canonical, issue
+
     def _degraded_gitlab(self, error: str) -> dict:
         return {
             "degraded": True,
@@ -680,7 +809,7 @@ class DashboardService:
             and self._gitlab_cached_at is not None
             and current - self._gitlab_cached_at < timedelta(seconds=60)
         ):
-            return self._gitlab_cache
+            return self._with_run_overlay(self._gitlab_cache)
 
         encoded = quote(self.gitlab_project, safe="")
         try:
@@ -723,7 +852,6 @@ class DashboardService:
                     available = bool(
                         entry
                         and entry.get("enabled")
-                        and not entry.get("running")
                         and self._global_state(list(schedule_by_skill.values())) != "stopped"
                     )
                     agent_action = {
@@ -748,6 +876,7 @@ class DashboardService:
                             "pitcrew-source::",
                         ),
                         "related_merge_requests": related,
+                        "active_run": None,
                         "agent_action": agent_action,
                     }
                 )
@@ -764,7 +893,8 @@ class DashboardService:
 
         self._gitlab_cache = payload
         self._gitlab_cached_at = current
-        return payload
+        return self._with_run_overlay(payload)
+
 
     @staticmethod
     def _normalize_merge_request(merge_request: dict) -> dict:
@@ -899,37 +1029,40 @@ class DashboardService:
         return process.pid
 
     def _validate_ticket_target(self, target: str) -> int:
-        parsed = urlsplit(target)
-        configured_host = str(self.config["gitlab"].get("host", ""))
-        if (
-            parsed.scheme != "https"
-            or parsed.netloc != configured_host
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise DashboardError("invalid ticket target")
-        prefix = f"/{self.gitlab_project}/-/issues/"
-        if not parsed.path.startswith(prefix):
-            raise DashboardError("invalid ticket target")
-        iid = parsed.path.removeprefix(prefix)
-        if not iid.isdigit() or int(iid) <= 0:
-            raise DashboardError("invalid ticket target")
-        return int(iid)
+        return self._canonical_ticket_target(target)[1]
 
     def launch_ticket_agent(self, skill: str, target: str) -> dict:
         with self._control_lock:
             mapped_skills = {value[0] for value in TICKET_AGENT_ACTIONS.values()}
             if skill not in mapped_skills:
                 raise DashboardError("skill is not available for ticket launch")
-            self._validate_ticket_target(target)
-            entry = self._enabled_entry(skill)
-            if entry.get("running"):
-                raise DashboardError("agent is already running")
+            self._enabled_entry(skill)
+            if self._global_state() == "stopped":
+                raise DashboardError("global stop is active")
+            canonical, _ = self._validate_ticket_run(skill, target)
+            if self.run_store is None or self.run_dispatcher is None:
+                raise DashboardError("ticket runs are unavailable") from self._run_store_error
+            try:
+                run = self.run_store.enqueue(
+                    project=self.project,
+                    skill=skill,
+                    source="dashboard",
+                    target=canonical,
+                )
+                self.run_dispatcher.reconcile_and_drain(
+                    project=self.project,
+                    capacities=self._claim_capacity_map(),
+                )
+                current = self.run_store.get(run["run_id"])
+            except RunStoreError as error:
+                raise DashboardError("ticket run is unavailable") from error
+            if current is None:
+                raise DashboardError("ticket run is unavailable")
             return {
-                "accepted": True,
-                "pid": self._trigger_target(skill, target),
-                "skill": skill,
-                "target": target,
+                "run_id": current["run_id"],
+                "state": current["state"],
+                "queue_position": current["queue_position"],
+                "created": run["created"],
             }
 
     def control(self, action: str, skill: str) -> dict:

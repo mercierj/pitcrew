@@ -9,12 +9,14 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
 from scripts.pitcrew_dashboard import DashboardError, DashboardService
+from scripts.pitcrew_run_store import RunStore, RunStoreError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -251,13 +253,31 @@ class DashboardServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def service(self, runner, now=None):
+    def service(self, runner, now=None, run_store=None, run_dispatcher=None):
         return DashboardService(
             project="getbill",
             runtime_dir=self.runtime,
             command_runner=runner,
             now=now or (lambda: FIXED_NOW),
+            run_store=run_store,
+            run_dispatcher=run_dispatcher,
         )
+
+    def coordinator(self):
+        class FakeDispatcher:
+            def __init__(self, store):
+                self.store = store
+                self.drain_calls = []
+                self.spawned_run_ids = []
+
+            def reconcile_and_drain(self, *, project, capacities):
+                self.drain_calls.append((project, dict(capacities)))
+                claimed = self.store.claim_ready(project=project, capacities=capacities)
+                self.spawned_run_ids.extend(run["run_id"] for run in claimed)
+                return {"spawned": claimed}
+
+        store = RunStore(self.runtime / "runs.sqlite3", now=lambda: FIXED_NOW)
+        return store, FakeDispatcher(store)
 
     def write_history(self):
         records = (
@@ -727,24 +747,56 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertIsNone(work["groups"]["processing"][0]["agent_action"])
         self.assertIsNone(work["groups"]["review"][0]["agent_action"])
 
-    def test_launch_ticket_agent_targets_validated_issue(self):
+    def test_ticket_launch_is_idempotent_under_concurrency(self):
         runner = FakeRunner()
-        service = self.service(runner)
+        store, dispatcher = self.coordinator()
+        service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
         target = "https://gitlab.com/getbill1/getbill/-/issues/1"
-        process = mock.Mock(pid=7654)
-        with mock.patch("scripts.pitcrew_dashboard.subprocess.Popen", return_value=process) as starter:
-            result = service.launch_ticket_agent("implementer-run", target)
+        issue = dict(gitlab_issues()[0])
+        with mock.patch.object(service, "_gitlab_document", return_value=issue):
+            barrier = threading.Barrier(2)
+            def launch():
+                barrier.wait()
+                return service.launch_ticket_agent("implementer-run", target)
+            first, second = list(ThreadPoolExecutor(max_workers=2).map(lambda _: launch(), range(2)))
 
-        self.assertEqual(
-            {"accepted": True, "pid": 7654, "skill": "implementer-run", "target": target},
-            result,
-        )
-        starter.assert_called_once()
-        self.assertEqual(
-            [str(service.RUNNER) if hasattr(service, "RUNNER") else mock.ANY],
-            [starter.call_args.args[0][0]],
-        )
-        self.assertEqual(["--target", target, "--scheduled"], starter.call_args.args[0][-3:])
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual({first["created"], second["created"]}, {True, False})
+        self.assertEqual(2, len(dispatcher.drain_calls))
+        self.assertEqual(3, dispatcher.drain_calls[0][1]["implementer-run"])
+        self.assertEqual([first["run_id"]], dispatcher.spawned_run_ids)
+        self.assertEqual(1, len(store.list_runs("getbill", active_only=True)))
+
+    def test_ticket_launch_revalidates_lifecycle(self):
+        store, dispatcher = self.coordinator()
+        runner = FakeRunner()
+        for entry in runner.schedule:
+            if entry["skill"] == "unblock":
+                entry["enabled"] = True
+        service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        for lifecycle, skill, opened in (
+            ("todo", "implementer-run", True),
+            ("blocked", "unblock", True),
+            ("done", "stale-sweep", True),
+            ("todo", "unblock", True),
+            ("todo", "implementer-run", False),
+        ):
+            with self.subTest(lifecycle=lifecycle, skill=skill, opened=opened):
+                labels = ["pitcrew-agent", f"pitcrew-state::{lifecycle}"]
+                issue = {"iid": 1, "state": "opened" if opened else "closed", "labels": labels}
+                with mock.patch.object(service, "_gitlab_document", return_value=issue):
+                    if (lifecycle, skill, opened) in {
+                        ("todo", "implementer-run", True),
+                        ("blocked", "unblock", True),
+                        ("done", "stale-sweep", True),
+                    }:
+                        result = service.launch_ticket_agent(skill, target)
+                        self.assertIn(result["state"], {"queued", "running"})
+                        store.finish(result["run_id"], state="cancelled")
+                    else:
+                        with self.assertRaisesRegex(DashboardError, "ticket is not eligible"):
+                            service.launch_ticket_agent(skill, target)
 
         for invalid in (
             "https://evil.example/getbill1/getbill/-/issues/1",
@@ -754,6 +806,76 @@ class DashboardServiceTest(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(DashboardError):
                     service.launch_ticket_agent("implementer-run", invalid)
+
+    def test_gitlab_work_is_read_only_and_overlays_active_runs(self):
+        store, dispatcher = self.coordinator()
+        service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        store.enqueue(project="getbill", skill="implementer-run", source="dashboard", target=target)
+        with mock.patch.object(service, "_gitlab_mutation") as mutation:
+            work = service.gitlab_work(force_refresh=True)
+        ticket = work["groups"]["todo"][0]
+        self.assertEqual(target, ticket["active_run"]["target"])
+        self.assertFalse(ticket["agent_action"]["available"])
+        self.assertEqual("Ticket en attente ou en cours", ticket["agent_action"]["unavailable_reason"])
+        mutation.assert_not_called()
+
+    def test_runs_snapshot_counts_legacy_live_worker_without_lowering_maximum(self):
+        store, dispatcher = self.coordinator()
+        live_dir = self.runtime / "live"
+        live_dir.mkdir()
+        (live_dir / "implementer-run.json").write_text(json.dumps({
+            "project": "getbill", "skill": "implementer-run", "pid": os.getpid(),
+            "started_at": FIXED_NOW.isoformat(), "phase": "legacy worker",
+        }), encoding="utf-8")
+        service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
+
+        snapshot = service.runs_snapshot()
+
+        capacity = snapshot["capacity"]["implementer-run"]
+        self.assertEqual(3, capacity["max_concurrent"])
+        self.assertEqual(1, capacity["running"])
+        self.assertEqual(1, capacity["legacy_running"])
+        self.assertEqual(2, service._claim_capacity_map()["implementer-run"])
+
+    def test_gitlab_work_degrades_when_run_store_is_unavailable(self):
+        store, dispatcher = self.coordinator()
+        service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
+        with mock.patch.object(service, "runs_snapshot", side_effect=DashboardError("ticket runs are unavailable")):
+            work = service.gitlab_work(force_refresh=True)
+
+        self.assertFalse(work["degraded"])
+        self.assertTrue(work["runs_degraded"])
+        self.assertEqual("Todo work", work["groups"]["todo"][0]["title"])
+        self.assertFalse(work["groups"]["todo"][0]["agent_action"]["available"])
+        self.assertEqual("État des tickets indisponible", work["groups"]["todo"][0]["agent_action"]["unavailable_reason"])
+
+    def test_dashboard_construction_survives_default_run_store_failure(self):
+        with mock.patch("scripts.pitcrew_dashboard.RunStore", side_effect=RunStoreError("unavailable")):
+            service = self.service(FakeRunner())
+
+        work = service.gitlab_work(force_refresh=True)
+
+        self.assertFalse(work["degraded"])
+        self.assertTrue(work["runs_degraded"])
+        self.assertEqual("Todo work", work["groups"]["todo"][0]["title"])
+        self.assertFalse(work["groups"]["todo"][0]["agent_action"]["available"])
+
+    def test_cached_gitlab_work_recomputes_active_run_overlay(self):
+        store, dispatcher = self.coordinator()
+        service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        first = service.gitlab_work()
+        run = store.enqueue(project="getbill", skill="implementer-run", source="dashboard", target=target)
+        active = service.gitlab_work()
+        store.finish(run["run_id"], state="cancelled")
+        finished = service.gitlab_work()
+
+        self.assertTrue(first["groups"]["todo"][0]["agent_action"]["available"])
+        self.assertFalse(active["groups"]["todo"][0]["agent_action"]["available"])
+        self.assertEqual(run["run_id"], active["groups"]["todo"][0]["active_run"]["run_id"])
+        self.assertTrue(finished["groups"]["todo"][0]["agent_action"]["available"])
+        self.assertIsNone(finished["groups"]["todo"][0]["active_run"])
 
     def test_gitlab_work_lists_only_open_merge_requests_with_display_fields(self):
         runner = FakeRunner()
