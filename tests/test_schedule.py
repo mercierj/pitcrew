@@ -1,14 +1,25 @@
 import json
+import importlib.util
 import os
 import plistlib
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEDULER = ROOT / "bin/pitcrew-schedule.py"
+
+
+def load_scheduler_module():
+    spec = importlib.util.spec_from_file_location("pitcrew_schedule_test", SCHEDULER)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 class ScheduleTest(unittest.TestCase):
@@ -101,6 +112,31 @@ class ScheduleTest(unittest.TestCase):
                 env=env, cwd=ROOT, text=True, capture_output=True, check=False,
             )
             self.assertEqual(2, result.returncode)
+
+    def test_runtime_state_fsyncs_directory_after_replacing_flag(self):
+        from scripts import pitcrew_runtime_state
+
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"HOME": temp, "CODEX_HOME": str(Path(temp) / ".codex")}
+            events = []
+            real_replace = pitcrew_runtime_state.os.replace
+            with (
+                mock.patch.object(
+                    pitcrew_runtime_state.os,
+                    "fsync",
+                    side_effect=lambda descriptor: events.append(("fsync", descriptor)),
+                ),
+                mock.patch.object(
+                    pitcrew_runtime_state.os,
+                    "replace",
+                    side_effect=lambda source, target: (
+                        events.append(("replace", source, target)),
+                        real_replace(source, target),
+                    )[1],
+                ),
+            ):
+                pitcrew_runtime_state.write_state("getbill", "stopped", env)
+            self.assertEqual(["fsync", "replace", "fsync"], [event[0] for event in events])
 
     def test_render_writes_only_enabled_launch_agents_with_bounded_logs(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -205,6 +241,163 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
             bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
             self.assertEqual(10, len(bootouts))
+
+    def test_stop_all_closes_admission_before_cancelling_and_booting_out(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("set_project_state", project, state))
+
+        class Dispatcher:
+            def cancel_running(self, project, error_code):
+                calls.append(("cancel_running", project, error_code))
+
+        scheduler.write_state = lambda project, state, env: calls.append(("write_state", project, state))
+        scheduler.launchctl = lambda *args, **kwargs: (
+            calls.append(("bootout_enabled_jobs", "getbill"))
+            or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        self.assertEqual(
+            0,
+            scheduler.stop_all(
+                "getbill",
+                {"HOME": self.id()},
+                lambda project, env: (Store(), Dispatcher(), {}),
+            ),
+        )
+        self.assertEqual(
+            [
+                ("set_project_state", "getbill", "stopped"),
+                ("write_state", "getbill", "stopped"),
+                ("cancel_running", "getbill", "global_stop"),
+                ("bootout_enabled_jobs", "getbill"),
+            ],
+            calls[:4],
+        )
+
+    def test_stop_all_still_cancels_and_boots_out_when_flag_persistence_fails(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("set_project_state", project, state))
+
+        class Dispatcher:
+            def cancel_running(self, project, error_code):
+                calls.append(("cancel_running", project, error_code))
+
+        def broken_write(project, state, env):
+            calls.append(("write_state", project, state))
+            raise OSError("fsync failed")
+
+        scheduler.write_state = broken_write
+        scheduler.launchctl = lambda *args, **kwargs: (
+            calls.append(("bootout", args[1]))
+            or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            self.assertEqual(
+                2,
+                scheduler.stop_all(
+                    "getbill",
+                    {"HOME": self.id()},
+                    lambda project, env: (Store(), Dispatcher(), {}),
+                ),
+            )
+        self.assertIn("could not be persisted", error.getvalue())
+        self.assertEqual(
+            [
+                ("set_project_state", "getbill", "stopped"),
+                ("write_state", "getbill", "stopped"),
+                ("cancel_running", "getbill", "global_stop"),
+            ],
+            calls[:3],
+        )
+        self.assertEqual(10, len([call for call in calls if call[0] == "bootout"]))
+
+    def test_resume_reopens_admission_and_drains_once_after_install(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("set_project_state", project, state))
+
+        class Dispatcher:
+            def reconcile_and_drain(self, project, capacities):
+                calls.append(("reconcile_and_drain", project, capacities))
+
+        scheduler.write_state = lambda project, state, env: calls.append(("write_state", project, state))
+        scheduler.install = lambda project, output, env: calls.append(("install", project)) or 0
+        self.assertEqual(
+            0,
+            scheduler.resume_all(
+                "getbill",
+                Path("/tmp/agents"),
+                {"HOME": self.id()},
+                lambda project, env: (Store(), Dispatcher(), {"implementer-run": 3}),
+            ),
+        )
+        self.assertEqual(
+            [
+                ("write_state", "getbill", "running"),
+                ("install", "getbill"),
+                ("set_project_state", "getbill", "running"),
+                ("reconcile_and_drain", "getbill", {"implementer-run": 3}),
+            ],
+            calls,
+        )
+
+    def test_resume_restores_stopped_compatibility_flag_when_install_fails(self):
+        scheduler = load_scheduler_module()
+        calls = []
+        scheduler.write_state = lambda project, state, env: calls.append((project, state))
+        scheduler.install = lambda project, output, env: 23
+        self.assertEqual(
+            23,
+            scheduler.resume_all("getbill", Path("/tmp/agents"), {"HOME": self.id()}),
+        )
+        self.assertEqual([("getbill", "running"), ("getbill", "stopped")], calls)
+
+    def test_resume_rolls_back_when_coordinator_open_or_recovery_fails(self):
+        scheduler = load_scheduler_module()
+        calls = []
+        scheduler.write_state = lambda project, state, env: calls.append(("write", state))
+        scheduler.install = lambda project, output, env: 0
+
+        with self.assertRaisesRegex(RuntimeError, "open failed"):
+            scheduler.resume_all(
+                "getbill",
+                Path("/tmp/agents"),
+                {"HOME": self.id()},
+                lambda project, env: (_ for _ in ()).throw(RuntimeError("open failed")),
+            )
+        self.assertEqual([("write", "running"), ("write", "stopped")], calls)
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("store", state))
+
+        class Dispatcher:
+            def reconcile_and_drain(self, **kwargs):
+                raise RuntimeError("recovery failed")
+
+        calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "recovery failed"):
+            scheduler.resume_all(
+                "getbill",
+                Path("/tmp/agents"),
+                {"HOME": self.id()},
+                lambda project, env: (Store(), Dispatcher(), {}),
+            )
+        self.assertEqual(
+            [("write", "running"), ("store", "running"), ("store", "stopped"), ("write", "stopped")],
+            calls,
+        )
 
     def test_install_is_rejected_while_globally_stopped_and_resume_reinstalls(self):
         with tempfile.TemporaryDirectory() as temp:

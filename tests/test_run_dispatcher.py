@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest import mock
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts import pitcrew_run_dispatcher as dispatcher_module
-from scripts.pitcrew_run_store import RunStore
+from scripts.pitcrew_run_store import RunPaused, RunStore
 
 
 class FakeProcess:
@@ -190,3 +191,66 @@ class RunDispatcherTest(unittest.TestCase):
         run = self.store.enqueue(project="other", skill="qa-run", source="scheduled")
         with self.assertRaises(ValueError): self.dispatcher.bind_target("demo", run["run_id"], "ABC-2")
         self.assertEqual("ABC-2", self.dispatcher.bind_target("other", run["run_id"], "ABC-2")["target"])
+
+    def test_stopped_project_keeps_queued_work_and_rejects_racing_admission(self):
+        queued = self.enqueue("queued")
+        self.store.set_project_state("demo", "stopped")
+        with self.assertRaises(RunPaused):
+            self.enqueue("racing-ticket")
+        self.assertEqual("queued", self.store.get(queued["run_id"])["state"])
+        self.assertEqual([], self.dispatcher.cancel_running("demo", grace_seconds=0))
+
+    def test_stop_between_claim_and_mark_pid_terminates_spawned_worker(self):
+        run = self.enqueue("race")
+        signals = []
+        after_stop_reread = threading.Event()
+        allow_stop_finish = threading.Event()
+        worker_started = threading.Event()
+        original_get = self.store.get
+
+        def get_after_stop_reread(run_id):
+            row = original_get(run_id)
+            if row is not None and row["cancel_requested"]:
+                after_stop_reread.set()
+                self.assertTrue(allow_stop_finish.wait(timeout=2))
+            return row
+
+        self.store.get = get_after_stop_reread
+
+        def popen(*args, **kwargs):
+            # The stopper has already reread pid=None and is paused before
+            # finish. Popen/mark_pid now takes the formerly leaky path.
+            worker_started.set()
+            self.assertTrue(after_stop_reread.wait(timeout=2))
+            return FakeProcess(456)
+
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=popen,
+            target_validator=lambda row: True,
+            killpg=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _: None,
+        )
+        worker_result = []
+        worker = threading.Thread(
+            target=lambda: worker_result.append(dispatcher.drain("demo", {"qa-run": 1})),
+        )
+        worker.start()
+        self.assertTrue(worker_started.wait(timeout=2))
+        stopper = threading.Thread(
+            target=lambda: dispatcher.cancel_running("demo", grace_seconds=0),
+        )
+        stopper.start()
+        self.assertTrue(after_stop_reread.wait(timeout=2))
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        allow_stop_finish.set()
+        stopper.join(timeout=2)
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual([], worker_result[0]["spawned"])
+        self.assertEqual(
+            [(456, __import__("signal").SIGTERM), (456, __import__("signal").SIGKILL)],
+            signals,
+        )
+        self.assertEqual(1, self.store.get(run["run_id"])["cancel_requested"])

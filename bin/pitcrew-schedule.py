@@ -17,8 +17,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
+    from scripts.pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from scripts.pitcrew_run_dispatcher import RunDispatcher
+    from scripts.pitcrew_run_store import RunStore
     from scripts.pitcrew_runtime_state import read_state, write_state
 except ModuleNotFoundError:
+    from pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from pitcrew_run_dispatcher import RunDispatcher
+    from pitcrew_run_store import RunStore
     from pitcrew_runtime_state import read_state, write_state
 
 
@@ -254,10 +260,60 @@ def stop(project: str, skill: str) -> int:
     return 0
 
 
-def stop_all(project: str) -> int:
-    write_state(project, "stopped")
-    domain = f"gui/{os.getuid()}"
+def coordinated_components(project: str, env: dict[str, str]) -> tuple[RunStore, RunDispatcher, dict[str, int]]:
+    store = RunStore(runtime_root(env) / project / "runs.sqlite3")
+    # Scheduler controls have historically worked before a project is
+    # configured. Keep that recovery path available with the documented
+    # default capacity, then apply configured overrides when present.
+    capacities = {
+        str(entry["skill"]): 3
+        for entry in entries()
+        if entry["enabled"]
+    }
+    try:
+        config = load_runtime_config(project, env)
+    except ConfigError as error:
+        # A missing config is the one compatibility case.  Any malformed or
+        # unsafe configured project must fail closed instead of draining with
+        # guessed capacities.
+        if str(error) != "runtime config path must not be a symlink or missing":
+            raise
+    else:
+        skills = config.get("agents", {})
+        capacities = {
+            skill: max_concurrent_for(config, skill)
+            for skill in skills
+        }
+    return store, RunDispatcher(store, str(ROOT / "bin" / "pitcrew-codex.sh")), capacities
+
+
+def stop_all(
+    project: str,
+    env: dict[str, str] | None = None,
+    components_factory=coordinated_components,
+) -> int:
+    values = dict(os.environ) if env is None else env
+    store, dispatcher, _ = components_factory(project, values)
+    # The SQLite control row is the admission gate.  It must close before the
+    # compatibility flag and process cancellation so an enqueue racing a stop
+    # can never start a newly admitted worker after the stop takes effect.
+    store.set_project_state(project, "stopped")
     first_failure = 0
+    try:
+        write_state(project, "stopped", values)
+    except (OSError, ValueError):
+        # Admission is already closed in SQLite. Do not leave live workers or
+        # launchd jobs running merely because the compatibility flag could not
+        # be made durable; report failure after the mandatory cleanup below.
+        first_failure = 2
+        print("scheduler execution state could not be persisted", file=sys.stderr)
+    try:
+        dispatcher.cancel_running(project=project, error_code="global_stop")
+    except (OSError, ValueError):
+        if not first_failure:
+            first_failure = 2
+        print("coordinated workers could not all be cancelled", file=sys.stderr)
+    domain = f"gui/{os.getuid()}"
     for entry in entries():
         if not entry["enabled"]:
             continue
@@ -274,9 +330,32 @@ def resume_all(
     project: str,
     output_dir: Path,
     env: dict[str, str],
+    components_factory=coordinated_components,
 ) -> int:
     write_state(project, "running", env)
-    return install(project, output_dir, env)
+    result = install(project, output_dir, env)
+    if result:
+        # SQLite remains stopped until below. Keep its compatibility flag in
+        # lockstep if launchd could not be installed.
+        write_state(project, "stopped", env)
+        return result
+    store: RunStore | None = None
+    try:
+        store, dispatcher, capacities = components_factory(project, env)
+        store.set_project_state(project, "running")
+        dispatcher.reconcile_and_drain(project=project, capacities=capacities)
+    except Exception:
+        # A resume is all-or-nothing: no worker may be admitted when a later
+        # recovery step fails. Re-close SQLite if it was opened, then restore
+        # the compatibility flag even when the coordinator could not open.
+        if store is not None:
+            try:
+                store.set_project_state(project, "stopped")
+            except Exception:
+                pass
+        write_state(project, "stopped", env)
+        raise
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
@@ -323,7 +402,7 @@ def main() -> int:
         if args.command == "stop":
             return stop(args.project, args.skill)
         if args.command == "stop-all":
-            return stop_all(args.project)
+            return stop_all(args.project, env)
         if args.command == "resume-all":
             return resume_all(args.project, args.output_dir.expanduser(), env)
     except ValueError as error:

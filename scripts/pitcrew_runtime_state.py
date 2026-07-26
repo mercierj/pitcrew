@@ -76,10 +76,25 @@ def write_state(
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump({"state": state}, handle, separators=(",", ":"))
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
         if path.is_symlink():
             raise ConfigError(f"refusing to overwrite symlink {path}")
         os.replace(temporary, path)
+        # Replacing the file alone is not durable until its containing
+        # directory has reached stable storage as well.
+        directory_fd = os.open(
+            directory,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if temporary.exists():
             temporary.unlink()

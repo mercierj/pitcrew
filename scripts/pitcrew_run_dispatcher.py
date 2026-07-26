@@ -54,7 +54,21 @@ class RunDispatcher:
                     process = self.process_factory(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                                    stderr=subprocess.DEVNULL, start_new_session=True)
                     try:
-                        spawned.append(self.store.mark_pid(row["run_id"], process.pid))
+                        marked = self.store.mark_pid(row["run_id"], process.pid)
+                        # A global stop may request cancellation after claim
+                        # but before Popen/mark_pid.  In that interleaving its
+                        # initial PID snapshot is empty, so the spawning side
+                        # must terminate the just-recorded process itself.
+                        if marked["cancel_requested"]:
+                            try: self.killpg(process.pid, signal.SIGTERM)
+                            except OSError: pass
+                            self.sleep(0.1)
+                            try: self.killpg(process.pid, signal.SIGKILL)
+                            except OSError: pass
+                            try: process.wait(timeout=1)
+                            except Exception: pass
+                        else:
+                            spawned.append(marked)
                     except (RunStateError, RunStoreError):
                         try: self.killpg(process.pid, signal.SIGTERM)
                         except OSError: pass
@@ -139,6 +153,9 @@ def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | No
             print(json.dumps({"run_id": latest["run_id"], "state": latest["state"],
                               "queue_position": latest["queue_position"], "created": row["created"]}, separators=(",", ":")))
         elif args.command == "bind-target":
+            # Reconciliation never claims work here, but makes stale workers
+            # terminal before a target is attached to a queued run.
+            store.reconcile(args.project)
             print(json.dumps(dispatcher.bind_target(args.project, args.run_id, args.target), separators=(",", ":")))
         else:
             print(json.dumps(dispatcher.reconcile_and_drain(args.project, capacities), separators=(",", ":")))
