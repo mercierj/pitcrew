@@ -187,6 +187,50 @@ def _validate_native_github(config: Mapping[str, Any]) -> None:
         _non_empty_string(states, key, f"github.tracker.states.{key}")
 
 
+def _validate_bugfixer(config: Mapping[str, Any]) -> None:
+    policy = config.get("bugfixer")
+    if policy is None:
+        return
+    if not isinstance(policy, Mapping):
+        raise ConfigError("bugfixer must be an object")
+    allowed = {
+        "sensitive_labels",
+        "risky_categories_regex",
+        "sensitive_approved_label",
+    }
+    if set(policy) != allowed:
+        missing = sorted(allowed - set(policy))
+        extra = sorted(set(policy) - allowed)
+        field = (missing or extra)[0]
+        raise ConfigError(f"bugfixer.{field} is invalid")
+    labels = policy["sensitive_labels"]
+    if (
+        not isinstance(labels, list)
+        or not labels
+        or any(not isinstance(label, str) or not label for label in labels)
+        or len(labels) != len(set(labels))
+    ):
+        raise ConfigError(
+            "bugfixer.sensitive_labels must be a unique non-empty string array"
+        )
+    regex = policy["risky_categories_regex"]
+    if not isinstance(regex, str) or not regex:
+        raise ConfigError(
+            "bugfixer.risky_categories_regex must be a non-empty string"
+        )
+    try:
+        re.compile(regex, re.IGNORECASE)
+    except re.error as error:
+        raise ConfigError(
+            "bugfixer.risky_categories_regex must compile"
+        ) from error
+    approved = policy["sensitive_approved_label"]
+    if not isinstance(approved, str) or not approved:
+        raise ConfigError(
+            "bugfixer.sensitive_approved_label must be a non-empty string"
+        )
+
+
 def validate(config: Mapping[str, Any]) -> None:
     if not isinstance(config, Mapping):
         raise ConfigError("config must be an object")
@@ -195,6 +239,7 @@ def validate(config: Mapping[str, Any]) -> None:
         raise ConfigError("providers.forge must be github or gitlab")
     if providers.get("tracker") not in TRACKERS:
         raise ConfigError("providers.tracker is unsupported")
+    _validate_bugfixer(config)
     if providers.get("tracker") == "github":
         if providers.get("forge") != "github":
             raise ConfigError(

@@ -74,6 +74,17 @@
       }
     ]
   },
+  "bugfixer": {
+    "sensitive_labels": [
+      "pitcrew-category::security",
+      "security",
+      "authentication",
+      "payment",
+      "privacy"
+    ],
+    "risky_categories_regex": "security|auth|payment|PII|secret|token",
+    "sensitive_approved_label": "pitcrew-risk::approved"
+  },
   "release": {"autonomy": "off"},
   "delivery": {"fix_autonomy": "off"},
   "architecture": {"interval_seconds": 604800},

@@ -39,6 +39,52 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def valid_bugfixer_policy(self):
+        return {
+            "sensitive_labels": [
+                "pitcrew-category::security",
+                "security",
+                "authentication",
+                "payment",
+                "privacy",
+            ],
+            "risky_categories_regex": (
+                "security|auth|payment|PII|secret|token"
+            ),
+            "sensitive_approved_label": "pitcrew-risk::approved",
+        }
+
+    def test_bugfixer_policy_is_complete_and_regex_is_valid(self):
+        profile = load_profile(ROOT / "profiles/getbill.json")
+        profile["bugfixer"] = self.valid_bugfixer_policy()
+        validate(profile)
+
+        for key in (
+            "sensitive_labels",
+            "risky_categories_regex",
+            "sensitive_approved_label",
+        ):
+            broken = copy.deepcopy(profile)
+            del broken["bugfixer"][key]
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(ConfigError, f"bugfixer.{key}"):
+                    validate(broken)
+
+        broken = copy.deepcopy(profile)
+        broken["bugfixer"]["risky_categories_regex"] = "("
+        with self.assertRaisesRegex(ConfigError, "bugfixer.risky_categories_regex"):
+            validate(broken)
+
+    def test_bugfixer_sensitive_labels_are_unique_non_empty_strings(self):
+        profile = load_profile(ROOT / "profiles/getbill.json")
+        for labels in ([], ["security", "security"], ["security", ""], "security"):
+            broken = copy.deepcopy(profile)
+            broken["bugfixer"] = self.valid_bugfixer_policy()
+            broken["bugfixer"]["sensitive_labels"] = labels
+            with self.subTest(labels=labels):
+                with self.assertRaisesRegex(ConfigError, "bugfixer.sensitive_labels"):
+                    validate(broken)
+
     def native_github_config(self):
         config = copy.deepcopy(
             json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
