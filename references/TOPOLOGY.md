@@ -45,6 +45,7 @@ agent + bug + todo -> bugfixer -> review -> human go -> done
              investigate -> unblock approval
 
 research/qa/security -> findings -> manager -> tracker
+manager-run -> implementer-run (new agent/todo ticket -> local enqueue)
 product-discovery -> dashboard approval -> manager -> tracker
 architecture-run → local proposal → human dashboard approval → manager → tracker
                                       |

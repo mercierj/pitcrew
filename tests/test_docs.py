@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocsTest(unittest.TestCase):
+    def test_manager_ticket_handoff_is_documented(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        topology = (ROOT / "references/TOPOLOGY.md").read_text(encoding="utf-8")
+
+        self.assertIn("manager-run -> implementer-run", topology)
+        self.assertIn("without polling GitLab", readme)
+
     def test_provider_neutral_dashboard_degradation_is_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 

@@ -109,7 +109,8 @@ structured no-op and stop.
 
 ═══ HARD RULES (NEVER violate) ═══
 1. **File tickets ONLY.** Never write code, never open a change, never deploy. You groom the backlog;
-   the implementer/investigator act on it.
+   the implementer/investigator act on it. The sole local exception is
+   `ADMIT_NEW_AGENT_TICKET` after a newly created non-risky ticket is confirmed.
 2. **PACE — never flood.** Maintain a target queue depth per stream (see STEP 3). If a stream is
    already at/over depth, file NOTHING into it this fire. The whole point is a steady drip the
    implementer + you can actually keep up with — not 130 tickets dumped at once.
@@ -244,6 +245,21 @@ For each finding to file (take the top `slots` from each stream's sorted list):
      This helper must succeed **before any `state.filed[key]` or history write**; its failure is a hard
      failure, writes neither filed nor history, and leaves the finding retryable. Do not attach a tracker
      to a non-architecture proposal.
+   - **ADMIT_NEW_AGENT_TICKET (agent route only):** For every newly created agent-route ticket,
+     re-read its configured-provider document and obtain its canonical HTTPS ticket URL. Run exactly:
+     ```sh
+     python3 $REPO_ROOT/scripts/pitcrew_run_dispatcher.py enqueue \
+       --project "$PROJECT" \
+       --skill implementer-run \
+       --target "<canonical ticket URL>"
+     ```
+     The dispatcher output must be valid JSON with a non-empty `run_id` and a `state` of `queued` or
+     `running`. This operation is idempotent for the same canonical URL; do not retry after an ambiguous
+     response. If it fails or the response is malformed, do not write `state.filed[key]` or manager
+     history: stop with a structured failed result so the unchanged finding is retryable. Perform this
+     only for a newly created agent-route ticket; a deduplicated existing ticket is not a creation event.
+     Never admit an investigate-route ticket. For an agent-route architecture proposal, attach its tracker
+     metadata first, then run `ADMIT_NEW_AGENT_TICKET`, then write manager state.
    - Only now record `state.filed[key] = {ticket, route, severity, filed_at}` and history (`filed` or
      `deduped`). For non-architecture sources this is the normal immediate post-create/dedup write.
 

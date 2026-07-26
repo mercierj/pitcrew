@@ -111,6 +111,10 @@ periodic recovery path for missed or externally changed lifecycle state. Do not 
 `$pitcrew:releaser-run` for GetBill: release autonomy is off and every prod or
 preprod action requires a fresh explicit approval.
 
+When `manager-run` creates a new non-risky `agent/todo` ticket, it immediately
+admits that ticket to the local `implementer-run` queue without polling GitLab.
+Tickets created outside this Pitcrew flow are not part of that creation event.
+
 `$pitcrew:bugfixer-run` runs every 15 minutes when the configured native issue
 tracker, bugfixer risk policy, repository, and labels are all available. Its
 exclusive route is `agent + bug + todo`; `implementer-run excludes bugs` in
