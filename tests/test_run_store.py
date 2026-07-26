@@ -84,6 +84,56 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual({True, False}, {first["created"], second["created"]})
         self.assertEqual(1, len(self.store.list_runs("demo", active_only=True)))
 
+    def test_admit_successor_uses_a_stable_source_run_and_target_key(self):
+        source = self.enqueue("T-chain", skill="reviewer-run")
+        self.store.finish(source["run_id"], state="succeeded")
+
+        first = self.store.admit_successor(
+            project="demo",
+            source_run_id=source["run_id"],
+            skill="validator-run",
+            target="T-chain",
+        )
+        second = self.store.admit_successor(
+            project="demo",
+            source_run_id=source["run_id"],
+            skill="validator-run",
+            target="T-chain",
+        )
+
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(first["run_id"], second["run_id"])
+        self.assertEqual("chain", first["source"])
+        self.assertEqual(source["run_id"], first["predecessor_run_id"])
+        self.assertEqual(
+            f"chain:{source['run_id']}:T-chain",
+            first["dedupe_key"],
+        )
+        self.store.finish(first["run_id"], state="succeeded")
+        after_terminal = self.store.admit_successor(
+            project="demo", source_run_id=source["run_id"],
+            skill="validator-run", target="T-chain",
+        )
+        self.assertEqual(first["run_id"], after_terminal["run_id"])
+        self.assertFalse(after_terminal["created"])
+
+    def test_admit_successor_requires_a_terminal_source_with_the_same_target(self):
+        source = self.enqueue("T-bound", skill="reviewer-run")
+
+        with self.assertRaisesRegex(RunStateError, "terminal"):
+            self.store.admit_successor(
+                project="demo", source_run_id=source["run_id"],
+                skill="validator-run", target="T-bound",
+            )
+
+        self.store.finish(source["run_id"], state="succeeded")
+        with self.assertRaisesRegex(RunStateError, "target"):
+            self.store.admit_successor(
+                project="demo", source_run_id=source["run_id"],
+                skill="validator-run", target="T-other",
+            )
+
     def test_enqueue_does_not_retry_an_unrelated_integrity_error(self):
         path = Path(self.temp.name).resolve() / "unrelated-integrity.sqlite"
         failures = {"remaining": 3, "count": 0}
@@ -244,7 +294,6 @@ class RunStoreTest(unittest.TestCase):
     def test_invalid_values_are_public_errors(self):
         with self.assertRaises(RunStoreError): self.store.enqueue(project="", skill="x", source="dashboard")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="bad")
-        with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="chain")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="dashboard", target=" ")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="dashboard", target="x" * 1001)
         run = self.enqueue()
@@ -547,7 +596,7 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
-    def test_legacy_version_one_adds_nullable_gate_columns_and_upgrades_to_v2(self):
+    def test_legacy_version_one_adds_nullable_gate_columns_and_chain_source(self):
         path = Path(self.temp.name).resolve() / "legacy-v1.sqlite"
         with closing(sqlite3.connect(path)) as connection:
             connection.executescript(
@@ -660,32 +709,6 @@ class RunStoreTest(unittest.TestCase):
                         "PRAGMA index_info(queue_by_project_skill)"
                     )
                 ],
-            )
-
-    def test_version_two_keeps_legacy_chain_rows_readable_but_refuses_new_ones(self):
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute(
-                "INSERT INTO runs("
-                "run_id,project,skill,source,target,dedupe_key,state,"
-                "queue_sequence,created_at,finished_at,phase"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    "legacy-chain", "demo", "reviewer-run", "chain", "T-chain",
-                    "chain:legacy:T-chain", "cancelled", 1,
-                    "2026-07-26T12:00:00Z", "2026-07-26T12:01:00Z", "Annulé",
-                ),
-            )
-            connection.commit()
-
-        reopened = RunStore(self.path, now=self.clock)
-
-        self.assertEqual("chain", reopened.get("legacy-chain")["source"])
-        with self.assertRaisesRegex(RunStoreError, "source is invalid"):
-            reopened.enqueue(
-                project="demo",
-                skill="reviewer-run",
-                source="chain",
-                target="T-new",
             )
 
     def test_connections_are_fresh_private_and_configured(self):
