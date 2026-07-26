@@ -821,11 +821,68 @@ class RunDispatcherTest(unittest.TestCase):
             killpg=lambda *value: signals.append(value),
             sleep=lambda _: None,
         )
-        self.assertEqual([], dispatcher.drain("demo", {"qa-run": 1})["spawned"])
+        result = dispatcher.drain("demo", {"qa-run": 1})
+        self.assertEqual([], result["spawned"])
         self.assertEqual([(456, __import__("signal").SIGTERM), (456, __import__("signal").SIGKILL)], signals)
         self.assertTrue(process.waited)
-        self.assertEqual("running", self.store.get(run["run_id"])["state"])
+        self.assertEqual([run["run_id"]], [row["run_id"] for row in result["failed"]])
+        self.assertEqual(
+            ("failed", "launch_failed"),
+            (
+                self.store.get(run["run_id"])["state"],
+                self.store.get(run["run_id"])["error_code"],
+            ),
+        )
         self.store.launch_guard = original
+
+    def test_launch_failure_store_unavailable_is_safe_after_reaping_process(self):
+        run = self.enqueue("race")
+        signals = []
+        finish_calls = []
+        original_guard = self.store.launch_guard
+
+        @contextmanager
+        def broken_mark(run_id):
+            with original_guard(run_id):
+                class BrokenGuard:
+                    def mark_pid(self, pid):
+                        raise RunStoreError("mark unavailable")
+
+                yield BrokenGuard()
+
+        def unavailable_finish(run_id, **kwargs):
+            finish_calls.append((run_id, kwargs))
+            raise RunStoreError("finish unavailable")
+
+        self.store.launch_guard = broken_mark
+        self.store.finish = unavailable_finish
+        result = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=lambda *args, **kwargs: FakeProcess(456),
+            target_validator=lambda row: True,
+            killpg=lambda *value: signals.append(value),
+            sleep=lambda _: None,
+        ).drain("demo", {"qa-run": 1})
+
+        self.assertEqual([], result["failed"])
+        self.assertEqual(
+            [(456, signal.SIGTERM), (456, signal.SIGKILL)],
+            signals,
+        )
+        self.assertEqual(
+            [
+                (
+                    run["run_id"],
+                    {
+                        "state": "failed",
+                        "error_code": "launch_failed",
+                        "error_message": "worker launch could not be recorded",
+                    },
+                )
+            ],
+            finish_calls,
+        )
 
     def test_bind_target_requires_project(self):
         run = self.store.enqueue(project="other", skill="qa-run", source="scheduled")

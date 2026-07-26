@@ -294,32 +294,50 @@ def stop_all(
     components_factory=coordinated_components,
 ) -> int:
     values = dict(os.environ) if env is None else env
-    store, dispatcher, _ = components_factory(project, values)
+    store: RunStore | None = None
+    dispatcher: RunDispatcher | None = None
+    first_failure = 0
+    try:
+        store, dispatcher, _ = components_factory(project, values)
+    except Exception:
+        first_failure = 2
+        print("coordinated state is unavailable", file=sys.stderr)
     # The SQLite control row is the admission gate.  It must close before the
     # compatibility flag and process cancellation so an enqueue racing a stop
     # can never start a newly admitted worker after the stop takes effect.
-    store.set_project_state(project, "stopped")
-    first_failure = 0
+    if store is not None:
+        try:
+            store.set_project_state(project, "stopped")
+        except Exception:
+            first_failure = first_failure or 2
+            print("coordinated admission could not be closed", file=sys.stderr)
     try:
         write_state(project, "stopped", values)
-    except (OSError, ValueError):
-        # Admission is already closed in SQLite. Do not leave live workers or
-        # launchd jobs running merely because the compatibility flag could not
-        # be made durable; report failure after the mandatory cleanup below.
-        first_failure = 2
+    except Exception:
+        # Do not leave live workers or launchd jobs running merely because the
+        # compatibility flag could not be made durable; report failure after
+        # the mandatory cleanup below.
+        first_failure = first_failure or 2
         print("scheduler execution state could not be persisted", file=sys.stderr)
-    try:
-        dispatcher.cancel_running(project=project, error_code="global_stop")
-    except (OSError, ValueError):
-        if not first_failure:
-            first_failure = 2
-        print("coordinated workers could not all be cancelled", file=sys.stderr)
+    if dispatcher is None:
+        first_failure = first_failure or 2
+        print("coordinated workers could not be cancelled", file=sys.stderr)
+    else:
+        try:
+            dispatcher.cancel_running(project=project, error_code="global_stop")
+        except Exception:
+            first_failure = first_failure or 2
+            print("coordinated workers could not all be cancelled", file=sys.stderr)
     domain = f"gui/{os.getuid()}"
     for entry in entries():
         if not entry["enabled"]:
             continue
         label = launchd_label(project, str(entry["skill"]))
-        result = launchctl("bootout", f"{domain}/{label}", check=False)
+        try:
+            result = launchctl("bootout", f"{domain}/{label}", check=False)
+        except Exception:
+            first_failure = first_failure or 2
+            continue
         if result.returncode and not first_failure:
             first_failure = result.returncode
     if first_failure:
@@ -341,20 +359,32 @@ def resume_all(
         write_state(project, "stopped", env)
         return result
     store: RunStore | None = None
+    dispatcher: RunDispatcher | None = None
     try:
         store, dispatcher, capacities = components_factory(project, env)
         store.set_project_state(project, "running")
         dispatcher.reconcile_and_drain(project=project, capacities=capacities)
     except Exception:
-        # A resume is all-or-nothing: no worker may be admitted when a later
-        # recovery step fails. Re-close SQLite if it was opened, then restore
-        # the compatibility flag even when the coordinator could not open.
+        # Close admission before reaping workers from a partial drain, then
+        # restore the compatibility flag. Cleanup must not mask the original
+        # recovery failure.
         if store is not None:
             try:
                 store.set_project_state(project, "stopped")
             except Exception:
                 pass
-        write_state(project, "stopped", env)
+        if dispatcher is not None:
+            try:
+                dispatcher.cancel_running(
+                    project=project,
+                    error_code="resume_failed",
+                )
+            except Exception:
+                pass
+        try:
+            write_state(project, "stopped", env)
+        except Exception:
+            pass
         raise
     return 0
 

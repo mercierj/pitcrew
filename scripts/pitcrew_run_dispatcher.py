@@ -248,6 +248,19 @@ class RunDispatcher:
                         except OSError: pass
                         try: process.wait(timeout=1)
                         except Exception: pass
+                        try:
+                            terminal = self.store.finish(
+                                row["run_id"],
+                                state="failed",
+                                error_code="launch_failed",
+                                error_message=(
+                                    "worker launch could not be recorded"
+                                ),
+                            )
+                        except (OSError, RunStateError, RunStoreError):
+                            pass
+                        else:
+                            failed.append(terminal)
                 except OSError:
                     failed.append(self.store.finish(row["run_id"], state="failed", error_code="spawn_failed", error_message="worker could not be started"))
             if paused:

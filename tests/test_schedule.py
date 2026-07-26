@@ -336,6 +336,81 @@ class ScheduleTest(unittest.TestCase):
         )
         self.assertEqual(11, len([call for call in calls if call[0] == "bootout"]))
 
+    def test_stop_all_persists_flag_and_boots_out_when_components_are_unavailable(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        def unavailable_components(project, env):
+            calls.append(("components", project))
+            raise OSError("database path with secret")
+
+        scheduler.write_state = lambda project, state, env: calls.append(
+            ("write_state", project, state)
+        )
+        scheduler.launchctl = lambda *args, **kwargs: (
+            calls.append(("bootout", args[1]))
+            or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            result = scheduler.stop_all(
+                "getbill",
+                {"HOME": self.id()},
+                unavailable_components,
+            )
+
+        self.assertEqual(2, result)
+        self.assertEqual(
+            [
+                ("components", "getbill"),
+                ("write_state", "getbill", "stopped"),
+            ],
+            calls[:2],
+        )
+        self.assertEqual(11, len([call for call in calls if call[0] == "bootout"]))
+        self.assertIn("coordinated state is unavailable", error.getvalue())
+        self.assertNotIn("secret", error.getvalue())
+
+    def test_stop_all_continues_after_database_gate_failure(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("set_project_state", project, state))
+                raise OSError("database unavailable")
+
+        class Dispatcher:
+            def cancel_running(self, project, error_code):
+                calls.append(("cancel_running", project, error_code))
+
+        scheduler.write_state = lambda project, state, env: calls.append(
+            ("write_state", project, state)
+        )
+        scheduler.launchctl = lambda *args, **kwargs: (
+            calls.append(("bootout", args[1]))
+            or subprocess.CompletedProcess(args, 0, "", "")
+        )
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            result = scheduler.stop_all(
+                "getbill",
+                {"HOME": self.id()},
+                lambda project, env: (Store(), Dispatcher(), {}),
+            )
+
+        self.assertEqual(2, result)
+        self.assertEqual(
+            [
+                ("set_project_state", "getbill", "stopped"),
+                ("write_state", "getbill", "stopped"),
+                ("cancel_running", "getbill", "global_stop"),
+            ],
+            calls[:3],
+        )
+        self.assertEqual(11, len([call for call in calls if call[0] == "bootout"]))
+        self.assertIn("admission could not be closed", error.getvalue())
+
     def test_resume_reopens_admission_and_drains_once_after_install(self):
         scheduler = load_scheduler_module()
         calls = []
@@ -469,6 +544,55 @@ class ScheduleTest(unittest.TestCase):
             )
         self.assertEqual(
             [("write", "running"), ("store", "running"), ("store", "stopped"), ("write", "stopped")],
+            calls,
+        )
+
+    def test_resume_failure_closes_gate_cancels_partial_launches_and_restores_flag(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                calls.append(("store", state))
+
+        class Dispatcher:
+            def reconcile_and_drain(self, project, capacities):
+                calls.append(("reconcile", project))
+                calls.append(("spawned", 456))
+                raise RuntimeError("recovery failed")
+
+            def cancel_running(self, project, error_code):
+                calls.append(("cancel", project, error_code))
+                raise OSError("cleanup failed")
+
+        def write(project, state, env):
+            calls.append(("write", state))
+
+        scheduler.write_state = write
+        scheduler.install = lambda project, output, env: 0
+
+        with self.assertRaisesRegex(RuntimeError, "recovery failed"):
+            scheduler.resume_all(
+                "getbill",
+                Path("/tmp/agents"),
+                {"HOME": self.id()},
+                lambda project, env: (
+                    Store(),
+                    Dispatcher(),
+                    {"implementer-run": 1},
+                ),
+            )
+
+        self.assertEqual(
+            [
+                ("write", "running"),
+                ("store", "running"),
+                ("reconcile", "getbill"),
+                ("spawned", 456),
+                ("store", "stopped"),
+                ("cancel", "getbill", "resume_failed"),
+                ("write", "stopped"),
+            ],
             calls,
         )
 
