@@ -763,22 +763,29 @@ select {
   font-weight: 650;
 }
 
-.ticket-agent-status {
+.ticket-run-status {
   flex-basis: 100%;
   font-size: 0.78rem;
   font-weight: 700;
 }
 
-.ticket-agent-status-pending {
+.ticket-run-pending,
+.ticket-run-queued,
+.ticket-run-cancelled {
   color: var(--warning);
 }
 
-.ticket-agent-status-success {
+.ticket-run-running {
   color: var(--success);
 }
 
-.ticket-agent-status-error {
+.ticket-run-failed {
   color: var(--error);
+}
+
+.ticket-agent-actions button[aria-busy="true"] {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .empty-state {

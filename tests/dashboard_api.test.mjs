@@ -76,6 +76,33 @@ test("action sends the exact payload with session authentication in headers", as
   ]);
 });
 
+test("post centralizes other authenticated JSON commands without changing payloads", async () => {
+  const calls = [];
+  const api = createApi("session-token", async (...args) => {
+    calls.push(args);
+    return jsonResponse({state: "queued"});
+  });
+  const payload = {skill: "implementer-run", target: "group/app#42"};
+
+  assert.deepEqual(
+    await api.post("/api/ticket-runs", payload),
+    {state: "queued"},
+  );
+  assert.deepEqual(calls[0], [
+    "/api/ticket-runs",
+    {
+      cache: "no-store",
+      credentials: "same-origin",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Pitcrew-Session": "session-token",
+      },
+      body: JSON.stringify(payload),
+    },
+  ]);
+});
+
 test("request failures expose the HTTP status", async () => {
   const api = createApi("", async () => jsonResponse({}, {ok: false, status: 403}));
 

@@ -12,7 +12,8 @@ import {
   syncHistorySkills,
 } from "./history.mjs";
 
-const POLL_INTERVAL_MS = 10_000;
+const ACTIVE_POLL_INTERVAL_MS = 2_000;
+const IDLE_POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
 const ACTIONS = new Set(["trigger", "stop", "restart"]);
 
@@ -113,6 +114,10 @@ const lifecycleLabels = {
 
 let refreshPromise = null;
 let lastGitLabRefresh = 0;
+let latestGitLabWork = null;
+let latestRuns = {runs: [], capacity: {}, has_active: false};
+let refreshTimer = null;
+let detailTicketView = null;
 const pendingSkills = new Set();
 const pendingTicketActions = new Set();
 const actionStates = new Map();
@@ -755,7 +760,56 @@ async function submitDecision(pending, answer) {
   }
 }
 
-function renderGitLab(work) {
+function runsByTarget(snapshot) {
+  return new Map((Array.isArray(snapshot?.runs) ? snapshot.runs : [])
+    .filter((run) => typeof run?.target === "string" && run.target)
+    .map((run) => [run.target, run]));
+}
+
+function issueResource(entry) {
+  return entry?.resource && typeof entry.resource === "object"
+    ? entry.resource
+    : entry;
+}
+
+function currentIssueForTarget(target) {
+  const groups = latestGitLabWork?.groups;
+  if (!groups || typeof groups !== "object") return null;
+  return Object.values(groups)
+    .flatMap((issues) => Array.isArray(issues) ? issues : [])
+    .find((issue) => issue?.agent_action?.target === target || issue?.web_url === target)
+    || null;
+}
+
+function syncDetailTicketAction() {
+  const view = detailTicketView;
+  if (
+    !view
+    || !elements.detailPanel?.open
+    || !document.contains(view.button)
+    || !document.contains(view.actions)
+  ) {
+    detailTicketView = null;
+    return;
+  }
+  const issue = currentIssueForTarget(view.target) || view.issue;
+  const run = runsByTarget(latestRuns).get(view.target) || issue?.active_run;
+  view.issue = issue;
+  renderTicketActionState(view.button, view.actions, issue, run);
+}
+
+function upsertRun(run) {
+  const runs = (Array.isArray(latestRuns?.runs) ? latestRuns.runs : [])
+    .filter((item) => item?.run_id !== run.run_id);
+  runs.push(run);
+  latestRuns = {
+    ...latestRuns,
+    runs,
+    has_active: runs.some((item) => item?.state === "queued" || item?.state === "running"),
+  };
+}
+
+function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
   if (!work) return;
   elements.gitlabGroups.replaceChildren();
   renderMergeRequests(work);
@@ -765,6 +819,7 @@ function renderGitLab(work) {
     setText(elements.gitlabState, `Actualisé ${formatDate(work?.last_successful_refresh)}`);
   }
   const groups = work?.groups && typeof work.groups === "object" ? work.groups : {};
+  const targetRuns = runsByTarget(runs);
   Object.entries(lifecycleLabels).forEach(([state, label]) => {
     const column = document.createElement("article");
     column.className = "work-column";
@@ -804,8 +859,9 @@ function renderGitLab(work) {
         button.className = "button button-primary";
         button.textContent = agentAction.label || "Lancer l’agent";
         const target = typeof agentAction.target === "string" ? agentAction.target : "";
+        const run = targetRuns.get(target) || issue.active_run;
         const pending = pendingTicketActions.has(target);
-        button.disabled = !agentAction.available || pending || !target;
+        button.disabled = !agentAction.available || pending || run?.state === "queued" || run?.state === "running" || !target;
         button.addEventListener("click", () => launchTicketAgent(issue, button, actions));
         actions.append(button);
         if (!agentAction.available) {
@@ -814,38 +870,52 @@ function renderGitLab(work) {
           unavailable.textContent = agentAction.unavailable_reason || "Agent indisponible";
           actions.append(unavailable);
         }
-        renderTicketActionState(button, actions, issue);
+        renderTicketActionState(button, actions, issue, run);
         card.append(actions);
       }
       column.append(card);
     });
     elements.gitlabGroups.append(column);
   });
+  syncDetailTicketAction();
 }
 
-function renderTicketActionState(button, actions, issue) {
+function renderTicketActionState(button, actions, issue, run) {
   const agentAction = issue?.agent_action;
   const target = typeof agentAction?.target === "string" ? agentAction.target : "";
   const pending = pendingTicketActions.has(target);
   const actionState = actionStates.get(issueActionKey(issue));
-  button.disabled = !agentAction.available || pending || !target;
+  button.disabled = !agentAction.available || pending || run?.state === "queued" || run?.state === "running" || !target;
   button.textContent = pending ? "Lancement…" : agentAction.label || "Lancer l’agent";
-  button.setAttribute("aria-busy", pending ? "true" : "false");
-  let status = actions.querySelector(".ticket-agent-status");
-  if (!pending && !actionState) {
+  button.setAttribute("aria-busy", pending || run?.state === "queued" || run?.state === "running" ? "true" : "false");
+  let status = actions.querySelector(".ticket-run-status");
+  if (!pending && !run && !actionState) {
     status?.remove();
     return;
   }
   if (!status) {
     status = document.createElement("span");
-    status.className = "ticket-agent-status";
+    status.className = "ticket-run-status";
     actions.append(status);
   }
   if (pending) {
-    status.className = "ticket-agent-status ticket-agent-status-pending";
+    status.className = "ticket-run-status ticket-run-pending";
     status.textContent = "Lancement…";
+  } else if (run?.state === "queued") {
+    status.className = "ticket-run-status ticket-run-queued";
+    status.textContent = `En attente · position ${run.queue_position}`;
+  } else if (run?.state === "running") {
+    const role = latestRuns.capacity?.[run.skill];
+    status.className = "ticket-run-status ticket-run-running";
+    status.textContent = `En cours · ${role?.running ?? 1}/${role?.max_concurrent ?? 3} places utilisées`;
+  } else if (run?.state === "failed") {
+    status.className = "ticket-run-status ticket-run-failed";
+    status.textContent = "Échec · Relancer";
+  } else if (run?.state === "cancelled") {
+    status.className = "ticket-run-status ticket-run-cancelled";
+    status.textContent = "Annulé · Relancer";
   } else if (actionState) {
-    status.className = `ticket-agent-status ticket-agent-status-${actionState.kind}`;
+    status.className = `ticket-run-status action-state-${actionState.kind}`;
     status.textContent = actionState.message;
   } else {
     status.remove();
@@ -869,24 +939,20 @@ async function launchTicketAgent(issue, button, actions) {
         success: "Lancement accepté — l’agent travaille sur ce ticket.",
         error: "Échec du lancement — réessayez.",
       },
-      () => api.action({action: "launch-ticket-agent", skill, target}),
+      () => api.post("/api/ticket-runs", {skill, target}),
     );
-    renderTicketActionState(button, actions, issue);
-    await operation;
-    pendingTicketActions.delete(target);
+    renderTicketActionState(button, actions, issue, runsByTarget(latestRuns).get(target));
+    const run = await operation;
+    upsertRun({...run, skill, target});
+    renderGitLab(latestGitLabWork, latestRuns);
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
-    try {
-      await refresh({manual: true});
-    } catch {
-      setText(elements.operationalStatus, `${skill} lancé ; actualisation du tableau de bord impossible.`);
-    }
     return true;
   } catch {
     setText(elements.operationalStatus, `Impossible de lancer ${skill} pour ce ticket.`);
     return false;
   } finally {
     pendingTicketActions.delete(target);
-    renderTicketActionState(button, actions, issue);
+    renderGitLab(latestGitLabWork, latestRuns);
   }
 }
 
@@ -1058,16 +1124,20 @@ function actionForEntry(entry) {
   }
   const agentAction = resource.agent_action;
   const target = typeof agentAction?.target === "string" ? agentAction.target : "";
+  const run = runsByTarget(latestRuns).get(target) || resource.active_run;
   if (
     entry?.kind === "issue"
-    && agentAction?.available
     && target
+    && (
+      agentAction?.available
+      || run?.state === "queued"
+      || run?.state === "running"
+      || run?.state === "failed"
+    )
   ) {
     return [{
       label: agentAction.label || "Lancer l’agent",
-      disabled: pendingTicketActions.has(target),
-      singleUse: true,
-      successLabel: "Lancement accepté",
+      disabled: pendingTicketActions.has(target) || run?.state === "queued" || run?.state === "running",
       state: actionStates.get(issueActionKey(resource)),
       run: (button, actions) => launchTicketAgent(resource, button, actions),
     }];
@@ -1077,10 +1147,24 @@ function actionForEntry(entry) {
 
 function openItem(entry) {
   if (!entry) return;
-  detailController.open(renderItemDetail(entry, {forEntry: actionForEntry}));
+  const detail = renderItemDetail(entry, {forEntry: actionForEntry});
+  detailController.open(detail);
+  const resource = issueResource(entry);
+  const target = typeof resource?.agent_action?.target === "string"
+    ? resource.agent_action.target
+    : "";
+  const actions = detail?.body?.querySelector?.(".detail-actions");
+  const button = actions?.querySelector?.("button");
+  if (entry?.kind === "issue" && target && button && actions) {
+    detailTicketView = {actions, button, issue: resource, target};
+    syncDetailTicketAction();
+  } else {
+    detailTicketView = null;
+  }
 }
 
 function openAllActions(queue = currentActionQueue, returnFocusTo = null) {
+  detailTicketView = null;
   const body = document.createElement("div");
   body.className = "all-actions";
   renderActionList(body, queue, openItem);
@@ -1090,6 +1174,10 @@ function openAllActions(queue = currentActionQueue, returnFocusTo = null) {
     returnFocusTo,
   });
 }
+
+elements.detailPanel?.addEventListener("close", () => {
+  detailTicketView = null;
+});
 
 function renderPilotageView() {
   if (sources.work !== lastRoleWork) {
@@ -1278,9 +1366,15 @@ async function refreshFresh(options = {}) {
 }
 
 async function refreshLocal() {
-  const [snapshot, history] = await Promise.all([
+  const [snapshot, history, runs] = await Promise.all([
     sourceStore.load("snapshot", () => api.get("/api/status")),
     loadHistory(),
+    sourceStore.load(
+      "runs",
+      () => api.get("/api/runs", {
+        headers: {"X-Pitcrew-Session": sessionToken},
+      }),
+    ),
   ]);
 
   if (snapshot.data) {
@@ -1294,6 +1388,7 @@ async function refreshLocal() {
       elements.globalResumeButton.hidden = snapshot.data.global_state !== "stopped";
     }
   }
+  if (runs.data) latestRuns = runs.data;
   renderOverview(sources.snapshot);
   renderLiveAgents(sources.snapshot);
   renderAgents(sources.snapshot);
@@ -1341,18 +1436,19 @@ async function refreshPreprod() {
   }
 }
 
-async function refreshGitLab({manual = false} = {}) {
+async function refreshGitLab({manual = false, force = false} = {}) {
   const now = Date.now();
-  if (!manual && now - lastGitLabRefresh < GITLAB_REFRESH_MS) {
+  if (!force && !manual && now - lastGitLabRefresh < GITLAB_REFRESH_MS) {
     return sourceStore.get("gitlab");
   }
   const state = await sourceStore.load(
     "gitlab",
-    () => api.get(manual ? "/api/gitlab?refresh=1" : "/api/gitlab"),
+    () => api.get(manual || force ? "/api/gitlab?refresh=1" : "/api/gitlab"),
   );
   if (state.data) {
     sources.work = state.data;
-    renderGitLab(state.data);
+    latestGitLabWork = state.data;
+    renderGitLab(state.data, latestRuns);
   }
   if (!state.error) lastGitLabRefresh = now;
   renderPilotageView();
@@ -1396,9 +1492,11 @@ function renderSourceStates() {
     sourceStatus("decisions", "Décisions", refreshHumanActions),
     sourceStatus("proposals", "Propositions", refreshHumanActions),
     sourceStatus("gitlab", "GitLab", () => refreshGitLab({manual: true})),
+    sourceStatus("runs", "Exécutions", refreshLocal),
   ]);
   renderSourceState(elements.agentsSourceState, [
     sourceStatus("snapshot", "État local", refreshLocal),
+    sourceStatus("runs", "Exécutions", refreshLocal),
   ]);
   renderSourceState(elements.historySourceState, [
     sourceStatus("history", "Historique", refreshHistory),
@@ -1414,6 +1512,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     elements.refreshButton.disabled = true;
     setText(elements.refreshState, "Actualisation en cours…");
     try {
+      const hadActiveRuns = latestRuns.has_active === true;
       await Promise.all([
         refreshLocal(),
         refreshHumanActions(),
@@ -1421,7 +1520,12 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         skipGitLab ? Promise.resolve() : refreshGitLab({manual}),
       ]);
 
-      renderGitLab(sources.work);
+      const becameTerminal = hadActiveRuns && !latestRuns.has_active;
+      if (becameTerminal) lastGitLabRefresh = 0;
+      if (!skipGitLab && !manual && becameTerminal) {
+        await refreshGitLab({force: true});
+      }
+      renderGitLab(latestGitLabWork, latestRuns);
       renderPilotageView();
       renderSourceStates();
       const hasErrors = [
@@ -1430,6 +1534,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         "decisions",
         "proposals",
         "preprod",
+        "runs",
         "gitlab",
       ].some((name) => sourceStore.get(name).error);
       const refreshedAt = dateFormatter.format(new Date());
@@ -1470,5 +1575,13 @@ elements.historyFilters.addEventListener("submit", (event) => {
   void refreshHistory().catch(showHistoryError);
 });
 
-refresh({manual: true});
-window.setInterval(() => refresh(), POLL_INTERVAL_MS);
+function scheduleRefresh() {
+  window.clearTimeout(refreshTimer);
+  const delay = latestRuns.has_active ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
+  refreshTimer = window.setTimeout(async () => {
+    await refresh();
+    scheduleRefresh();
+  }, delay);
+}
+
+refresh({manual: true}).finally(scheduleRefresh);

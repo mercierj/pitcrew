@@ -2468,7 +2468,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             'action: "answer-decision"',
             'action: "decide-proposal"',
             'action: "merge-merge-request"',
-            'action: "launch-ticket-agent"',
+            'api.post("/api/ticket-runs", {skill, target})',
         ):
             self.assertIn(token, self.javascript)
 
@@ -2553,7 +2553,8 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertNotIn("@font-face", self.styles)
 
     def test_javascript_polls_safely_and_uses_text_dom_apis(self):
-        self.assertIn("const POLL_INTERVAL_MS = 10_000;", self.javascript)
+        self.assertIn("const ACTIVE_POLL_INTERVAL_MS = 2_000;", self.javascript)
+        self.assertIn("const IDLE_POLL_INTERVAL_MS = 10_000;", self.javascript)
         self.assertIn("const GITLAB_REFRESH_MS = 60_000;", self.javascript)
         self.assertIn(
             'const ACTIONS = new Set(["trigger", "stop", "restart"]);',
@@ -2584,19 +2585,35 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("renderMergeRequests(work)", self.javascript)
         self.assertIn("issue.agent_action", self.javascript)
         self.assertIn("ticket-agent-actions", self.javascript)
-        self.assertIn('action: "launch-ticket-agent"', self.javascript)
+        self.assertIn('api.post("/api/ticket-runs"', self.javascript)
+        self.assertIn('api.get("/api/runs"', self.javascript)
+        self.assertNotIn('action: "launch-ticket-agent"', self.javascript)
         self.assertIn("pendingTicketActions", self.javascript)
-        self.assertIn("actionStates", self.javascript)
-        self.assertIn("ticket-agent-status", self.javascript)
-        self.assertIn("window.setInterval", self.javascript)
+        self.assertIn("active_run", self.javascript)
+        self.assertIn("queue_position", self.javascript)
+        self.assertIn("max_concurrent", self.javascript)
+        self.assertIn("ticket-run-status", self.javascript)
+        self.assertIn("window.setTimeout", self.javascript)
+        self.assertNotIn("window.setInterval", self.javascript)
         self.assertIn("Lancement…", self.javascript)
         self.assertIn("Lancement accepté", self.javascript)
         self.assertIn("Agent indisponible", self.javascript)
         self.assertIn('await refresh({ manual: true });', self.javascript)
         self.assertIn('/api/decisions', self.javascript)
         self.assertIn('answer-decision', self.javascript)
-        self.assertIn('manual ? "/api/gitlab?refresh=1"', self.javascript)
+        self.assertIn("scheduleRefresh", self.javascript)
+        self.assertIn("const becameTerminal = hadActiveRuns && !latestRuns.has_active;", self.javascript)
+        self.assertIn("if (becameTerminal) lastGitLabRefresh = 0;", self.javascript)
+        self.assertIn('manual || force ? "/api/gitlab?refresh=1"', self.javascript)
         self.assertIn("if (!state.error) lastGitLabRefresh = now;", self.javascript)
+        self.assertIn("let detailTicketView = null;", self.javascript)
+        self.assertIn("function syncDetailTicketAction()", self.javascript)
+        self.assertIn("detailTicketView = {actions, button, issue: resource, target};", self.javascript)
+        self.assertIn('run?.state === "cancelled"', self.javascript)
+        self.assertIn("Annulé · Relancer", self.javascript)
+        self.assertNotIn("singleUse: true", self.javascript)
+        for token in (".ticket-run-status", ".ticket-run-queued", ".ticket-run-running", ".ticket-run-failed", ".ticket-run-cancelled", '[aria-busy="true"]'):
+            self.assertIn(token, self.styles)
         for function_name in (
             "renderOverview",
             "renderLiveAgents",

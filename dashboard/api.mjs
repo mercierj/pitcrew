@@ -15,8 +15,8 @@ export function createApi(sessionToken, fetchImpl = globalThis.fetch) {
     return request(path, options);
   }
 
-  function action(body) {
-    return request("/api/actions", {
+  function post(path, body) {
+    return request(path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -26,5 +26,9 @@ export function createApi(sessionToken, fetchImpl = globalThis.fetch) {
     });
   }
 
-  return {get, action};
+  function action(body) {
+    return post("/api/actions", body);
+  }
+
+  return {get, post, action};
 }
