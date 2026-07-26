@@ -78,6 +78,14 @@ function usageSection(title, usage) {
   return section;
 }
 
+function latestRunSummary(summary) {
+  const normalized = typeof summary === "string"
+    ? summary.replace(/\s+/gu, " ").trim()
+    : "";
+  if (!normalized) return "Aucun compte rendu récent.";
+  return normalized.length > 160 ? `${normalized.slice(0, 157).trimEnd()}…` : normalized;
+}
+
 function agentRow(agent, handlers) {
   const row = document.createElement("article");
   row.className = "agent-row";
@@ -89,9 +97,13 @@ function agentRow(agent, handlers) {
   title.textContent = agent.skill || "Agent sans nom";
   const description = document.createElement("p");
   description.textContent = agent.role_description || "Rôle non documenté.";
+  const compactSummary = document.createElement("p");
+  compactSummary.className = "agent-compact-summary";
+  compactSummary.textContent = `Dernier passage · ${latestRunSummary(agent.latest_history?.summary)}`;
   identity.append(
     title,
     description,
+    compactSummary,
     fact("Santé", healthLabels[agent.health] || healthLabels.unknown),
   );
   header.append(

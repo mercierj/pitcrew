@@ -136,3 +136,30 @@ test("renderAgents preserves health, summaries, detailed usage, and disabled mod
     /security-run · Dépôt non configuré · Modèle résolu : gpt-5\.6-sol/u,
   );
 });
+
+test("renderAgents surfaces a bounded latest-run summary in every compact row", () => {
+  const root = element();
+  const longSummary = `Compte rendu ${"utile ".repeat(80)}`;
+
+  renderAgents(root, element(), element(), {
+    agents: [{
+      skill: "qa-run",
+      latest_history: {summary: longSummary},
+    }, {
+      skill: "ops-run",
+      latest_history: {},
+    }],
+  }, handlers);
+
+  const rows = root.children;
+  for (const row of rows) {
+    const compactSummary = findByClass(row, "agent-compact-summary");
+    assert.ok(compactSummary, "each compact row exposes its latest-run summary");
+    assert.ok(
+      normalizedText(compactSummary).length <= 200,
+      "the compact summary remains scannable",
+    );
+  }
+  assert.match(normalizedText(rows[0]), /Compte rendu utile/u);
+  assert.match(normalizedText(rows[1]), /Aucun compte rendu récent./u);
+});
