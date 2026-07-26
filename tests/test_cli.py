@@ -211,12 +211,17 @@ class CliTest(unittest.TestCase):
         self.assertEqual("object", schema["type"])
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(
-            {
+            [
                 "status", "reason", "project", "skill", "target_id", "did_work",
                 "work_kind", "quality_outcome", "next_action",
-            },
-            set(schema["required"]),
+            ],
+            schema["required"],
         )
+        for field in ("reason", "project", "skill", "quality_outcome", "next_action"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    {"type": "string", "minLength": 1}, schema["properties"][field]
+                )
         self.assertEqual(
             ["success", "noop", "blocked", "failed"],
             schema["properties"]["status"]["enum"],
@@ -275,6 +280,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(0, scheduled.returncode, scheduled.stderr)
             args = args_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, args.count("--output-schema"))
             schema_index = args.index("--output-schema")
             self.assertEqual(str(ROOT / "references/run-result.schema.json"), args[schema_index + 1])
 
@@ -283,6 +289,15 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(0, unscheduled.returncode, unscheduled.stderr)
             self.assertNotIn("--output-schema", args_path.read_text(encoding="utf-8").splitlines())
+
+            manual_preprod = self.run_cli(
+                "bin/pitcrew-codex.sh", "preprod-review-run", "getbill", env=env
+            )
+            self.assertEqual(0, manual_preprod.returncode, manual_preprod.stderr)
+            self.assertEqual(
+                0,
+                args_path.read_text(encoding="utf-8").splitlines().count("--output-schema"),
+            )
 
     def test_model_command_prints_default_and_runtime_override(self):
         with tempfile.TemporaryDirectory() as temp:
