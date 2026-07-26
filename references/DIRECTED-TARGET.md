@@ -8,6 +8,7 @@ identity, scope, approval, review, validation, and release gates still apply.
 
 ```text
 GitHub PR: https://github.com/<owner>/<repo>/pull/<number>
+GitHub issue: https://github.com/<owner>/<repo>/issues/<number>
 GitLab MR: https://<host>/<group>/<project>/-/merge_requests/<number>
 Linear issue: https://linear.app/<workspace>/issue/<id>
 GitLab issue: https://<host>/<group>/<project>/-/issues/<number>
@@ -28,6 +29,8 @@ Before any lookup or mutation:
 2. Validate the configured provider and authenticated identity.
 3. Validate the URL host against the configured provider host.
 4. Validate the owner or group and the repository/project against `repos[]`.
+   A GitHub issue requires exact configured host, owner, repository, and number
+   validation.
 5. For tracker items, validate the configured workspace/team/project.
 6. Resolve a short reference only inside the configured repository named by it.
 

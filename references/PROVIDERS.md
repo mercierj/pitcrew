@@ -22,5 +22,13 @@ authentication, configuration, or an API operation fails. Return a blocked or no
 result naming the configured provider, then let the operator correct the
 configuration or authorization.
 
-Use [GitHub + Linear](providers/github-linear.md) when forge and tracker differ;
-use [GitLab](providers/gitlab.md) when GitLab owns the merge-request workflow.
+`bugfixer-run` supports only these matched native pairs in its first version:
+
+| Forge | Tracker | Reference |
+| --- | --- | --- |
+| `github` | `github` | `providers/github.md` |
+| `github` | `linear` | `providers/github-linear.md` |
+| `gitlab` | `gitlab` | `providers/gitlab.md` |
+
+The `forge=github, tracker=github` pair uses [Native GitHub Issues](providers/github.md).
+Any other pair returns a structured no-op; do not combine provider capabilities.

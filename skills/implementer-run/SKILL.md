@@ -89,15 +89,15 @@ performing provider work. The role logic uses only these generic operations:
 
 Provider-specific command syntax belongs only in the selected provider reference. Uppercase operation names in later examples are abstract capabilities, not shell commands; resolve each through that reference.
 
-- When `providers.forge` is `github`, read
-  `references/providers/github-linear.md` and use configured forge **pull-request** terminology.
-- When `providers.forge` is `gitlab`, read
-  `references/providers/gitlab.md` and use GitLab **merge-request** terminology.
-- When `providers.tracker` is `linear`, validate the configured Linear team before tracker
-  operations.
-- When `providers.tracker` is `github` or `gitlab`, use the matching provider reference and issue terminology.
-- When `providers.tracker` is `none`, skip tracker work; if this role requires tracker work,
+- `forge=github, tracker=github`: read `references/providers/github.md`.
+- `forge=github, tracker=linear`: read `references/providers/github-linear.md`.
+- `forge=gitlab, tracker=gitlab`: read `references/providers/gitlab.md`.
+- The GitHub/Linear pair validates the configured Linear team and uses
+  pull-request terminology; the GitLab pair uses merge-request terminology.
+- A matched pair is required whenever `providers.tracker` is `github` or `gitlab`.
+- When `providers.tracker` is `none`, skip tracker work; if this role requires it,
   return the structured no-op and stop.
+- Any other pair required by this role returns the structured no-op and stops.
 
 **Never fall back to another provider, workspace, owner, project, repository, or environment.**
 Validate the configured provider/host/owner-or-group/repository binding before every provider

@@ -71,6 +71,32 @@ class ReferenceContractTest(unittest.TestCase):
             "`none`",
             "Never fall back",
             "workspace, owner, or repository",
+            "providers/github.md",
+            "forge=github, tracker=github",
+        )
+
+    def test_native_github_issue_contract(self):
+        self.assert_markers(
+            "references/providers/github.md",
+            'gh auth status --hostname "$GITHUB_HOST"',
+            "providers.tracker",
+            "List eligible work",
+            "Inspect work",
+            "Claim or transition",
+            "Create change",
+            "Read checks",
+            "Merge change",
+            "Close lifecycle",
+            "pull_request",
+            "lookup-before-create",
+            "Never fall back",
+        )
+
+    def test_directed_targets_accept_native_github_issues(self):
+        self.assert_markers(
+            "references/DIRECTED-TARGET.md",
+            "https://github.com/<owner>/<repo>/issues/<number>",
+            "GitHub issue",
         )
 
     def test_github_linear_contract(self):
@@ -104,6 +130,8 @@ class ReferenceContractTest(unittest.TestCase):
                 relative_path,
                 "providers.forge",
                 "providers.tracker",
+                "forge=github, tracker=github",
+                "references/providers/github.md",
                 "references/providers/github-linear.md",
                 "pull-request",
                 "references/providers/gitlab.md",

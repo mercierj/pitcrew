@@ -912,6 +912,109 @@ exit "$status"
 
 
 class CliTest(unittest.TestCase):
+    def github_binding(self):
+        return {
+            "host": "github.com",
+            "user": "octocat",
+            "owner": "acme",
+            "repository": "acme/payments",
+            "tracker": {
+                "assignee_login": "octocat",
+                "ticket_prefix": "acme/payments#",
+                "labels": {
+                    "agent": "pitcrew-agent",
+                    "investigate": "pitcrew-investigate",
+                    "quick_win": "pitcrew-quick-win",
+                    "bug": "bug",
+                    "improvement": "enhancement",
+                },
+                "states": {
+                    "todo": "pitcrew-state-todo",
+                    "processing": "pitcrew-state-processing",
+                    "review": "pitcrew-state-review",
+                    "blocked": "pitcrew-state-blocked",
+                    "done": "pitcrew-state-done",
+                },
+            },
+        }
+
+    def test_configure_binds_native_github_explicitly(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli(
+                "bin/configure.sh",
+                "example",
+                "--profile",
+                "generic",
+                env=env,
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            binding_path = root / "binding.json"
+            binding_path.write_text(
+                json.dumps(self.github_binding()),
+                encoding="utf-8",
+            )
+
+            result = self.run_cli(
+                "bin/configure.sh",
+                "bind-github",
+                "example",
+                "--binding",
+                str(binding_path),
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            persisted = json.loads(
+                (
+                    root / ".codex/pitcrew/example/config.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                {"forge": "github", "tracker": "github"},
+                persisted["providers"],
+            )
+            self.assertEqual(self.github_binding(), persisted["github"])
+
+    def test_configure_rejects_invalid_or_incomplete_github_binding_safely(self):
+        secret = "binding-secret-must-not-leak"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli(
+                "bin/configure.sh",
+                "example",
+                "--profile",
+                "generic",
+                env=env,
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            destination = root / ".codex/pitcrew/example/config.json"
+            before = destination.read_bytes()
+
+            for name, content in (
+                ("invalid.json", f'{{"token":"{secret}"'),
+                (
+                    "incomplete.json",
+                    json.dumps({"host": "github.com", "owner": secret}),
+                ),
+            ):
+                with self.subTest(name=name):
+                    binding_path = root / name
+                    binding_path.write_text(content, encoding="utf-8")
+                    result = self.run_cli(
+                        "bin/configure.sh",
+                        "bind-github",
+                        "example",
+                        "--binding",
+                        str(binding_path),
+                        env=env,
+                    )
+                    self.assertEqual(1, result.returncode)
+                    self.assertNotIn(secret, result.stdout + result.stderr)
+                    self.assertEqual(before, destination.read_bytes())
+
     def test_scheduled_run_result_schema_has_strict_contract(self):
         schema = json.loads(
             (ROOT / "references/run-result.schema.json").read_text(encoding="utf-8")

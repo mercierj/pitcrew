@@ -22,6 +22,7 @@ from scripts.pitcrew_config import (
     migrate_legacy,
     runtime_root,
     update_runtime_fix_autonomy,
+    update_runtime_github_binding,
     update_runtime_model,
     validate,
     write_project,
@@ -131,6 +132,39 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual("linear", config["providers"]["tracker"])
         self.assertNotIn("github", config)
         validate(config)
+
+    def test_update_runtime_github_binding_is_explicit_and_atomic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(
+                ROOT / "profiles/generic.json", "example", env
+            )
+            binding = self.native_github_config()["github"]
+
+            update_runtime_github_binding("example", binding, env)
+
+            updated = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"forge": "github", "tracker": "github"},
+                updated["providers"],
+            )
+            self.assertEqual(binding, updated["github"])
+            self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+
+    def test_update_runtime_github_binding_preserves_config_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(
+                ROOT / "profiles/generic.json", "example", env
+            )
+            before = destination.read_bytes()
+            with self.assertRaises(ConfigError):
+                update_runtime_github_binding(
+                    "example",
+                    {"host": "github.com", "owner": "acme"},
+                    env,
+                )
+            self.assertEqual(before, destination.read_bytes())
 
     def test_delivery_fix_autonomy_defaults_off_and_accepts_known_values(self):
         profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))

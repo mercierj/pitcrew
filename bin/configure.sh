@@ -6,6 +6,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if [[ "${1:-}" == "bind-github" ]]; then
+  shift
+  PROJECT="${1:?bind-github requires a project}"
+  shift
+  [[ "${1:-}" == "--binding" && -n "${2:-}" ]] || {
+    echo "bind-github requires --binding <json-file>" >&2
+    exit 2
+  }
+  exec python3 "$REPO_ROOT/scripts/pitcrew_config.py" \
+    bind-github --project "$PROJECT" --binding "$2"
+fi
+
 PROJECT="${1:-example}"
 if (($#)); then
   shift

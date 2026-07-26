@@ -714,6 +714,34 @@ def update_runtime_model(
         os.close(project_fd)
 
 
+def update_runtime_github_binding(
+    project: str,
+    binding: Mapping[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> None:
+    if not isinstance(binding, Mapping):
+        raise ConfigError("github binding must be an object")
+    values = os.environ if env is None else env
+    project_fd = _open_runtime_project_for_read(project, values)
+    lock_fd: int | None = None
+    try:
+        lock_fd = _lock_runtime_config(project_fd)
+        config = _load_runtime_config_from_fd(project_fd)
+        updated = dict(config)
+        updated["providers"] = {"forge": "github", "tracker": "github"}
+        updated["github"] = dict(binding)
+        validate(updated)
+        _replace_runtime_config(
+            project_fd,
+            json.dumps(updated, indent=2) + "\n",
+        )
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        os.close(project_fd)
+
+
 def update_runtime_fix_autonomy(
     project: str,
     mode: str,
@@ -815,6 +843,9 @@ def main(argv: list[str] | None = None) -> int:
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--profile", choices=("generic", "getbill"), required=True)
     init_parser.add_argument("--project", required=True)
+    github_parser = subparsers.add_parser("bind-github")
+    github_parser.add_argument("--project", required=True)
+    github_parser.add_argument("--binding", type=Path, required=True)
     migrate_parser = subparsers.add_parser("migrate")
     migrate_parser.add_argument("--project", required=True)
     repo_parser = subparsers.add_parser("repo")
@@ -838,6 +869,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate":
         validate(json.loads(args.config.read_text(encoding="utf-8")))
         print(f"Valid config: {args.config}")
+        return 0
+    if args.command == "bind-github":
+        binding = json.loads(args.binding.read_text(encoding="utf-8"))
+        update_runtime_github_binding(args.project, binding)
+        print(f"Configured native GitHub binding for {args.project}")
         return 0
     if args.command == "migrate":
         source, destination = legacy_config_paths(args.project)
