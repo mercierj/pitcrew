@@ -40,16 +40,6 @@ uses_provider_network() {
   return 1
 }
 
-is_event_driven_skill() {
-  local candidate="$1"
-  case "$candidate" in
-    manager-run|implementer-run|reviewer-run|validator-run|investigate-run|unblock)
-      return 0
-      ;;
-  esac
-  return 1
-}
-
 release_is_armed() {
   python3 -c '
 import json
@@ -599,24 +589,6 @@ print(result["reason"])
   fi
   chmod 600 "$SUMMARY_FILE" 2>/dev/null || true
   if [[ -n "$COORDINATED_RUN" ]]; then
-    # A delivery worker may advance the durable chain only through the strict
-    # terminal schema plus a separate authoritative evidence payload. Never
-    # infer a lifecycle transition from the model's free-form summary.
-    if "$SCHEDULED" && is_event_driven_skill "$SKILL" &&
-      [[ "$SUMMARY_PARSE_CODE" -eq 0 && "$STRUCTURED_STATUS" == "success" ]]; then
-      EVIDENCE_FILE="${SUMMARY_FILE}.evidence.json"
-      if [[ -f "$EVIDENCE_FILE" ]]; then
-        if ! python3 "$REPO_ROOT/scripts/pitcrew_run_dispatcher.py" complete \
-          --project "$PROJECT" --run-id "$COORDINATED_RUN" \
-          --result-file "$SUMMARY_FILE" --evidence-file "$EVIDENCE_FILE" >/dev/null; then
-          record_gate error "successor admission is unavailable" failed "$TARGET" \
-            "$GATE_FINGERPRINT" >/dev/null 2>&1 || true
-        fi
-      else
-        record_gate error "successor admission evidence is unavailable" failed "$TARGET" \
-          "$GATE_FINGERPRINT" >/dev/null 2>&1 || true
-      fi
-    fi
     python3 "$REPO_ROOT/scripts/pitcrew_run_dispatcher.py" drain --project "$PROJECT" >/dev/null || true
   fi
   exit "$EXIT_CODE"
