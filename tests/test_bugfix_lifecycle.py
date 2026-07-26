@@ -51,6 +51,17 @@ class BugfixLifecycleParityTest(unittest.TestCase):
         case = json.loads((FIXTURES / "negative.json").read_text())["attempted_false"]
         self.assertEqual(case["expected"], decide(case["snapshot"]))
 
+    def test_prereproduction_decision_allows_the_bound_initial_claim(self):
+        snapshot = self.load("github")[0]["snapshot"]
+        snapshot["reproduction"] = {
+            "attempted": False,
+            "valid_red": False,
+            "green": False,
+            "same_command": False,
+        }
+
+        self.assertEqual("hold_fix", decide(snapshot))
+
     def test_malformed_nested_evidence_raises_typed_error(self):
         data = json.loads((FIXTURES / "negative.json").read_text())
         for case in data["malformed"]:

@@ -1,6 +1,6 @@
 # Crew topology
 
-Pitcrew consists of seventeen Codex skills. Each invocation is self-contained and
+Pitcrew consists of eighteen Codex skills. Each invocation is self-contained and
 performs one bounded pass for one validated project.
 
 | Skill | Reads | Produces |
@@ -13,6 +13,7 @@ performs one bounded pass for one validated project.
 | `$pitcrew:qa-run` | configured test flows | one QA result/finding |
 | `$pitcrew:manager-run` | curated findings | paced tracker work |
 | `$pitcrew:implementer-run` | one eligible tracker item | one code change |
+| `$pitcrew:bugfixer-run` | one eligible bug with evidence | one reviewed bugfix |
 | `$pitcrew:reviewer-run` | one open change (PR/MR) | review verdict |
 | `$pitcrew:validator-run` | one open change (PR/MR) | local validation verdict |
 | `$pitcrew:unblock` | one blocked item | one structured human decision |
@@ -37,6 +38,12 @@ explicit; a skill never invents work or switches projects when the queue is empt
 ## Handoffs
 
 ```text
+agent + bug + todo -> bugfixer -> review -> human go -> done
+                         |
+                    sensitive
+                         v
+             investigate -> unblock approval
+
 research/qa/security -> findings -> manager -> tracker
 product-discovery -> dashboard approval -> manager -> tracker
 architecture-run → local proposal → human dashboard approval → manager → tracker
@@ -62,6 +69,17 @@ are paced and deduplicated by the manager before it creates or finds tracker wor
 then attaches tracker metadata back to the local proposal. Architecture-run never
 writes repository code or calls the tracker directly.
 ```
+
+`$pitcrew:implementer-run` excludes bugs from both todo selection and review
+continuation. `$pitcrew:bugfixer-run` requires a valid red reproduction before
+production edits and the same reproduction green afterward. Its change then
+requires `$pitcrew:reviewer-run`, `$pitcrew:validator-run`, human `go`, and green
+required CI checks on the current head.
+
+Sensitive bugs first route through `$pitcrew:investigate-run` and
+`$pitcrew:unblock`. The configured approval label alone is insufficient:
+completed investigation findings and the human approval marker must also match
+the ticket before it can return to the bugfix queue.
 
 The board and local state are the only handoff channels. Skills do not rely on
 conversation memory from a previous run.

@@ -3,6 +3,9 @@
 Acting skills normally discover one eligible item from the configured providers. A
 caller may instead name one target. Directed mode changes only item selection: all
 identity, scope, approval, review, validation, and release gates still apply.
+For `$pitcrew:bugfixer-run`, a directed target does not bypass eligibility: the
+issue must still be open with the configured agent, bug, and todo labels, plus
+every sensitivity gate.
 
 ## Accepted forms
 
@@ -54,6 +57,8 @@ structured no-op. Do not mutate the provider or write a checkout first.
 ## Role behavior
 
 - `implementer-run` implements the selected eligible issue.
+- `bugfixer-run` owns eligible bug implementation and review continuation;
+  `implementer-run` excludes bugs.
 - `reviewer-run` reviews the selected change.
 - `validator-run` validates the selected change.
 - `investigate-run` investigates the selected issue read-only.

@@ -16,6 +16,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocsTest(unittest.TestCase):
+    def test_exclusive_bugfixer_lifecycle_is_documented(self):
+        combined = "\n".join(
+            (ROOT / relative).read_text(encoding="utf-8")
+            for relative in (
+                "README.md",
+                "references/TOPOLOGY.md",
+                "references/DIRECTED-TARGET.md",
+                "references/SCHEDULED-TASKS.md",
+            )
+        )
+
+        for marker in (
+            "$pitcrew:bugfixer-run",
+            "agent + bug + todo",
+            "valid red reproduction",
+            "investigate-run",
+            "reviewer-run",
+            "validator-run",
+            "human `go`",
+            "implementer-run excludes bugs",
+        ):
+            self.assertIn(marker, combined)
+
     def test_native_github_issue_setup_is_explicit(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -344,8 +367,8 @@ class DocsTest(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("seventeen Codex skills", topology)
-        self.assertEqual(17, len(re.findall(r"^\| `\$pitcrew:[^`]+` \|", topology, re.M)))
+        self.assertIn("eighteen Codex skills", topology)
+        self.assertEqual(18, len(re.findall(r"^\| `\$pitcrew:[^`]+` \|", topology, re.M)))
         self.assertRegex(scheduled, r"(?is)manual preprod review.{0,180}(?:never scheduled|manual-only)")
         self.assertRegex(scheduled, r"(?is)preprod review.{0,300}(?:local|read-only)")
         self.assertRegex(scheduled, r"(?is)preprod.{0,80}controls are absent")

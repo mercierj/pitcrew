@@ -21,6 +21,7 @@ primary installation, runtime, and documentation path.
 | `$pitcrew:qa-run` | Exercise one configured QA flow. |
 | `$pitcrew:manager-run` | Pace findings into the configured tracker. |
 | `$pitcrew:implementer-run` | Claim and implement one eligible item. |
+| `$pitcrew:bugfixer-run` | Reproduce and fix one eligible bug through human-gated delivery. |
 | `$pitcrew:reviewer-run` | Review one open change. |
 | `$pitcrew:validator-run` | Validate one change locally. |
 | `$pitcrew:unblock` | Surface one blocked decision to a human. |
@@ -104,6 +105,14 @@ Use $pitcrew:architecture-run for project getbill. Perform one bounded read-only
 Observe the first runs before enabling implementation workflows. Do not schedule
 `$pitcrew:releaser-run` for GetBill: release autonomy is off and every prod or
 preprod action requires a fresh explicit approval.
+
+`$pitcrew:bugfixer-run` runs every 15 minutes when the configured native issue
+tracker, bugfixer risk policy, repository, and labels are all available. Its
+exclusive route is `agent + bug + todo`; `implementer-run excludes bugs` in
+both todo and review. A valid red reproduction is mandatory before production
+code changes, and the same reproduction must turn green. Merge still requires
+`$pitcrew:reviewer-run`, `$pitcrew:validator-run`, human `go`, and green required
+CI checks.
 
 See [the Codex guide](docs/CODEX.md) and
 [scheduled-task templates](references/SCHEDULED-TASKS.md).

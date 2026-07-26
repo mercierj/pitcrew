@@ -38,7 +38,9 @@ run and no existing open change. Otherwise preserve it for its owner.
 
 **STEP A — Review continuation.** Service `$STATE_REVIEW` issues carrying both
 `$AGENT_LABEL` and `$BUG_LABEL`. Apply only current-head review, validation,
-human-go, and CI signals.
+human-go, and CI signals. For a coordinated run, bind the canonical ticket before any review continuation mutation,
+including a state/comment update, retry, merge, or close. A binding conflict
+performs no mutation and returns a structured no-op.
 
 **STEP B — Select one candidate.** Query
 `label="$AGENT_LABEL", state="$STATE_TODO"`, then keep only issues carrying
@@ -57,8 +59,8 @@ structured no-op.
 
 After binding, run `scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>`
 with the normalized current evidence. Only `route_investigate` permits sensitive
-routing and only the claim action permits a non-sensitive claim; an invalid or
-unexpected action fails closed to `$STATE_BLOCKED`.
+routing, and only `hold_fix` permits the initial claim of a non-sensitive or
+fully approved sensitive bug. Any other action fails closed to `$STATE_BLOCKED`.
 
 **STEP E — Route or claim.** A valid sensitive approval requires all three:
 
@@ -96,7 +98,10 @@ finalize the run, and stop.
 **STEP G — Fix.** Apply the smallest production change. The same reproduction must turn green.
 Run focused tests and repository-required validation.
 Architecture ambiguity, unavailable services, insufficient confidence, or broad
-blast radius routes to `$STATE_BLOCKED` with:
+blast radius routes to `$STATE_BLOCKED` using only
+`<!-- pitcrew:bugfix:blocked:v1 -->`. Never attach the green marker to a blocked path.
+
+Only after the same valid reproduction passes, post:
 
 ```markdown
 <!-- pitcrew:bugfix:green:v1 -->

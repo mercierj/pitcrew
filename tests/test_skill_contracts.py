@@ -121,6 +121,10 @@ class ReferenceContractTest(unittest.TestCase):
             "exclude `$BUG_LABEL` from review continuation",
             implementer,
         )
+        self.assertIn(
+            "exclude `$BUG_LABEL` from processing recovery",
+            implementer,
+        )
 
     def test_bugfixer_is_exclusive_evidence_first_and_human_gated(self):
         self.assert_markers(
@@ -147,8 +151,11 @@ class ReferenceContractTest(unittest.TestCase):
             "structured no-op",
             "scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>",
             "route_investigate",
+            "only `hold_fix` permits the initial claim",
             "open_change",
             "merge_close",
+            "bind the canonical ticket before any review continuation mutation",
+            "Never attach the green marker to a blocked path",
         )
 
     def test_unblock_has_safe_sensitive_bug_return_path(self):

@@ -26,6 +26,7 @@ profiles pin all roles so model selection stays explicit:
 | `research-run` | `gpt-5.6-terra` |
 | `manager-run` | `gpt-5.6-luna` |
 | `implementer-run` | `gpt-5.6-sol` |
+| `bugfixer-run` | `gpt-5.6-sol` |
 | `reviewer-run` | `gpt-5.6-sol` |
 | `validator-run` | `gpt-5.6-terra` |
 | `investigate-run` | `gpt-5.6-sol` |
@@ -136,6 +137,25 @@ GetBill release scheduling is disabled: release preparation and deployment remai
 human-initiated, with the required approval for each remote action.
 The operator must review the first few scheduled runs before enabling additional
 acting roles.
+
+### Bugfixer schedule
+
+`$pitcrew:bugfixer-run` has a bounded 900-second (15-minute) cadence and handles
+only `agent + bug + todo` work. GetBill enables it only when the native tracker,
+validated bugfixer policy, configured repository, and every required lifecycle
+and routing label are present. A missing label returns a structured no-op; the
+agent never creates or approximates tracker labels.
+
+Before enabling the role, the operator must create the exact
+`pitcrew-risk::approved` label in the configured tracker and verify it through
+the selected provider. This label does not authorize a sensitive fix by itself:
+completed `$pitcrew:investigate-run` findings and the human approval marker from
+`$pitcrew:unblock` are also mandatory.
+
+Implementation requires a valid red reproduction, then the same check green.
+Merge requires `$pitcrew:reviewer-run`, `$pitcrew:validator-run`, human `go`, and
+green required CI checks on the current head. `implementer-run excludes bugs`
+from todo, processing recovery, and review continuation.
 
 ## Local headless scheduler
 
