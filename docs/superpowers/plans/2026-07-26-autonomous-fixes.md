@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a project-scoped dashboard switch that lets `improvement` tickets in `todo` or `blocked` merge without human review, human `go`, or green CI, while keeping bugs and feature proposals human-gated.
+**Goal:** Add a project-scoped dashboard switch that lets reviewed `improvement` tickets originating in `todo` or `blocked` merge without human `go` or green CI, while keeping bugs and feature proposals human-gated.
 
-**Architecture:** A validated `delivery.fix_autonomy` value lives in the runtime project configuration and defaults to `off`. The dashboard exposes the value in its status snapshot and changes it through the same locked, atomic runtime-config mechanism used for model changes. `implementer-run` reads the value for each review decision and uses an autonomous merge path only when it is `on` and the ticket has the configured `improvement` label in `todo` or `blocked`.
+**Architecture:** A validated `delivery.fix_autonomy` value lives in the runtime project configuration and defaults to `off`. The dashboard exposes the value in its status snapshot and changes it through the same locked, atomic runtime-config mechanism used for model changes. `implementer-run` keeps the automatic reviewer gate, then uses an autonomous merge path only when it is `on` and the reviewed ticket has the configured `improvement` label.
 
 **Tech Stack:** Python 3 standard library, JSON project profiles, Markdown skill contracts, browser JavaScript, HTML/CSS, Python `unittest`, Node test runner.
 
@@ -252,7 +252,7 @@ FIX_AUTONOMY=$(jq -r '.delivery.fix_autonomy // "off"' "$CONFIG_FILE")
 case "$FIX_AUTONOMY" in on|off) ;; *) bail "invalid fix autonomy policy";; esac
 ```
 
-Extend the Step A verdict table with `AUTONOMOUS_FIX_MERGE`: it applies only when `FIX_AUTONOMY=on`, the ticket is labelled with configured `$IMPROVEMENT_LABEL`, its state is `$STATE_TODO` or `$STATE_BLOCKED`, and no explicit human `WAIT`/`HOLD`/`STOP` is newer than the ready marker. It precedes `CHANGES`, `GO`, reviewer sign-off and diff classification, so CI and reviewer state are observed and recorded but never block. Its action still calls `READ_CHANGE_CHECKS`, captures its status, calls `MERGE_CHANGE --squash --delete-branch`, closes and verifies the tracker lifecycle, then posts a comment containing `Autonomous improvement merge`, the change URL, and `CI result observed: <status>`. It must never apply to `$BUG_LABEL` tickets, feature/proposal tickets, relax existing repository safety policy, or proposal approval behavior.
+Extend the Step A verdict table with `AUTONOMOUS_FIX_MERGE`: it applies only when `FIX_AUTONOMY=on`, the ticket is in `$STATE_REVIEW`, has the configured `$IMPROVEMENT_LABEL`, and Signal B is signed off. It follows `CHANGES`, so automatic review findings retain their existing auto-fix loop, then precedes `GO` and CI gating. Its action still calls `READ_CHANGE_CHECKS`, captures its status, calls `MERGE_CHANGE --squash --delete-branch`, closes and verifies the tracker lifecycle, then posts a comment containing `Autonomous improvement merge`, the change URL, and `CI result observed: <status>`. It must never apply to `$BUG_LABEL` tickets, feature/proposal tickets, relax existing repository safety policy, or proposal approval behavior.
 
 Document the opt-in switch, its improvement-only eligibility, and the unchanged bug/feature-proposal gates in `README.md`.
 

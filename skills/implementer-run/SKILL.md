@@ -7,6 +7,9 @@ description: Use when implementing one eligible configured issue through a revie
 
 Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
 Read `references/PROVIDERS.md` and the configured provider reference before any external lookup.
+Read `references/CHANGE-DELIVERY.md` before selection. It is normative for
+binding, claim, idempotency, review continuation, merge, and closeout. This
+skill owns only non-bug selection and implementation policy.
 Read the target repository's applicable `AGENTS.md` files before acting.
 If the active profile is GetBill, also read `references/profiles/getbill.md` and the project
 references it requires for the task area.
@@ -358,6 +361,9 @@ For each result:
 
 ONE configured tracker query: `label=$AGENT_LABEL`, `state=$STATE_REVIEW`. (Single label, single state. No more 3× query merge — the new workflow puts the burden on the state machine.)
 
+**Exclusive bug ownership:** exclude `$BUG_LABEL` from review continuation.
+`bugfixer-run` owns bug review, fixes, merge, and closeout.
+
 For each ticket in `$STATE_REVIEW`, gather two signals:
 
 **Conflict recovery:** before evaluating merge approval, inspect the matching open
@@ -374,13 +380,17 @@ manual merge action.
 
 **Signal A — configured tracker comment from the human** (per HARD RULE 14: sticky "go"). Find the most recent ACTIONABLE comment by `$ASSIGNEE_EMAIL` authored AFTER the agent's **FIRST** "change ready" comment on this ticket (not the last — the first, so re-readies don't reset the gate). An actionable comment is one that contains `\bgo\b` (case-insensitive), `\bno\b`, `\bwait\b`, `\bhold\b`, `\bstop\b`, or asks for specific changes. Chit-chat / acknowledgments are not actionable — skip them when finding "the most recent actionable comment".
 
-**Signal B — `$FORGE_USER`'s configured forge review** (most recent review on the change, after the most recent commit). Use:
+**Signal B — `$FORGE_USER`'s configured forge review** (most recent review on the current change head only). Capture the current `head_sha` first, then accept a sign-off only when the provider review identifies that same commit SHA; a sign-off on an older SHA is `NONE`. Use:
 ```text
 INSPECT_CHANGE <N> --repo <repo> --json reviews --jq '
   [.reviews[] | select(.author_identity == "'"$FORGE_USER"'")] |
-  sort_by(.submittedAt) | last | {state, body, submittedAt}
+  sort_by(.submittedAt) | last | {state, body, submittedAt, commit_id}
 '
 ```
+
+Before classifying, require `review.commit_id == head_sha` (or the matching
+provider-native current-head field). If the provider cannot expose this binding,
+do not select `AUTONOMOUS_FIX_MERGE`.
 
 **Signal C — change diff classification** (per HARD RULE 13). Run the `classify_pr_diff` helper:
 
@@ -412,12 +422,12 @@ classify_pr_diff() {
 }
 ```
 
-**Classify the combined signal as ONE of these verdicts** (precedence: WAIT > AUTONOMOUS_FIX_MERGE > CHANGES > GO > LOW_RISK_AUTO_MERGE > SIGNED_OFF > NONE — a human veto always wins):
+**Classify the combined signal as ONE of these verdicts** (precedence: WAIT > CHANGES > AUTONOMOUS_FIX_MERGE > GO > LOW_RISK_AUTO_MERGE > SIGNED_OFF > NONE — a human veto and automatic review findings always win):
 
 | Verdict | Trigger | Action |
 |---|---|---|
 | `WAIT` | Signal A most-recent actionable comment matches `\b(no|wait|hold|stop)\b` | skip, leave alone |
-| `AUTONOMOUS_FIX_MERGE` | `FIX_AUTONOMY=on`, ticket has the configured improvement label, is in `$STATE_TODO` or `$STATE_BLOCKED`, and Signal A is not WAIT | merge automatically; bug tickets remain human-gated and feature proposals remain human-approved |
+| `AUTONOMOUS_FIX_MERGE` | `FIX_AUTONOMY=on`, ticket is in `$STATE_REVIEW`, has exactly the configured improvement work category and no `$BUG_LABEL`, proposal, feature, or investigate label, Signal B is signed-off for `head_sha`, and Signal A is not WAIT | merge automatically after automatic review; bug tickets remain human-gated and feature proposals remain human-approved |
 | `CHANGES` | Signal B state = `CHANGES_REQUESTED`, OR review body contains "blocking" / "must fix" / "critical" / "Verdict: CHANGES_REQUESTED", OR Signal A asks for specific changes (not go/wait/hold/no/stop) | auto-fix (see below) |
 | `GO` | Signal A most-recent actionable comment matches `\bgo\b` (case-insensitive) — and not later overridden by WAIT | merge (see below) |
 | `LOW_RISK_AUTO_MERGE` | Signal B is signed-off AND `classify_pr_diff` returns `docs` or `tests` AND Signal A is not WAIT (per HARD RULE 13) | merge automatically — no human "go" needed |
@@ -434,7 +444,7 @@ classify_pr_diff() {
 - Run `READ_CHANGE_CHECKS <N>` and retain its result as observed evidence; a red, pending, or absent CI result does not block this path.
 - Run `MERGE_CHANGE <N> --squash --delete-branch`, then `CLOSE_LIFECYCLE <TICKET-id>` and re-read the ticket to verify it is closed with `$STATE_DONE`.
 - Comment: `Autonomous improvement merge ✓ <change URL> — CI result observed: <status>.` Log `autonomous-improvement-merged` with the ticket, change URL, and observed CI status.
-- This applies only to the improvement label in `$STATE_TODO` or `$STATE_BLOCKED`; never apply it to `$BUG_LABEL`, feature/proposal tickets, prod/preprod actions, secret reads, database writes, or destructive Git.
+- This applies only to a reviewed, signed-off improvement ticket in `$STATE_REVIEW` whose review is bound to its current `head_sha`; never apply it to `$BUG_LABEL`, proposal, feature, or investigate labels, prod/preprod actions, secret reads, database writes, or destructive Git. The ticket's initial claim comment must identify its source state as `$STATE_TODO` or `$STATE_BLOCKED`; if that marker is absent, do not select this verdict.
 
 **LOW_RISK_AUTO_MERGE action (per HARD RULE 13):**
 - Capture the diff bucket: `BUCKET=$(classify_pr_diff <N> <repo>)` — will be `docs` or `tests`.
@@ -504,6 +514,10 @@ LIST_ELIGIBLE_WORK(label="$AGENT_LABEL", state="$STATE_TODO", limit=100)
 STEP B routing-skip: <N> tickets dropped because they carry the `$INVESTIGATE_LABEL` label
   Sample IDs (first 3): <comma-separated-IDs-or-empty>
 ```
+
+To prevent overlap, drop every ticket carrying `$BUG_LABEL` before sorting.
+Bugs are exclusively owned by `$pitcrew:bugfixer-run`; do not claim, reset,
+repair, merge, or close them from this role.
 
 **MANDATORY DEBUG OUTPUT — print this AFTER the routing-skip filter, BEFORE sorting:**
 

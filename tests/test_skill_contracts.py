@@ -92,6 +92,36 @@ class ReferenceContractTest(unittest.TestCase):
             "Never fall back",
         )
 
+    def test_shared_change_delivery_contract(self):
+        self.assert_markers(
+            "references/CHANGE-DELIVERY.md",
+            "Bind target before mutation",
+            "Expected remote state",
+            "Lookup before create",
+            "Current head SHA",
+            "Reviewer signed off",
+            "Validator passed",
+            "Human go",
+            "Required CI checks",
+            "Close lifecycle",
+            "Uncertain result",
+            "Two fix attempts",
+        )
+
+    def test_implementer_uses_shared_delivery_and_excludes_bugs(self):
+        implementer = (
+            ROOT / "skills/implementer-run/SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("references/CHANGE-DELIVERY.md", implementer)
+        self.assertIn(
+            "drop every ticket carrying `$BUG_LABEL` before sorting",
+            implementer,
+        )
+        self.assertIn(
+            "exclude `$BUG_LABEL` from review continuation",
+            implementer,
+        )
+
     def test_directed_targets_accept_native_github_issues(self):
         self.assert_markers(
             "references/DIRECTED-TARGET.md",

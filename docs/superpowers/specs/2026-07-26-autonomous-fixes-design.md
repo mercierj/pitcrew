@@ -11,9 +11,9 @@ dans leurs circuits humains existants.
 
 Le paramètre persistant est propre à chaque projet et vaut `off` par défaut.
 Lorsqu'il est activé, il s'applique uniquement aux tickets portant le label
-configuré `improvement`, dans les états `todo` ou `blocked`. Il autorise leur fusion après les
-vérifications locales minimales du rôle, même si les contrôles distants de CI,
-de revue ou de `go` humain sont absents ou négatifs.
+configuré `improvement`, pris depuis les états `todo` ou `blocked` puis arrivé
+en `review`. Il conserve la revue automatique, mais autorise la fusion après
+son approbation même si la CI est rouge ou absente et sans `go` humain.
 
 Le mode ne change pas les protections indépendantes : aucune action de prod ou
 préprod, migration, lecture de secret, écriture de base de données ou opération
@@ -54,11 +54,15 @@ changement.
 
 Les décisions de fusion des rôles de livraison consultent la politique du
 projet au moment de décider, après avoir rechargé l'issue et la demande de
-changement. Avec `fix_autonomy=on`, les gates `review approved`, `human go` et
-`CI green` ne bloquent plus la fusion seulement pour un ticket `improvement`
-en `todo` ou `blocked`. Le rôle ajoute au commentaire/ticket et à l'historique
-le fait que la fusion a été effectuée en mode autonome, avec le résultat CI
-observé.
+changement. Avec `fix_autonomy=on`, la revue automatique reste obligatoire et
+doit être liée au SHA courant; le ticket doit porter uniquement la catégorie
+`improvement`, sans label bug, proposition, fonctionnalité ou investigation,
+et conserver son marqueur de prise en charge depuis `todo` ou `blocked`.
+Ensuite,
+mais les gates `human go` et `CI green` ne bloquent plus la fusion d'un ticket
+`improvement` arrivé en `review` depuis `todo` ou `blocked`. Le rôle ajoute au
+commentaire/ticket et à l'historique le fait que la fusion a été effectuée en
+mode autonome, avec le résultat CI observé.
 
 Avec `off`, le comportement actuel est inchangé. Les tickets `bug` et de
 fonctionnalité ne peuvent pas devenir autonomes : l'approbation d'une
@@ -75,6 +79,7 @@ avant son routage vers un agent.
   erreur.
 - La décision de livraison conserve les gates avec `off`, les conserve aussi
   pour `bug` et les fonctionnalités avec `on`, et choisit la fusion pour un
-  `improvement` éligible malgré une CI rouge/absente et sans `go` humain.
+  `improvement` revu et approuvé malgré une CI rouge/absente et sans `go`
+  humain.
 - Les tests de propositions confirment que le mode ne crée ni n'approuve une
   idée de fonctionnalité.
