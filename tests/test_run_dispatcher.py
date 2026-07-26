@@ -53,6 +53,7 @@ class RunDispatcherTest(unittest.TestCase):
                     },
                     "states": {
                         "todo": "todo-label",
+                        "processing": "processing-label",
                         "review": "review-label",
                         "blocked": "blocked-label",
                         "done": "done-label",
@@ -355,10 +356,46 @@ class RunDispatcherTest(unittest.TestCase):
                     source="scheduled",
                     target=f"https://gitlab.example/crew/demo/-/issues/{iid}",
                 )
-                dispatcher.drain("demo", {skill: 1})
+                dispatcher.drain(
+                    "demo",
+                    {skill: 2 if skill == "implementer-run" else 1},
+                )
                 self.assertEqual("running", self.store.get(run["run_id"])["state"])
         self.assertEqual(len(cases), len(spawned))
         self.assertEqual(len(cases), provider.call_count)
+
+    def test_default_validator_allows_reconcile_stale_sweep_for_blocked_ticket(self):
+        provider = mock.Mock(
+            return_value=self.provider_result(
+                labels=["agent-label", "blocked-label"],
+            )
+        )
+        run = self.store.enqueue(
+            project="demo",
+            skill="stale-sweep",
+            source="reconcile",
+            target="https://gitlab.example/crew/demo/-/issues/7",
+        )
+        spawned = []
+        with mock.patch.object(
+            dispatcher_module,
+            "load_runtime_config",
+            return_value=self.gitlab_config(),
+        ):
+            dispatcher = RunDispatcher(
+                self.store,
+                "/runner",
+                process_factory=lambda *args, **kwargs: (
+                    spawned.append((args, kwargs)) or FakeProcess()
+                ),
+                provider_runner=provider,
+            )
+
+            dispatcher.drain("demo", {"stale-sweep": 1})
+
+        self.assertEqual("running", self.store.get(run["run_id"])["state"])
+        self.assertEqual(1, len(spawned))
+        provider.assert_called_once()
 
     def test_default_validator_requires_gitlab_forge_and_tracker(self):
         provider = mock.Mock()

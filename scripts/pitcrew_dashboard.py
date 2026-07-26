@@ -1054,27 +1054,212 @@ class DashboardService:
         self._gitlab_cached_at = current
         return self._with_run_overlay(payload)
 
-    @staticmethod
     def _merged_reconciliation_candidate(
+        self,
         issue: dict,
         related_urls: list[str],
         merge_requests: list[dict],
     ) -> dict | None:
         target = issue.get("web_url")
-        if issue.get("state") != "opened" or not isinstance(target, str):
-            return None
-        if not any(
-            merge_request.get("state") == "merged"
-            and isinstance(merge_request.get("merged_at"), str)
-            and merge_request.get("web_url") in related_urls
-            for merge_request in merge_requests
+        issue_iid = issue.get("iid")
+        if (
+            issue.get("state") != "opened"
+            or not isinstance(target, str)
+            or not isinstance(issue_iid, int)
+            or isinstance(issue_iid, bool)
+            or issue_iid <= 0
         ):
+            return None
+        merged = next(
+            (
+                merge_request
+                for merge_request in merge_requests
+                if merge_request.get("state") == "merged"
+                and isinstance(merge_request.get("merged_at"), str)
+                and isinstance(merge_request.get("iid"), int)
+                and not isinstance(merge_request.get("iid"), bool)
+                and merge_request.get("iid") > 0
+                and isinstance(merge_request.get("web_url"), str)
+                and merge_request.get("web_url") in related_urls
+            ),
+            None,
+        )
+        if merged is None:
+            return None
+        try:
+            _timestamp(merged["merged_at"])
+        except (TypeError, ValueError):
             return None
         return {
             "skill": "stale-sweep",
             "target": target,
             "reason": "merged_merge_request",
+            "evidence": {
+                "provider": "gitlab",
+                "project_path": self.gitlab_project,
+                "issue_iid": issue_iid,
+                "merge_request_iid": merged["iid"],
+                "merge_request_url": merged["web_url"],
+                "merged_at": merged["merged_at"],
+            },
         }
+
+    def _validated_merged_reconciliation_candidate(
+        self,
+        candidate: object,
+    ) -> str:
+        if not isinstance(candidate, dict) or set(candidate) != {
+            "skill",
+            "target",
+            "reason",
+            "evidence",
+        }:
+            raise DashboardError("invalid reconciliation candidate")
+        if (
+            candidate.get("skill") != "stale-sweep"
+            or candidate.get("reason") != "merged_merge_request"
+        ):
+            raise DashboardError("invalid reconciliation candidate")
+        target = candidate.get("target")
+        if not isinstance(target, str):
+            raise DashboardError("invalid reconciliation candidate")
+        canonical, issue_iid = self._canonical_ticket_target(target)
+        evidence = candidate.get("evidence")
+        if not isinstance(evidence, dict) or set(evidence) != {
+            "provider",
+            "project_path",
+            "issue_iid",
+            "merge_request_iid",
+            "merge_request_url",
+            "merged_at",
+        }:
+            raise DashboardError("invalid reconciliation candidate")
+        merge_request_iid = evidence.get("merge_request_iid")
+        if (
+            evidence.get("provider") != "gitlab"
+            or evidence.get("project_path") != self.gitlab_project
+            or evidence.get("issue_iid") != issue_iid
+            or not isinstance(merge_request_iid, int)
+            or isinstance(merge_request_iid, bool)
+            or merge_request_iid <= 0
+        ):
+            raise DashboardError("invalid reconciliation candidate")
+        expected_mr_url = (
+            f"https://{self.config['gitlab']['host']}/{self.gitlab_project}"
+            f"/-/merge_requests/{merge_request_iid}"
+        )
+        if evidence.get("merge_request_url") != expected_mr_url:
+            raise DashboardError("invalid reconciliation candidate")
+        merged_at = evidence.get("merged_at")
+        if not isinstance(merged_at, str):
+            raise DashboardError("invalid reconciliation candidate")
+        try:
+            _timestamp(merged_at)
+        except ValueError as error:
+            raise DashboardError("invalid reconciliation candidate") from error
+        return canonical
+
+    def reconcile_merged_ticket_candidates(self) -> dict:
+        """Admit read-side merged drift as coordinated stale-sweep work."""
+        payload = self.gitlab_work(force_refresh=True)
+        if not isinstance(payload, dict) or payload.get("degraded") is not False:
+            raise DashboardError("GitLab reconciliation unavailable")
+        groups = payload.get("groups")
+        if not isinstance(groups, dict):
+            raise DashboardError("GitLab reconciliation unavailable")
+        candidates = []
+        for lifecycle in LIFECYCLES:
+            issues = groups.get(lifecycle)
+            if not isinstance(issues, list):
+                raise DashboardError("GitLab reconciliation unavailable")
+            for issue in issues:
+                if isinstance(issue, dict) and issue.get("reconciliation_candidate") is not None:
+                    candidates.append(issue["reconciliation_candidate"])
+
+        with self._control_lock:
+            if self.run_store is None or self.run_dispatcher is None:
+                raise DashboardError("ticket runs are unavailable") from self._run_store_error
+            admissions: dict[str, dict] = {}
+            deferred = []
+            rejected = []
+            should_drain = False
+            try:
+                for candidate in candidates:
+                    try:
+                        canonical = self._validated_merged_reconciliation_candidate(
+                            candidate
+                        )
+                    except DashboardError:
+                        rejected.append(
+                            {
+                                "target": (
+                                    candidate.get("target")
+                                    if isinstance(candidate, dict)
+                                    and isinstance(candidate.get("target"), str)
+                                    else None
+                                ),
+                                "reason": "invalid_candidate",
+                            }
+                        )
+                        continue
+                    run = self.run_store.enqueue(
+                        project=self.project,
+                        skill="stale-sweep",
+                        source="reconcile",
+                        target=canonical,
+                    )
+                    current = self.run_store.get(run["run_id"])
+                    if current is None:
+                        raise DashboardError("ticket run is unavailable")
+                    if current["skill"] != "stale-sweep":
+                        deferred.append(
+                            {
+                                "target": canonical,
+                                "run_id": current["run_id"],
+                                "skill": current["skill"],
+                                "state": current["state"],
+                                "reason": "active_ticket_run",
+                            }
+                        )
+                        continue
+                    existing = admissions.get(current["run_id"])
+                    admissions[current["run_id"]] = {
+                        "target": canonical,
+                        "created": (
+                            run["created"]
+                            if existing is None
+                            else existing["created"] or run["created"]
+                        ),
+                    }
+                    should_drain = should_drain or current["state"] == "queued"
+                if should_drain:
+                    self.run_dispatcher.reconcile_and_drain(
+                        project=self.project,
+                        capacities=self._claim_capacity_map(),
+                    )
+                runs = []
+                for run_id, admission in admissions.items():
+                    current = self.run_store.get(run_id)
+                    if current is None:
+                        raise DashboardError("ticket run is unavailable")
+                    runs.append(
+                        {
+                            "run_id": current["run_id"],
+                            "skill": current["skill"],
+                            "target": admission["target"],
+                            "state": current["state"],
+                            "queue_position": current["queue_position"],
+                            "created": admission["created"],
+                        }
+                    )
+            except RunStoreError as error:
+                raise DashboardError("ticket run is unavailable") from error
+            return {
+                "runs": runs,
+                "deferred": deferred,
+                "rejected": rejected,
+                "drained": should_drain,
+            }
 
     @staticmethod
     def _normalize_merge_request(merge_request: dict) -> dict:

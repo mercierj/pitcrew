@@ -1056,14 +1056,24 @@ class DashboardServiceTest(unittest.TestCase):
                 "merged_at": "2026-07-24T11:00:00Z",
             }
         )
+        store, dispatcher = self.coordinator()
         service = self.service(
             FakeRunner(
                 issue_pages=[[issue]],
                 merge_request_pages=[[merged_mr]],
-            )
+            ),
+            run_store=store,
+            run_dispatcher=dispatcher,
         )
 
-        with mock.patch.object(service, "_gitlab_mutation") as mutation:
+        with (
+            mock.patch.object(service, "_gitlab_mutation") as mutation,
+            mock.patch.object(store, "enqueue", wraps=store.enqueue) as enqueue,
+            mock.patch.object(
+                service,
+                "reconcile_merged_ticket_candidates",
+            ) as reconcile,
+        ):
             ticket = service.gitlab_work(force_refresh=True)["groups"]["blocked"][0]
 
         self.assertEqual(
@@ -1071,11 +1081,228 @@ class DashboardServiceTest(unittest.TestCase):
                 "skill": "stale-sweep",
                 "target": issue["web_url"],
                 "reason": "merged_merge_request",
+                "evidence": {
+                    "provider": "gitlab",
+                    "project_path": "getbill1/getbill",
+                    "issue_iid": 3,
+                    "merge_request_iid": 12,
+                    "merge_request_url": merged_mr["web_url"],
+                    "merged_at": "2026-07-24T11:00:00Z",
+                },
             },
             ticket["reconciliation_candidate"],
         )
         mutation.assert_not_called()
+        enqueue.assert_not_called()
+        reconcile.assert_not_called()
+        self.assertEqual([], dispatcher.drain_calls)
         self.assertFalse(hasattr(service, "_sync_merged_issue"))
+
+    def test_reconcile_merged_ticket_candidates_enqueues_and_drains_stale_sweep(self):
+        issue = {
+            **gitlab_issues()[3],
+            "iid": 3,
+            "state": "opened",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+        }
+        merged_mr = {
+            **gitlab_merge_requests()[1],
+            "iid": 12,
+            "description": "Closes #3",
+            "state": "merged",
+            "merged_at": "2026-07-24T11:00:00Z",
+        }
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(
+                issue_pages=[[issue]],
+                merge_request_pages=[[merged_mr]],
+            ),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+
+        with mock.patch.object(service, "_gitlab_mutation") as mutation:
+            result = service.reconcile_merged_ticket_candidates()
+
+        self.assertTrue(result["drained"])
+        self.assertEqual([], result["deferred"])
+        self.assertEqual([], result["rejected"])
+        self.assertEqual(1, len(result["runs"]))
+        admitted = result["runs"][0]
+        self.assertTrue(admitted["created"])
+        self.assertEqual("stale-sweep", admitted["skill"])
+        self.assertEqual("running", admitted["state"])
+        stored = store.get(admitted["run_id"])
+        self.assertEqual("reconcile", stored["source"])
+        self.assertEqual(issue["web_url"], stored["target"])
+        self.assertEqual(1, len(dispatcher.drain_calls))
+        mutation.assert_not_called()
+
+    def test_reconcile_merged_ticket_candidates_is_idempotent(self):
+        issue = {
+            **gitlab_issues()[3],
+            "iid": 3,
+            "state": "opened",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+        }
+        merged_mr = {
+            **gitlab_merge_requests()[1],
+            "iid": 12,
+            "description": "Closes #3",
+            "state": "merged",
+            "merged_at": "2026-07-24T11:00:00Z",
+        }
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(
+                issue_pages=[[issue]],
+                merge_request_pages=[[merged_mr]],
+            ),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+
+        first = service.reconcile_merged_ticket_candidates()
+        second = service.reconcile_merged_ticket_candidates()
+
+        self.assertEqual(first["runs"][0]["run_id"], second["runs"][0]["run_id"])
+        self.assertTrue(first["runs"][0]["created"])
+        self.assertFalse(second["runs"][0]["created"])
+        self.assertTrue(first["drained"])
+        self.assertFalse(second["drained"])
+        self.assertEqual(1, len(dispatcher.drain_calls))
+        self.assertEqual(1, len(dispatcher.spawned_run_ids))
+        self.assertEqual(1, len(store.list_runs("getbill", active_only=True)))
+
+    def test_reconcile_merged_ticket_candidates_defers_other_active_skill(self):
+        issue = {
+            **gitlab_issues()[3],
+            "iid": 3,
+            "state": "opened",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+        }
+        merged_mr = {
+            **gitlab_merge_requests()[1],
+            "iid": 12,
+            "description": "Closes #3",
+            "state": "merged",
+            "merged_at": "2026-07-24T11:00:00Z",
+        }
+        store, dispatcher = self.coordinator()
+        active = store.enqueue(
+            project="getbill",
+            skill="unblock",
+            source="dashboard",
+            target=issue["web_url"],
+        )
+        service = self.service(
+            FakeRunner(
+                issue_pages=[[issue]],
+                merge_request_pages=[[merged_mr]],
+            ),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+
+        result = service.reconcile_merged_ticket_candidates()
+
+        self.assertFalse(result["drained"])
+        self.assertEqual([], result["runs"])
+        self.assertEqual([], result["rejected"])
+        self.assertEqual(
+            [
+                {
+                    "target": issue["web_url"],
+                    "run_id": active["run_id"],
+                    "skill": "unblock",
+                    "state": "queued",
+                    "reason": "active_ticket_run",
+                }
+            ],
+            result["deferred"],
+        )
+        self.assertEqual([], dispatcher.drain_calls)
+        self.assertEqual("unblock", store.get(active["run_id"])["skill"])
+
+    def test_reconcile_merged_ticket_candidates_rejects_stale_and_malformed(self):
+        stale_issue = {
+            **gitlab_issues()[3],
+            "iid": 3,
+            "state": "closed",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+        }
+        merged_mr = {
+            **gitlab_merge_requests()[1],
+            "iid": 12,
+            "description": "Closes #3",
+            "state": "merged",
+            "merged_at": "2026-07-24T11:00:00Z",
+        }
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(
+                issue_pages=[[stale_issue]],
+                merge_request_pages=[[merged_mr]],
+            ),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+
+        stale = service.reconcile_merged_ticket_candidates()
+        malformed_payload = {
+            "degraded": False,
+            "groups": {
+                lifecycle: (
+                    [
+                        {
+                            "reconciliation_candidate": {
+                                "skill": "stale-sweep",
+                                "target": stale_issue["web_url"],
+                                "reason": "merged_merge_request",
+                                "evidence": {
+                                    "provider": "github",
+                                },
+                            }
+                        }
+                    ]
+                    if lifecycle == "blocked"
+                    else []
+                )
+                for lifecycle in ("todo", "processing", "review", "blocked", "done")
+            },
+        }
+        with mock.patch.object(
+            service,
+            "gitlab_work",
+            return_value=malformed_payload,
+        ):
+            malformed = service.reconcile_merged_ticket_candidates()
+
+        self.assertEqual([], stale["runs"])
+        self.assertEqual([], stale["deferred"])
+        self.assertEqual([], malformed["runs"])
+        self.assertEqual(1, len(malformed["rejected"]))
+        self.assertEqual([], store.list_runs("getbill", active_only=True))
+        self.assertEqual([], dispatcher.drain_calls)
+
+    def test_reconcile_merged_ticket_candidates_fails_closed_on_provider_error(self):
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(fail_glab=True),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+
+        with self.assertRaisesRegex(DashboardError, "reconciliation unavailable"):
+            service.reconcile_merged_ticket_candidates()
+
+        self.assertEqual([], store.list_runs("getbill", active_only=True))
+        self.assertEqual([], dispatcher.drain_calls)
 
     def test_gitlab_work_degrades_when_run_store_is_unavailable(self):
         store, dispatcher = self.coordinator()

@@ -55,7 +55,11 @@ def _provider_http_status(completed: subprocess.CompletedProcess[str]) -> int | 
     return int(match.group(1)) if match is not None else None
 
 
-def _required_labels(skill: str, tracker: Mapping[str, Any]) -> tuple[frozenset[str], ...] | None:
+def _required_labels(
+    skill: str,
+    tracker: Mapping[str, Any],
+    source: object = None,
+) -> tuple[frozenset[str], ...] | None:
     labels = tracker.get("labels")
     states = tracker.get("states")
     if not isinstance(labels, Mapping) or not isinstance(states, Mapping):
@@ -64,12 +68,13 @@ def _required_labels(skill: str, tracker: Mapping[str, Any]) -> tuple[frozenset[
         agent = labels["agent"]
         investigate = labels["investigate"]
         todo = states["todo"]
+        processing = states["processing"]
         review = states["review"]
         blocked = states["blocked"]
         done = states["done"]
     except KeyError as error:
         raise TargetValidationUnavailable("target validation is unavailable") from error
-    values = (agent, investigate, todo, review, blocked, done)
+    values = (agent, investigate, todo, processing, review, blocked, done)
     if any(not isinstance(value, str) or not value for value in values):
         raise TargetValidationUnavailable("target validation is unavailable")
     roles = {
@@ -80,6 +85,11 @@ def _required_labels(skill: str, tracker: Mapping[str, Any]) -> tuple[frozenset[
         "unblock": (frozenset((agent, blocked)),),
         "stale-sweep": (frozenset((agent, done)),),
     }
+    if skill == "stale-sweep" and source == "reconcile":
+        return tuple(
+            frozenset((agent, state))
+            for state in (todo, processing, review, blocked, done)
+        )
     return roles.get(skill)
 
 
@@ -112,7 +122,11 @@ def validate_queued_target(
         or not isinstance(tracker, Mapping)
     ):
         raise TargetValidationUnavailable("target validation is unavailable")
-    required = _required_labels(str(row["skill"]), tracker)
+    required = _required_labels(
+        str(row["skill"]),
+        tracker,
+        row.get("source"),
+    )
     if required is None:
         return False
 
