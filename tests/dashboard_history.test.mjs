@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFile} from "node:fs/promises";
 
 import {
   createLatestRequestCoordinator,
@@ -139,4 +140,19 @@ test("latest request coordinator returns the current rejection without throwing"
   assert.equal(result.applied, true);
   assert.equal(result.error, error);
   assert.equal("data" in result, false);
+});
+
+test("the app instantiates one shared history request coordinator before loading history", async () => {
+  const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
+  const declaration = appSource.indexOf(
+    "const coordinateHistoryRequest = createLatestRequestCoordinator();",
+  );
+  const load = appSource.indexOf("async function loadHistory()");
+
+  assert.ok(declaration >= 0);
+  assert.ok(load > declaration);
+  assert.match(
+    appSource.slice(load),
+    /coordinateHistoryRequest\(\(\) => fetchJson\(path\)\)/,
+  );
 });
