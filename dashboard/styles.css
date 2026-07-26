@@ -909,6 +909,21 @@ select {
   line-clamp: 3;
 }
 
+.action-card .action-card-kind {
+  display: block;
+  width: fit-content;
+  margin-bottom: 2px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #fff3c7;
+  color: #72520b;
+  font-size: 0.7rem;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  line-clamp: unset;
+  text-transform: uppercase;
+}
+
 .workflow-columns {
   display: grid;
   min-width: 920px;

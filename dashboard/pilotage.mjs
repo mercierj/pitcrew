@@ -1,10 +1,18 @@
 import {ACTIVE_LIFECYCLES, buildActionQueue, buildWorkflow} from "./view-model.mjs";
+import {formatDate} from "./format.mjs";
 
 const LIFECYCLE_LABELS = {
   todo: "À faire",
   processing: "En cours",
   review: "En revue",
   blocked: "Bloqué",
+};
+
+const ACTION_KIND_LABELS = {
+  decision: "Décision",
+  "agent-failure": "Incident agent",
+  "merge-request": "Merge request",
+  proposal: "Proposition",
 };
 
 const asArray = (value) => Array.isArray(value) ? value : [];
@@ -30,6 +38,71 @@ const boundedContextText = (value, limit = ACTION_CONTEXT_LIMIT) => {
   if (normalized.length <= limit) return normalized;
   return `${normalized.slice(0, limit - 1).trimEnd()}…`;
 };
+
+const canonicalUrlOf = (resource) => (
+  typeof resource?.canonical_url === "string" && resource.canonical_url
+    ? resource.canonical_url
+    : typeof resource?.web_url === "string"
+      ? resource.web_url
+      : ""
+);
+
+export function formatUpdateAge(value, now = Date.now()) {
+  const updatedAt = Date.parse(value);
+  if (!Number.isFinite(updatedAt)) return "date inconnue";
+  const minutes = Math.max(0, Math.floor((now - updatedAt) / 60000));
+  if (minutes < 1) return "à l’instant";
+  if (minutes < 60) return `il y a ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `il y a ${hours} h`;
+  return `il y a ${Math.floor(hours / 24)} j`;
+}
+
+export function enrichWorkflowEntry(entry, sources = {}) {
+  const issueUrl = canonicalUrlOf(entry);
+  const decisions = asArray(sources?.decisions?.decisions)
+    .concat(sources?.decisions?.pending ? [sources.decisions.pending] : []);
+  const decision = decisions.find((candidate) => (
+    issueUrl && canonicalUrlOf(candidate?.ticket) === issueUrl
+  )) || null;
+  const mergeRequestsByUrl = new Map(
+    asArray(sources?.work?.merge_requests)
+      .map((mergeRequest) => [canonicalUrlOf(mergeRequest), mergeRequest])
+      .filter(([url]) => url),
+  );
+  const mergeRequests = asArray(entry?.related_merge_requests)
+    .filter((url) => typeof url === "string")
+    .map((url) => mergeRequestsByUrl.get(url))
+    .filter(Boolean);
+  const activeSkill = typeof entry?.active_run?.skill === "string"
+    ? entry.active_run.skill
+    : "";
+  const agent = asArray(sources?.snapshot?.agents)
+    .find((candidate) => activeSkill && candidate?.skill === activeSkill);
+  const latestHistory = agent?.latest_history && typeof agent.latest_history === "object"
+    ? agent.latest_history
+    : null;
+
+  return {
+    ...entry,
+    delivery_context: {
+      decision,
+      labels: asArray(entry?.labels).filter((label) => (
+        typeof label === "string"
+        && label
+        && !/^pitcrew(?:-|::)/i.test(label)
+      )),
+      merge_requests: mergeRequests,
+      active_agent: activeSkill
+        ? {
+          skill: activeSkill,
+          phase: agent?.live_status?.phase || entry?.active_run?.phase || entry?.active_run?.state || "",
+          latest_history: latestHistory,
+        }
+        : null,
+    },
+  };
+}
 
 export function summarizeAgentFailure(summary, fallback = "Diagnostic requis.") {
   let parsed = summary;
@@ -150,9 +223,14 @@ export function preserveFocus(root, render) {
 const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {}) => {
   const card = document.createElement(done ? "li" : "article");
   card.className = done ? "done-card" : "action-card";
+  const kind = document.createElement("p");
+  kind.className = "action-card-kind";
+  kind.textContent = ACTION_KIND_LABELS[kindOf(entry, resourceOf(entry))]
+    || "Action";
   const title = document.createElement("h3");
   title.textContent = titleOf(entry);
   const context = document.createElement("p");
+  context.className = done ? "done-card-context" : "action-card-context";
   context.textContent = contextOf(entry);
   const button = document.createElement("button");
   button.type = "button";
@@ -160,7 +238,7 @@ const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {
   button.textContent = done ? "Voir le détail" : entry?.label || "Ouvrir";
   button.setAttribute("data-focus-key", focusKeyFor(focusScope, entry));
   button.addEventListener("click", () => onOpen?.(entry));
-  card.append(title, context, button);
+  card.append(...(done ? [] : [kind]), title, context, button);
   return card;
 };
 
@@ -217,19 +295,44 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
     const card = document.createElement("article");
     card.className = "workflow-card";
     const title = document.createElement("h4");
-    title.textContent = `#${entry.iid ?? "?"} · ${entry.title || "Ticket sans titre"}`;
+    title.textContent = `#${entry.iid ?? "?"} · Ticket · ${entry.title || "Ticket sans titre"}`;
+    const update = document.createElement("p");
+    update.className = "workflow-card-meta";
+    update.textContent = `Ticket · mis à jour ${formatUpdateAge(entry.updated_at)}`;
+    const labels = document.createElement("p");
+    labels.className = "workflow-card-labels";
+    const usefulLabels = asArray(entry.delivery_context?.labels).slice(0, 3);
+    if (entry.delivery_context?.decision) usefulLabels.push("Décision requise");
+    labels.textContent = usefulLabels.join(" · ");
     const route = document.createElement("p");
-    route.textContent = entry.agent_action?.skill
+    route.className = "workflow-card-agent";
+    const responsibleSkill = entry.delivery_context?.active_agent?.skill
+      || entry.agent_action?.skill
       || entry.route
       || entry.agent_action?.label
       || "Sans routage";
+    const phase = entry.delivery_context?.active_agent?.phase;
+    route.textContent = phase ? `${responsibleSkill} · ${phase}` : responsibleSkill;
+    const mergeRequest = entry.delivery_context?.merge_requests?.[0];
+    const merge = document.createElement("p");
+    merge.className = "workflow-card-merge";
+    merge.textContent = mergeRequest
+      ? `MR !${mergeRequest.iid ?? "?"} · ${mergeRequest.state || "ouverte"} · pipeline ${mergeRequest.pipeline_status || "absent"}`
+      : "";
     const action = document.createElement("button");
     action.type = "button";
     action.className = "button button-quiet";
     action.textContent = entry.agent_action?.label || "Voir le détail";
     action.setAttribute("data-focus-key", focusKeyFor("workflow", entry));
     action.addEventListener("click", () => onOpen?.(entry));
-    card.append(title, route, action);
+    card.append(
+      title,
+      update,
+      ...(labels.textContent ? [labels] : []),
+      route,
+      ...(merge.textContent ? [merge] : []),
+      action,
+    );
     lane.append(card);
   });
   return lane;
@@ -237,7 +340,13 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
 
 export function renderPilotage(roots = {}, sources = {}, handlers = {}) {
   const queue = buildActionQueue(sources);
-  const workflow = buildWorkflow(sources?.work, handlers.filters?.() || {});
+  const workflow = Object.fromEntries(
+    Object.entries(buildWorkflow(sources?.work, handlers.filters?.() || {}))
+      .map(([lifecycle, entries]) => [
+        lifecycle,
+        entries.map((entry) => enrichWorkflowEntry(entry, sources)),
+      ]),
+  );
   if (roots.actionQueueCount) {
     roots.actionQueueCount.textContent = String(queue.length);
   }
@@ -346,6 +455,38 @@ export function renderItemDetail(entry, handlers = {}) {
   } else if (kind === "issue") {
     appendFact(body, "Rôle", resource.agent_action?.skill || resource.route);
     appendFact(body, "Action", resource.agent_action?.label);
+    const labels = asArray(resource.delivery_context?.labels).slice(0, 5);
+    if (resource.delivery_context?.decision) labels.push("Décision requise");
+    appendFact(body, "Labels", labels.join(" · "));
+    asArray(resource.delivery_context?.merge_requests).forEach((mergeRequest, index) => {
+      appendFact(
+        body,
+        index ? `MR liée ${index + 1}` : "MR liée",
+        `!${mergeRequest.iid ?? "?"} · ${mergeRequest.source_branch || "branche inconnue"} → ${mergeRequest.target_branch || "branche inconnue"} · Auteur : ${mergeRequest.author_username || "inconnu"} · Pipeline : ${mergeRequest.pipeline_status || "absent"}`,
+      );
+    });
+    const activeAgent = resource.delivery_context?.active_agent;
+    if (activeAgent) {
+      appendFact(
+        body,
+        "Agent courant",
+        `${activeAgent.skill}${activeAgent.phase ? ` · Phase : ${activeAgent.phase}` : ""}`,
+      );
+      appendFact(
+        body,
+        "Dernier résumé",
+        summarizeAgentFailure(activeAgent.latest_history?.summary, "Aucun résumé récent."),
+      );
+      const latestOutcome = activeAgent.latest_history?.outcome;
+      const latestFinishedAt = activeAgent.latest_history?.finished_at;
+      if (latestOutcome || latestFinishedAt) {
+        appendFact(
+          body,
+          "Dernière exécution",
+          [latestOutcome, latestFinishedAt ? formatDate(latestFinishedAt) : ""].filter(Boolean).join(" · "),
+        );
+      }
+    }
   }
 
   const actions = actionDescriptors(entry, handlers);
@@ -360,14 +501,21 @@ export function renderItemDetail(entry, handlers = {}) {
       button.disabled = Boolean(action.disabled);
       button.addEventListener("click", async () => {
         if (button.disabled) return;
-        if (action.singleUse) button.disabled = true;
-        const completed = await action.run?.(button, actionRoot);
-        if (!action.singleUse) return;
-        if (completed === false) {
-          button.disabled = false;
+        const idleLabel = button.textContent;
+        button.disabled = true;
+        button.textContent = action.pendingLabel || "Traitement…";
+        let completed = false;
+        try {
+          completed = await action.run?.(button, actionRoot);
+        } catch {
+          completed = false;
+        }
+        if (action.singleUse && completed !== false) {
+          button.textContent = action.successLabel || "Action acceptée";
           return;
         }
-        button.textContent = action.successLabel || "Action acceptée";
+        button.disabled = Boolean(action.disabled);
+        button.textContent = idleLabel;
       });
       actionRoot.append(button);
     });

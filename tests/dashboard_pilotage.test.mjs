@@ -8,6 +8,7 @@ import {
   renderActionFeedback,
   renderActionList,
   renderItemDetail,
+  renderPilotage,
   summarizeAgentFailure,
 } from "../dashboard/pilotage.mjs";
 
@@ -134,12 +135,39 @@ test("action cards render the bounded agent failure context instead of raw JSON"
     },
   }]);
 
-  const [, context] = root.children[0].children;
+  const [context] = root.children[0].children
+    .filter((child) => child.className === "action-card-context");
   assert.equal(
     context.textContent,
     "Raison : Le smoke test a échoué · Prochaine action : Inspecter le premier écart",
   );
   assert.equal(context.textContent.includes("noisy_payload"), false);
+  globalThis.document = originalDocument;
+});
+
+test("action queue cards expose a localized action type", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: (tagName) => new Element(tagName),
+  };
+  const root = new Element();
+
+  renderActionList(root, [{
+    kind: "merge-request",
+    key: "merge-request:16",
+    label: "Fusionner",
+    resource: {
+      iid: 16,
+      title: "Corriger la prévisualisation",
+      source_branch: "fix/preview",
+      target_branch: "develop",
+    },
+  }]);
+
+  const [kind] = root.children[0].children
+    .filter((child) => child.className === "action-card-kind");
+  assert.equal(kind.textContent, "Merge request");
   globalThis.document = originalDocument;
 });
 
@@ -165,6 +193,92 @@ test("issue details present GitLab markdown as readable safe text", () => {
   );
   assert.equal(detail.body.children[0].textContent.includes("**"), false);
   assert.equal(detail.body.children[0].textContent.includes("`"), false);
+  globalThis.document = originalDocument;
+});
+
+test("workflow cards and details expose correlated delivery context", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: (tagName) => new Element(tagName),
+    createTextNode: (textContent) => ({textContent}),
+  };
+  const issueUrl = "https://gitlab.example/group/app/-/issues/42";
+  const mergeRequestUrl = "https://gitlab.example/group/app/-/merge_requests/7";
+  const workflowBoard = new Element();
+  let opened;
+  renderPilotage(
+    {workflowBoard},
+    {
+      work: {
+        groups: {
+          processing: [{
+            resource_type: "issue",
+            canonical_url: issueUrl,
+            web_url: issueUrl,
+            iid: 42,
+            lifecycle: "processing",
+            title: "Fiabiliser les paiements",
+            updated_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+            labels: ["pitcrew-agent", "type::bug", "priority::high"],
+            related_merge_requests: [mergeRequestUrl],
+            active_run: {skill: "implementer-run", state: "running"},
+            agent_action: {skill: "implementer-run", label: "Voir le détail"},
+          }],
+        },
+        merge_requests: [{
+          canonical_url: mergeRequestUrl,
+          iid: 7,
+          state: "opened",
+          source_branch: "fix/payments",
+          target_branch: "develop",
+          author_username: "jo",
+          pipeline_status: "passed",
+        }],
+      },
+      decisions: {
+        pending: {ticket_id: "42", ticket: {canonical_url: issueUrl}},
+      },
+      snapshot: {
+        agents: [{
+          skill: "implementer-run",
+          live_status: {phase: "validation"},
+          latest_history: {
+            outcome: "success",
+            finished_at: "2026-07-26T10:00:00Z",
+            summary: `Paiement vérifié ${"sans écart ".repeat(30)}`,
+          },
+        }],
+      },
+    },
+    {
+      filters: () => ({}),
+      openItem: (entry) => { opened = entry; },
+    },
+  );
+
+  const processingLane = workflowBoard.children
+    .find((lane) => lane.children[0]?.textContent === "En cours · 1");
+  const card = processingLane.children[1];
+  const cardText = card.children.map((child) => child.textContent).join(" | ");
+  assert.match(cardText, /Ticket · mis à jour il y a 2 h/);
+  assert.match(cardText, /type::bug · priority::high · Décision requise/);
+  assert.equal(cardText.includes("pitcrew-agent"), false);
+  assert.match(cardText, /implementer-run · validation/);
+  assert.match(cardText, /MR !7 · opened · pipeline passed/);
+
+  card.children.find((child) => child.tagName === "button").dispatchEvent(new Event("click"));
+  const detail = renderItemDetail(opened);
+  const flattenText = (node) => [
+    node.textContent || "",
+    ...(node.children || []).map(flattenText),
+  ].join("");
+  const detailText = flattenText(detail.body);
+  assert.match(detailText, /MR liée : !7 · fix\/payments → develop · Auteur : jo · Pipeline : passed/);
+  assert.match(detailText, /Agent courant : implementer-run · Phase : validation/);
+  assert.match(detailText, /Dernier résumé : Paiement vérifié/);
+  assert.match(detailText, /Dernière exécution : success · 26 juil. 2026/);
+  assert.equal(detailText.includes("sans écart ".repeat(30)), false);
   globalThis.document = originalDocument;
 });
 
@@ -219,6 +333,40 @@ test("ordinary detail actions remain repeatable", async () => {
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(calls, 2);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Approuver");
+  globalThis.document = originalDocument;
+});
+
+test("repeatable detail actions disable themselves and show a waiting label in flight", async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tagName) => new Element(tagName),
+    createTextNode: (textContent) => ({textContent}),
+  };
+  let calls = 0;
+  let finish;
+  const detail = renderItemDetail(
+    {kind: "decision", key: "decision:42", resource: {title: "Décision"}},
+    {forEntry: () => [{
+      label: "Approuver",
+      run: () => new Promise((resolve) => {
+        calls += 1;
+        finish = resolve;
+      }),
+    }]},
+  );
+  const [actions] = detail.body.children.filter((child) => child.className === "detail-actions");
+  const [button] = actions.children;
+
+  button.dispatchEvent(new Event("click"));
+  button.dispatchEvent(new Event("click"));
+  assert.equal(calls, 1);
+  assert.equal(button.disabled, true);
+  assert.equal(button.textContent, "Traitement…");
+
+  finish();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(button.disabled, false);
   assert.equal(button.textContent, "Approuver");
   globalThis.document = originalDocument;
