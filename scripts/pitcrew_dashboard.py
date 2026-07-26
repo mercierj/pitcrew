@@ -28,7 +28,11 @@ from scripts.pitcrew_proposals import ProposalError, ProposalStore
 from scripts.pitcrew_preprod_review import PreprodReviewError, ReportStore
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts.pitcrew_run_store import RunStore, RunStoreError
-from scripts.pitcrew_forge_work import GitLabForgeWork
+from scripts.pitcrew_forge_work import (
+    GitLabForgeWork,
+    canonical_issue_target,
+    ticket_agent_action,
+)
 try:
     from scripts.pitcrew_models import (
         PRICING_CURRENCY,
@@ -1004,9 +1008,63 @@ class DashboardService:
         self._forge_cached_at = self._now()
         return payload
 
+    def _forge_tracker_labels(self) -> dict[str, str]:
+        providers = self.config.get("providers")
+        if not isinstance(providers, dict):
+            raise DashboardError("configured forge work is invalid")
+        tracker = providers.get("tracker")
+        binding = self.config.get(tracker) if isinstance(tracker, str) else None
+        tracker_config = binding.get("tracker") if isinstance(binding, dict) else None
+        labels = tracker_config.get("labels") if isinstance(tracker_config, dict) else None
+        if not isinstance(labels, dict):
+            raise DashboardError("configured forge work is invalid")
+        return {key: value for key, value in labels.items() if isinstance(value, str)}
+
+    def _with_normalized_actions(self, payload: dict) -> dict:
+        groups = {
+            lifecycle: [dict(issue) for issue in issues]
+            for lifecycle, issues in payload.get("groups", {}).items()
+            if isinstance(issues, list)
+        }
+        result = {**payload, "groups": groups, "runs_degraded": False}
+        try:
+            schedule = self._schedule_entries(force_refresh=True)
+            enabled_skills = {entry["skill"] for entry in schedule if entry.get("enabled")}
+            globally_stopped = self._global_state(schedule) == "stopped"
+            active_by_target = {
+                run["target"]: run
+                for run in self.runs_snapshot()["runs"]
+                if run.get("state") in {"queued", "running"}
+                and isinstance(run.get("target"), str)
+            }
+        except DashboardError:
+            enabled_skills = set()
+            globally_stopped = True
+            active_by_target = {}
+            result["runs_degraded"] = True
+        labels = self._forge_tracker_labels()
+        for issues in groups.values():
+            for issue in issues:
+                try:
+                    canonical = canonical_issue_target(self.config, issue.get("canonical_url"))
+                except Exception:
+                    issue["agent_action"] = None
+                    continue
+                issue["canonical_url"] = canonical
+                active_run = active_by_target.get(canonical)
+                issue["active_run"] = active_run
+                issue["agent_action"] = ticket_agent_action(
+                    issue=issue,
+                    labels=labels,
+                    enabled_skills=enabled_skills,
+                    active_run=active_run,
+                    globally_stopped=globally_stopped,
+                )
+        return result
+
     def forge_work(self, force_refresh: bool = False) -> dict:
         if self._forge_cache_is_fresh(force_refresh):
-            return self._forge_cache
+            return self._with_normalized_actions(self._forge_cache)
         adapter = self.forge_work_factory(self.config, self.command_runner)
         try:
             collected = adapter.collect()
@@ -1014,7 +1072,7 @@ class DashboardService:
             raise DashboardError("configured forge work is unavailable") from error
         if not isinstance(collected, dict):
             raise DashboardError("configured forge work is invalid")
-        return self._cache_forge_work(collected)
+        return self._with_normalized_actions(self._cache_forge_work(collected))
 
     def gitlab_work(self, force_refresh: bool = False) -> dict:
         current = self._now()
@@ -1456,13 +1514,32 @@ class DashboardService:
 
     def launch_ticket_agent(self, skill: str, target: str) -> dict:
         with self._control_lock:
-            mapped_skills = {value[0] for value in TICKET_AGENT_ACTIONS.values()}
-            if skill not in mapped_skills:
-                raise DashboardError("skill is not available for ticket launch")
-            self._enabled_entry(skill)
-            if self._global_state() == "stopped":
-                raise DashboardError("global stop is active")
-            canonical, _ = self._validate_ticket_run(skill, target)
+            try:
+                canonical = canonical_issue_target(self.config, target)
+            except Exception as error:
+                raise DashboardError("invalid ticket target") from error
+            work = self.forge_work(force_refresh=True)
+            issue = next(
+                (
+                    issue
+                    for issues in work.get("groups", {}).values()
+                    if isinstance(issues, list)
+                    for issue in issues
+                    if isinstance(issue, dict) and issue.get("canonical_url") == canonical
+                ),
+                None,
+            )
+            action = issue.get("agent_action") if isinstance(issue, dict) else None
+            if (
+                not isinstance(action, dict)
+                or action.get("skill") != skill
+                or action.get("target") != canonical
+                or (
+                    not action.get("available")
+                    and action.get("run_state") not in {"queued", "running"}
+                )
+            ):
+                raise DashboardError("ticket is not eligible")
             if self.run_store is None or self.run_dispatcher is None:
                 raise DashboardError("ticket runs are unavailable") from self._run_store_error
             try:
@@ -1486,10 +1563,11 @@ class DashboardService:
             if current is None:
                 raise DashboardError("ticket run is unavailable")
             return {
+                "accepted": True,
                 "run_id": current["run_id"],
                 "state": current["state"],
-                "queue_position": current["queue_position"],
-                "created": run["created"],
+                "skill": skill,
+                "target": canonical,
             }
 
     def control(self, action: str, skill: str) -> dict:

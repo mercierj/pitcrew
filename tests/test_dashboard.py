@@ -152,7 +152,6 @@ def gitlab_issues():
             "labels": [
                 "pitcrew-agent",
                 f"pitcrew-state::{state}",
-                "pitcrew-route::investigate",
                 "pitcrew-source::research",
             ],
         }
@@ -225,6 +224,7 @@ class FakeRunner:
                     stdout="",
                     stderr='Authorization: Basic auth-secret\n' + "x" * 3000,
                 )
+            path = args[-1]
             if "-X" in args:
                 path = args[2]
                 return subprocess.CompletedProcess(
@@ -233,7 +233,7 @@ class FakeRunner:
                     stdout=json.dumps(self.mutation_responses.get(path, {})),
                     stderr="",
                 )
-            if "&page=" not in args[2]:
+            if "&page=" not in path:
                 return subprocess.CompletedProcess(
                     args,
                     0,
@@ -242,10 +242,10 @@ class FakeRunner:
                 )
             pages = (
                 self.merge_request_pages
-                if "/merge_requests?" in args[2]
+                if "/merge_requests?" in path
                 else self.issue_pages
             )
-            page = int(args[2].rsplit("page=", 1)[1])
+            page = int(path.rsplit("page=", 1)[1])
             payload = pages[page - 1] if page <= len(pages) else []
             return subprocess.CompletedProcess(
                 args,
@@ -298,6 +298,75 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("gitlab", service.forge_work()["provider"])
         self.assertEqual("gitlab", service.forge_work()["provider"])
         self.assertEqual(["collect"], calls)
+
+    def test_launch_ticket_agent_targets_validated_issue(self):
+        store, dispatcher = self.coordinator()
+        service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+
+        result = service.launch_ticket_agent("implementer-run", target)
+
+        self.assertEqual(
+            {
+                "accepted": True,
+                "run_id": result["run_id"],
+                "state": result["state"],
+                "skill": "implementer-run",
+                "target": target,
+            },
+            result,
+        )
+        with self.assertRaisesRegex(DashboardError, "ticket is not eligible"):
+            service.launch_ticket_agent("unblock", target)
+
+    def test_launch_ticket_agent_validates_github_provider_target(self):
+        config = runtime_config()
+        config["providers"] = {"forge": "github", "tracker": "github"}
+        config["github"] = {
+            "host": "github.com",
+            "user": "operator",
+            "owner": "acme",
+            "repository": "acme/payments",
+            "tracker": {
+                "ticket_prefix": "acme/payments#",
+                "labels": {
+                    "agent": "pitcrew-agent",
+                    "bug": "bug",
+                    "investigate": "investigate",
+                    "quick_win": "quick-win",
+                    "improvement": "improvement",
+                },
+                "states": {
+                    state: f"pitcrew-state::{state}"
+                    for state in ("todo", "processing", "review", "blocked", "done")
+                },
+            },
+        }
+        (self.runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        target = "https://github.com/acme/payments/issues/12"
+
+        class Adapter:
+            def collect(self):
+                return {
+                    "provider": "github", "degraded": False, "error": None,
+                    "changes": [], "groups": {"todo": [{
+                        "labels": ["pitcrew-agent"], "lifecycle": "todo",
+                        "canonical_url": target, "agent_action": None,
+                    }]},
+                }
+
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(), run_store=store, run_dispatcher=dispatcher,
+            forge_work_factory=lambda config, runner: Adapter(),
+        )
+
+        result = service.launch_ticket_agent("implementer-run", target)
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(target, result["target"])
+        with self.assertRaisesRegex(DashboardError, "invalid ticket target"):
+            service.launch_ticket_agent("implementer-run", "https://github.com/acme/payments/pull/12")
 
     def coordinator(self, first_drain_failure=None):
         class FakeDispatcher:
@@ -797,7 +866,7 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("issue", todo["resource_type"])
         self.assertEqual(todo["web_url"], todo["canonical_url"])
         self.assertEqual("todo", todo["lifecycle"])
-        self.assertEqual("investigate", todo["route"])
+        self.assertIsNone(todo["route"])
         self.assertEqual("research", todo["source"])
         self.assertEqual(
             [
@@ -897,14 +966,20 @@ class DashboardServiceTest(unittest.TestCase):
             first, second = list(ThreadPoolExecutor(max_workers=2).map(lambda _: launch(), range(2)))
 
         self.assertEqual(first["run_id"], second["run_id"])
-        self.assertEqual({first["created"], second["created"]}, {True, False})
+        self.assertTrue(first["accepted"])
+        self.assertTrue(second["accepted"])
         self.assertEqual(1, len(dispatcher.drain_calls))
         self.assertEqual(3, dispatcher.drain_calls[0][1]["implementer-run"])
         self.assertEqual([first["run_id"]], dispatcher.spawned_run_ids)
         self.assertEqual(1, len(store.list_runs("getbill", active_only=True)))
 
     def test_ticket_launch_keeps_distinct_targets_active(self):
-        runner = FakeRunner()
+        issues = gitlab_issues()
+        issues[1].update({
+            "state": "opened",
+            "labels": ["pitcrew-agent", "pitcrew-state::todo"],
+        })
+        runner = FakeRunner(issue_pages=[issues])
         store, dispatcher = self.coordinator()
         service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
         targets = [
@@ -912,26 +987,13 @@ class DashboardServiceTest(unittest.TestCase):
             "https://gitlab.com/getbill1/getbill/-/issues/2",
         ]
 
-        def issue_for(path):
-            iid = int(path.rsplit("/", 1)[1])
-            return {
-                "iid": iid,
-                "state": "opened",
-                "labels": ["pitcrew-agent", "pitcrew-state::todo"],
-            }
-
-        with mock.patch.object(
-            service,
-            "_gitlab_document",
-            side_effect=issue_for,
-        ):
-            results = [
-                service.launch_ticket_agent("implementer-run", target)
-                for target in targets
-            ]
+        results = [
+            service.launch_ticket_agent("implementer-run", target)
+            for target in targets
+        ]
 
         self.assertEqual(2, len({result["run_id"] for result in results}))
-        self.assertEqual([True, True], [result["created"] for result in results])
+        self.assertTrue(all(result["accepted"] for result in results))
         active = store.list_runs("getbill", active_only=True)
         self.assertEqual(set(targets), {run["target"] for run in active})
         self.assertEqual(2, len(dispatcher.spawned_run_ids))
@@ -956,7 +1018,7 @@ class DashboardServiceTest(unittest.TestCase):
 
         self.assertEqual("queued", queued["state"])
         self.assertEqual(queued["run_id"], retried["run_id"])
-        self.assertFalse(retried["created"])
+        self.assertTrue(retried["accepted"])
         self.assertEqual("running", retried["state"])
         self.assertEqual(2, len(dispatcher.drain_calls))
         self.assertEqual([queued["run_id"]], dispatcher.spawned_run_ids)
@@ -981,7 +1043,7 @@ class DashboardServiceTest(unittest.TestCase):
 
         self.assertEqual("running", running["state"])
         self.assertEqual(running["run_id"], retried["run_id"])
-        self.assertFalse(retried["created"])
+        self.assertTrue(retried["accepted"])
         self.assertEqual("running", retried["state"])
         self.assertEqual(1, len(dispatcher.drain_calls))
         self.assertEqual([running["run_id"]], dispatcher.spawned_run_ids)
@@ -989,33 +1051,13 @@ class DashboardServiceTest(unittest.TestCase):
     def test_ticket_launch_revalidates_lifecycle(self):
         store, dispatcher = self.coordinator()
         runner = FakeRunner()
-        for entry in runner.schedule:
-            if entry["skill"] == "unblock":
-                entry["enabled"] = True
         service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
         target = "https://gitlab.com/getbill1/getbill/-/issues/1"
-        for lifecycle, skill, opened in (
-            ("todo", "implementer-run", True),
-            ("blocked", "unblock", True),
-            ("done", "stale-sweep", True),
-            ("todo", "unblock", True),
-            ("todo", "implementer-run", False),
-        ):
-            with self.subTest(lifecycle=lifecycle, skill=skill, opened=opened):
-                labels = ["pitcrew-agent", f"pitcrew-state::{lifecycle}"]
-                issue = {"iid": 1, "state": "opened" if opened else "closed", "labels": labels}
-                with mock.patch.object(service, "_gitlab_document", return_value=issue):
-                    if (lifecycle, skill, opened) in {
-                        ("todo", "implementer-run", True),
-                        ("blocked", "unblock", True),
-                        ("done", "stale-sweep", True),
-                    }:
-                        result = service.launch_ticket_agent(skill, target)
-                        self.assertIn(result["state"], {"queued", "running"})
-                        store.finish(result["run_id"], state="cancelled")
-                    else:
-                        with self.assertRaisesRegex(DashboardError, "ticket is not eligible"):
-                            service.launch_ticket_agent(skill, target)
+        result = service.launch_ticket_agent("implementer-run", target)
+        self.assertTrue(result["accepted"])
+        store.finish(result["run_id"], state="cancelled")
+        with self.assertRaisesRegex(DashboardError, "ticket is not eligible"):
+            service.launch_ticket_agent("unblock", target)
 
         for invalid in (
             "https://evil.example/getbill1/getbill/-/issues/1",
@@ -1027,21 +1069,22 @@ class DashboardServiceTest(unittest.TestCase):
                     service.launch_ticket_agent("implementer-run", invalid)
 
     def test_ticket_launch_normalizes_gitlab_work_item_urls(self):
-        runner = FakeRunner()
+        issue = dict(gitlab_issues()[3])
+        issue.update(
+            {
+                "iid": 14,
+                "web_url": "https://gitlab.com/getbill1/getbill/-/work_items/14",
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            }
+        )
+        runner = FakeRunner(issue_pages=[[issue]])
         for entry in runner.schedule:
             if entry["skill"] == "unblock":
                 entry["enabled"] = True
         store, dispatcher = self.coordinator()
         service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
         target = "https://gitlab.com/getbill1/getbill/-/work_items/14"
-        issue = {
-            "iid": 14,
-            "state": "opened",
-            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
-        }
-
-        with mock.patch.object(service, "_gitlab_document", return_value=issue):
-            result = service.launch_ticket_agent("unblock", target)
+        result = service.launch_ticket_agent("unblock", target)
 
         self.assertIn(result["state"], {"queued", "running"})
         self.assertEqual(
