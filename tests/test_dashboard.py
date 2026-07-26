@@ -397,7 +397,9 @@ class DashboardServiceTest(unittest.TestCase):
         )
 
     def write_pending_decision(self):
-        (self.runtime / "unblock-state.json").write_text(
+        state_dir = self.runtime / "state"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "unblock-state.json").write_text(
             json.dumps(
                 {
                     "asked": {},
@@ -546,7 +548,7 @@ class DashboardServiceTest(unittest.TestCase):
             decision = service.decisions()
 
         self.assertIsNone(decision["pending"])
-        state = json.loads((self.runtime / "unblock-state.json").read_text())
+        state = json.loads((self.runtime / "state" / "unblock-state.json").read_text())
         self.assertIsNone(state["pending_question"])
 
     def test_proposals_are_listed_and_rejection_is_persisted(self):
@@ -608,9 +610,10 @@ class DashboardServiceTest(unittest.TestCase):
             )
 
         self.assertEqual({"accepted": True, "pid": 2468}, result)
-        pending = json.loads((self.runtime / "unblock-state.json").read_text())[
-            "pending_question"
-        ]
+        stored_state = json.loads(
+            (self.runtime / "state" / "unblock-state.json").read_text()
+        )
+        pending = stored_state["pending_question"]
         self.assertEqual("answered", pending["status"])
         self.assertEqual("Ship it", pending["answer"])
         self.assertEqual("Approved from dashboard", pending["notes"])
@@ -1360,6 +1363,24 @@ class DashboardServiceTest(unittest.TestCase):
             runner.calls[1][0][2],
         )
 
+    def test_gitlab_work_exposes_merge_conflict_status(self):
+        conflicted = dict(gitlab_merge_requests()[0])
+        conflicted.update(
+            {
+                "iid": 20,
+                "detailed_merge_status": "conflict",
+                "has_conflicts": True,
+            }
+        )
+        runner = FakeRunner(merge_request_pages=[[conflicted]])
+
+        merge_request = self.service(runner).gitlab_work(force_refresh=True)[
+            "merge_requests"
+        ][0]
+
+        self.assertEqual("conflict", merge_request["detailed_merge_status"])
+        self.assertTrue(merge_request["has_conflicts"])
+
     def test_merge_merge_request_merges_then_deletes_source_branch(self):
         service = self.service(FakeRunner())
         with mock.patch.object(
@@ -1986,6 +2007,15 @@ class FakeDashboardService:
         self.calls.append(("runs_snapshot",))
         return {"project": "getbill", "runs": [], "capacity": {}, "has_active": False}
 
+    def reconcile_merged_ticket_candidates(self):
+        self.calls.append(("reconcile_merged_ticket_candidates",))
+        return {
+            "runs": [],
+            "deferred": [],
+            "rejected": [],
+            "drained": False,
+        }
+
     def control(self, action, skill):
         self.calls.append(("control", action, skill))
         if action not in {"trigger", "stop", "restart"}:
@@ -2039,6 +2069,10 @@ class FakeDashboardService:
         if skill not in {"implementer-run", "unblock", "stale-sweep"}:
             raise DashboardError("action rejected")
         return {"run_id": "run-1", "state": "queued", "queue_position": 1, "created": True}
+
+    def reconcile_merged_ticket_candidates(self):
+        self.calls.append(("reconcile_merged_ticket_candidates",))
+        return {"runs": [], "deferred": [], "rejected": [], "drained": False}
 
 
 class DashboardEntryPointTest(unittest.TestCase):
@@ -2323,6 +2357,100 @@ class DashboardHttpTest(unittest.TestCase):
         with mock.patch.object(self.service, "launch_ticket_agent", side_effect=RuntimeError("down")):
             status, _, _ = self.request("POST", "/api/ticket-runs", rejected.replace(b"unknown", b"implementer-run"), headers)
         self.assertEqual(500, status)
+
+    def test_reconciliations_api_requires_session_origin_and_exact_empty_object(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Pitcrew-Session": self.token,
+        }
+        status, _, _ = self.request(
+            "POST",
+            "/api/reconciliations",
+            b"{}",
+            {"Content-Type": "application/json"},
+        )
+        self.assertEqual(403, status)
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/reconciliations",
+            b"{}",
+            {**headers, "Origin": "http://invalid.local"},
+        )
+        self.assertEqual(403, status)
+
+        status, _, _ = self.request(
+            "POST",
+            "/api/reconciliations?refresh=1",
+            b"{}",
+            headers,
+        )
+        self.assertEqual(404, status)
+
+        for invalid in (b'{"extra": true}', b"[]"):
+            with self.subTest(invalid=invalid):
+                status, _, _ = self.request(
+                    "POST",
+                    "/api/reconciliations",
+                    invalid,
+                    headers,
+                )
+                self.assertEqual(400, status)
+
+        self.assertEqual([], self.service.calls)
+        status, _, payload = self.request(
+            "POST",
+            "/api/reconciliations",
+            b"{}",
+            headers,
+        )
+        self.assertEqual(202, status)
+        self.assertEqual(
+            {
+                "runs": [],
+                "deferred": [],
+                "rejected": [],
+                "drained": False,
+            },
+            json.loads(payload),
+        )
+        self.assertEqual(
+            [("reconcile_merged_ticket_candidates",)],
+            self.service.calls,
+        )
+
+    def test_reconciliations_api_maps_rejected_and_unavailable_service_safely(self):
+        headers = {
+            "Content-Type": "application/json",
+            "X-Pitcrew-Session": self.token,
+        }
+        with mock.patch.object(
+            self.service,
+            "reconcile_merged_ticket_candidates",
+            side_effect=DashboardError("provider details"),
+        ):
+            status, _, payload = self.request(
+                "POST",
+                "/api/reconciliations",
+                b"{}",
+                headers,
+            )
+        self.assertEqual(403, status)
+        self.assertEqual({"error": "action rejected"}, json.loads(payload))
+
+        with mock.patch.object(
+            self.service,
+            "reconcile_merged_ticket_candidates",
+            side_effect=RuntimeError("provider details"),
+        ):
+            status, _, payload = self.request(
+                "POST",
+                "/api/reconciliations",
+                b"{}",
+                headers,
+            )
+        self.assertEqual(500, status)
+        self.assertEqual({"error": "service unavailable"}, json.loads(payload))
 
     def test_runs_api_returns_durable_snapshot(self):
         status, _, _ = self.request("GET", "/api/runs")
@@ -2787,6 +2915,10 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.assertIn(action, agents)
         self.assertNotIn("innerHTML", agents)
 
+    def test_merge_request_conflicts_are_not_offered_for_manual_merge(self):
+        self.assertIn("Conflit : reprise par l’agent", self.javascript)
+        self.assertIn("has_conflicts", self.javascript)
+
     def test_pilotage_modules_and_application_wiring_contract(self):
         self.assertIn("pilotage.mjs", self.modules)
         self.assertIn("detail-panel.mjs", self.modules)
@@ -2834,6 +2966,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             'action: "decide-proposal"',
             'action: "merge-merge-request"',
             'api.post("/api/ticket-runs", {skill, target})',
+            'api.post("/api/reconciliations", {})',
         ):
             self.assertIn(token, self.javascript)
 
@@ -2970,7 +3103,19 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("const becameTerminal = hadActiveRuns && !latestRuns.has_active;", self.javascript)
         self.assertIn("if (becameTerminal) lastGitLabRefresh = 0;", self.javascript)
         self.assertIn('manual || force ? "/api/gitlab?refresh=1"', self.javascript)
-        self.assertIn("if (!state.error) lastGitLabRefresh = now;", self.javascript)
+        self.assertIn("lastGitLabRefresh = now;", self.javascript)
+        gitlab_refresh = self.javascript[
+            self.javascript.index("async function refreshGitLab"):
+            self.javascript.index("function sourceStatus")
+        ]
+        self.assertIn(
+            'await api.post("/api/reconciliations", {});',
+            gitlab_refresh,
+        )
+        self.assertLess(
+            gitlab_refresh.index('await api.post("/api/reconciliations", {});'),
+            gitlab_refresh.index("lastGitLabRefresh = now;"),
+        )
         self.assertIn("let detailTicketView = null;", self.javascript)
         self.assertIn("function syncDetailTicketAction()", self.javascript)
         self.assertIn("detailTicketView = {actions, button, issue: resource, target};", self.javascript)

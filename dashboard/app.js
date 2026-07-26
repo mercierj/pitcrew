@@ -5,6 +5,7 @@ import {
   renderActionList,
   renderItemDetail,
   renderPilotage,
+  captureOpenDetails,
 } from "./pilotage.mjs";
 import {createApi} from "./api.mjs";
 import {
@@ -103,6 +104,16 @@ const detailController = createDetailPanel(
   elements.detailTitle,
   elements.detailContent,
   elements.detailClose,
+  {
+    onOpen() {
+      window.clearTimeout(refreshTimer);
+      setText(elements.refreshState, "Actualisation automatique en pause · modale ouverte");
+    },
+    onClose() {
+      setText(elements.refreshState, "Actualisation automatique reprise");
+      scheduleRefresh();
+    },
+  },
 );
 let currentActionQueue = [];
 let lastRoleWork = null;
@@ -615,9 +626,11 @@ function safeExternalLink(value, label) {
 function renderDecision(payload) {
   const pending = payload?.pending;
   if (!elements.decisionBanner || !elements.decisionContent) return;
+  const restoreOpenDetails = captureOpenDetails(elements.decisionContent);
   elements.decisionContent.replaceChildren();
   if (!pending || typeof pending !== "object") {
     elements.decisionBanner.hidden = true;
+    restoreOpenDetails();
     return;
   }
   elements.decisionBanner.hidden = true;
@@ -633,6 +646,7 @@ function renderDecision(payload) {
   elements.decisionContent.append(question);
   const context = document.createElement("details");
   context.className = "decision-context";
+  context.setAttribute("data-detail-key", `decision:${pending.ticket_id || "pending"}`);
   context.open = true;
   const summary = document.createElement("summary");
   summary.textContent = "Contexte et findings";
@@ -666,10 +680,12 @@ function renderDecision(payload) {
   });
   elements.decisionContent.append(choices);
   appendActionState(elements.decisionContent, `decision:${pending.ticket_id}`);
+  restoreOpenDetails();
 }
 
 function renderProposals(payload) {
   if (!elements.proposalList) return;
+  const restoreOpenDetails = captureOpenDetails(elements.proposalList);
   elements.proposalList.replaceChildren();
   const proposals = Array.isArray(payload?.proposals) ? payload.proposals : [];
   setText(elements.proposalState, proposals.length ? `${proposals.length} en attente` : "Aucune proposition en attente");
@@ -678,6 +694,7 @@ function renderProposals(payload) {
     empty.className = "empty-state";
     empty.textContent = "Aucune proposition ne nécessite une décision.";
     elements.proposalList.append(empty);
+    restoreOpenDetails();
     return;
   }
   proposals.forEach((proposal) => {
@@ -694,6 +711,7 @@ function renderProposals(payload) {
     summary.textContent = proposal.summary || "";
     card.append(summary);
     const details = document.createElement("details");
+    details.setAttribute("data-detail-key", `proposal:${proposal.id || proposal.title || "unknown"}`);
     const label = document.createElement("summary");
     label.textContent = "Voir les preuves et la recommandation";
     details.append(label);
@@ -721,6 +739,7 @@ function renderProposals(payload) {
     appendActionState(card, `proposal:${proposal.id}`);
     elements.proposalList.append(card);
   });
+  restoreOpenDetails();
 }
 
 async function decideProposal(proposal, decision) {
@@ -1018,13 +1037,20 @@ function renderMergeRequests(work) {
 
     const actions = document.createElement("div");
     actions.className = "merge-request-actions";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "button button-danger";
-    button.textContent = "Fusionner et supprimer la branche";
-    button.disabled = mergeSubmitting;
-    button.addEventListener("click", () => mergeMergeRequest(mergeRequest, work));
-    actions.append(button);
+    if (mergeRequest.has_conflicts === true || mergeRequest.detailed_merge_status === "conflict") {
+      const conflict = document.createElement("p");
+      conflict.className = "merge-request-meta";
+      conflict.textContent = "Conflit : reprise par l’agent";
+      actions.append(conflict);
+    } else {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button button-danger";
+      button.textContent = "Fusionner et supprimer la branche";
+      button.disabled = mergeSubmitting;
+      button.addEventListener("click", () => mergeMergeRequest(mergeRequest, work));
+      actions.append(button);
+    }
     appendActionState(actions, `merge_request:${mergeRequest.canonical_url || mergeRequest.web_url || mergeRequest.iid}`);
     card.append(actions);
     elements.mergeRequestList.append(card);
@@ -1481,6 +1507,9 @@ async function refreshGitLab({manual = false, force = false} = {}) {
     latestGitLabWork = state.data;
     renderGitLab(state.data, latestRuns);
   }
+  if (!state.error) {
+    await api.post("/api/reconciliations", {});
+  }
   if (!state.error) lastGitLabRefresh = now;
   renderPilotageView();
   renderSourceStates();
@@ -1608,10 +1637,16 @@ elements.historyFilters.addEventListener("submit", (event) => {
 
 function scheduleRefresh() {
   window.clearTimeout(refreshTimer);
+  if (elements.detailPanel?.open) {
+    refreshTimer = null;
+    return;
+  }
   const delay = latestRuns.has_active ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
   refreshTimer = window.setTimeout(async () => {
     await refresh();
-    scheduleRefresh();
+    if (!elements.detailPanel?.open) {
+      scheduleRefresh();
+    }
   }, delay);
 }
 

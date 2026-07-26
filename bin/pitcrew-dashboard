@@ -206,10 +206,14 @@ def create_server(
                 return
             parsed = urlsplit(self.path)
             path = parsed.path
-            if path not in {"/api/actions", "/api/ticket-runs"}:
+            if path not in {
+                "/api/actions",
+                "/api/reconciliations",
+                "/api/ticket-runs",
+            }:
                 self._send_json(404, {"error": "not found"})
                 return
-            if path == "/api/ticket-runs" and parsed.query:
+            if path in {"/api/reconciliations", "/api/ticket-runs"} and parsed.query:
                 self._send_json(404, {"error": "not found"})
                 return
             supplied_token = self.headers.get("X-Pitcrew-Session")
@@ -245,6 +249,20 @@ def create_server(
                 return
             if not isinstance(request, dict):
                 self._send_json(400, {"error": "invalid request"})
+                return
+            if path == "/api/reconciliations":
+                if request:
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.reconcile_merged_ticket_candidates()
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
                 return
             if path == "/api/ticket-runs":
                 if (
