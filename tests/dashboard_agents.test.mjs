@@ -99,6 +99,24 @@ test("renderAgents shows an empty state when no agent is enabled", () => {
   assert.equal(normalizedText(root), "Aucun agent activé n’est disponible.");
 });
 
+test("renderAgents presents non-scheduled roles as on-demand", () => {
+  const root = element();
+  const onDemandRoot = element();
+
+  renderAgents(root, onDemandRoot, element(), {
+    agents: [],
+    disabled_roles: [{
+      skill: "qa-run",
+      reason: "qa.test_flow_repo is not configured",
+    }],
+  }, handlers);
+
+  assert.match(
+    normalizedText(onDemandRoot),
+    /qa-run · À la demande · Prérequis : qa\.test_flow_repo is not configured/u,
+  );
+});
+
 test("renderAgents preserves health, summaries, detailed usage, and disabled models", () => {
   const root = element();
   const disabledRoot = element();
@@ -154,7 +172,7 @@ test("renderAgents preserves health, summaries, detailed usage, and disabled mod
   assert.equal(disabledCount.textContent, "1");
   assert.match(
     normalizedText(disabledRoot),
-    /security-run · Dépôt non configuré · Modèle résolu : gpt-5\.6-sol/u,
+    /security-run · À la demande · Prérequis : Dépôt non configuré · Modèle résolu : gpt-5\.6-sol/u,
   );
 });
 

@@ -7,12 +7,23 @@ import {
   preserveFocus,
   captureOpenDetails,
   enrichWorkflowEntry,
+  describeFailedAgents,
   renderActionFeedback,
   renderActionList,
   renderItemDetail,
   renderPilotage,
   summarizeAgentFailure,
 } from "../dashboard/pilotage.mjs";
+
+test("failed agent summary names the affected agent", () => {
+  assert.equal(
+    describeFailedAgents([
+      {skill: "research-run", health: "failed"},
+      {skill: "security-run", health: "healthy"},
+    ]),
+    "research-run nécessite une intervention.",
+  );
+});
 
 test("durable local run overrides the cached GitLab run in workflow cards", () => {
   const target = "https://gitlab.example/group/app/-/issues/42";

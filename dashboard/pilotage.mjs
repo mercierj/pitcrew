@@ -18,6 +18,16 @@ const ACTION_KIND_LABELS = {
 const asArray = (value) => Array.isArray(value) ? value : [];
 const ACTION_CONTEXT_LIMIT = 180;
 
+export function describeFailedAgents(agents) {
+  const skills = asArray(agents)
+    .filter((agent) => agent?.health === "failed")
+    .map((agent) => typeof agent.skill === "string" ? agent.skill.trim() : "")
+    .filter(Boolean);
+  if (skills.length === 1) return `${skills[0]} nécessite une intervention.`;
+  if (skills.length > 1) return `${skills.join(", ")} nécessitent une intervention.`;
+  return "Un agent nécessite une intervention.";
+}
+
 const normalizeContextText = (value) => (
   typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
 );
@@ -285,11 +295,13 @@ const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {
 export function renderCrewHealth(root, snapshot = {}) {
   if (!root) return;
   const agents = asArray(snapshot?.agents);
+  const onDemand = asArray(snapshot?.disabled_roles);
   const values = [
     ["Sains", agents.filter((agent) => agent?.health === "healthy").length],
     ["Alertes", agents.filter((agent) => agent?.health === "warning").length],
     ["Échecs", agents.filter((agent) => agent?.health === "failed").length],
     ["En cours", agents.filter((agent) => agent?.running).length],
+    ["À la demande", onDemand.length],
   ];
   const list = document.createElement("dl");
   values.forEach(([label, value]) => {

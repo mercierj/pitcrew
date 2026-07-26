@@ -706,7 +706,6 @@ class DashboardService:
             for entry in schedule
             if isinstance(entry, dict)
         }
-        configured_agents = self.config.get("agents")
         event_entries = [
             {
                 "skill": skill,
@@ -719,9 +718,7 @@ class DashboardService:
                 "pid": None,
             }
             for skill in sorted(EVENT_DRIVEN_ROLES)
-            if isinstance(configured_agents, dict)
-            and skill in configured_agents
-            and skill not in scheduled_skills
+            if skill not in scheduled_skills
         ]
         records = self.history(None, None)
         latest_by_skill: dict[str, dict] = {}

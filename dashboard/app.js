@@ -7,6 +7,7 @@ import {
   renderItemDetail,
   renderPilotage,
   captureOpenDetails,
+  describeFailedAgents,
 } from "./pilotage.mjs";
 import {createApi} from "./api.mjs";
 import {
@@ -530,7 +531,7 @@ function renderOverview(snapshot) {
     setText(elements.globalBanner, "Exécutions bloquées : aucun nouvel agent ne sera lancé.");
   } else if (values.failed > 0) {
     elements.globalBanner.classList.add("banner-error");
-    setText(elements.globalBanner, `${values.failed} agent(s) nécessitent une intervention.`);
+    setText(elements.globalBanner, describeFailedAgents(agents));
   } else if (values.warning > 0) {
     elements.globalBanner.classList.add("banner-warning");
     setText(elements.globalBanner, `${values.warning} agent(s) signalent un point d’attention.`);
