@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import json
+import re
+import subprocess
 from urllib.parse import urlsplit
 
 
@@ -13,6 +16,169 @@ CHANGE_KINDS = {"pull_request", "merge_request"}
 
 class ForgeWorkError(ValueError):
     pass
+
+
+def _label_value(labels: object, prefix: str) -> str | None:
+    if not isinstance(labels, list):
+        return None
+    values = [
+        label.removeprefix(prefix)
+        for label in labels
+        if isinstance(label, str) and label.startswith(prefix)
+    ]
+    return values[0] if len(values) == 1 and values[0] else None
+
+
+class GitLabForgeWork:
+    """Read and normalize GitLab issues and merge requests without mutations."""
+
+    def __init__(
+        self,
+        config: Mapping[str, object],
+        command_runner: Callable,
+    ):
+        self.config = config
+        self.command_runner = command_runner
+        gitlab = config.get("gitlab")
+        if not isinstance(gitlab, Mapping):
+            raise ForgeWorkError("gitlab configuration is required")
+        self.host = _string_field(gitlab.get("host"), "gitlab.host")
+        self.project_id = _number(gitlab.get("project_id"))
+        self.project_path = _string_field(
+            gitlab.get("project_path"), "gitlab.project_path"
+        )
+
+    def _empty(self, error: str) -> dict:
+        return {
+            "provider": "gitlab",
+            "degraded": True,
+            "error": error,
+            "groups": {state: [] for state in LIFECYCLES},
+            "changes": [],
+        }
+
+    def _page(self, path: str) -> list[Mapping[str, object]]:
+        args = ["glab", "api", "--hostname", self.host, path]
+        try:
+            result = self.command_runner(
+                args, text=True, capture_output=True, check=False
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ForgeWorkError("GitLab command is unavailable") from error
+        if result.returncode:
+            raise ForgeWorkError("GitLab request failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ForgeWorkError("GitLab returned invalid JSON") from error
+        if not isinstance(payload, list) or not all(
+            isinstance(item, Mapping) for item in payload
+        ):
+            raise ForgeWorkError("GitLab returned invalid JSON")
+        return payload
+
+    def _collection(self, resource: str) -> list[Mapping[str, object]]:
+        result: list[Mapping[str, object]] = []
+        for page in range(1, 101):
+            batch = self._page(
+                f"projects/{self.project_id}/{resource}?scope=all&per_page=100&page={page}"
+            )
+            result.extend(batch)
+            if len(batch) < 100:
+                return result
+        raise ForgeWorkError("GitLab pagination limit exceeded")
+
+    def _related_urls(
+        self, issue: Mapping[str, object], changes: Sequence[dict]
+    ) -> list[str]:
+        text = " ".join(
+            str(issue.get(key, "")) for key in ("description", "web_url", "references")
+        )
+        issue_number = issue.get("iid")
+        allowed = {change["canonical_url"] for change in changes}
+        related = {
+            url
+            for url in re.findall(r"https://[^\s<>'\"]+/-/merge_requests/\d+", text)
+            if url in allowed
+        }
+        for change in changes:
+            if f"!{change['number']}" in text:
+                related.add(change["canonical_url"])
+            if isinstance(issue_number, int) and f"#{issue_number}" in str(change.get("_text", "")):
+                related.add(change["canonical_url"])
+        return sorted(related)
+
+    def _change(self, raw: Mapping[str, object]) -> dict:
+        author = raw.get("author")
+        pipeline = raw.get("head_pipeline")
+        pipeline_status = pipeline.get("status") if isinstance(pipeline, Mapping) else ""
+        checks_status = {
+            "success": "passing",
+            "failed": "failing",
+            "running": "pending",
+            "pending": "pending",
+        }.get(pipeline_status, "unknown")
+        change = normalize_change(
+            provider="gitlab",
+            kind="merge_request",
+            number=_number(raw.get("iid")),
+            title=str(raw.get("title", "")),
+            canonical_url=_https_url(raw.get("web_url"), "canonical_url"),
+            state="open" if raw.get("state") == "opened" else str(raw.get("state", "")),
+            source_branch=str(raw.get("source_branch", "")),
+            target_branch=str(raw.get("target_branch", "")),
+            author=str(author.get("username", "")) if isinstance(author, Mapping) else "",
+            checks_status=str(checks_status),
+            head_sha=str(raw.get("sha", raw.get("diff_refs", ""))),
+        )
+        change["_text"] = " ".join(
+            str(raw.get(key, "")) for key in ("description", "web_url", "references")
+        )
+        return change
+
+    def collect(self) -> dict:
+        try:
+            raw_changes = self._collection("merge_requests")
+            changes = [self._change(change) for change in raw_changes]
+            raw_issues = self._collection("issues")
+            groups = {state: [] for state in LIFECYCLES}
+            for raw in raw_issues:
+                labels = raw.get("labels")
+                lifecycle = _label_value(labels, "pitcrew-state::")
+                if lifecycle not in groups:
+                    continue
+                issue = normalize_issue(
+                    provider="gitlab",
+                    number=_number(raw.get("iid")),
+                    title=str(raw.get("title", "")),
+                    body=str(raw.get("description", "")),
+                    labels=labels if isinstance(labels, list) else [],
+                    state="open" if raw.get("state") == "opened" else "closed",
+                    canonical_url=_https_url(raw.get("web_url"), "canonical_url"),
+                    lifecycle=lifecycle,
+                    route=_label_value(labels, "pitcrew-route::"),
+                    source=_label_value(labels, "pitcrew-source::"),
+                    related_change_urls=self._related_urls(raw, changes),
+                    bugfix=None,
+                )
+                groups[lifecycle].append(issue)
+            for change in changes:
+                change.pop("_text", None)
+            return {
+                "provider": "gitlab",
+                "degraded": False,
+                "error": None,
+                "groups": groups,
+                "changes": changes,
+            }
+        except ForgeWorkError as error:
+            return self._empty(str(error))
+
+
+def _string_field(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ForgeWorkError(f"{field} must be a non-empty string")
+    return value
 
 
 def _https_url(value: object, field: str) -> str:

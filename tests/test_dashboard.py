@@ -275,7 +275,7 @@ class DashboardServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def service(self, runner, now=None, run_store=None, run_dispatcher=None):
+    def service(self, runner, now=None, run_store=None, run_dispatcher=None, forge_work_factory=None):
         return DashboardService(
             project="getbill",
             runtime_dir=self.runtime,
@@ -283,7 +283,21 @@ class DashboardServiceTest(unittest.TestCase):
             now=now or (lambda: FIXED_NOW),
             run_store=run_store,
             run_dispatcher=run_dispatcher,
+            forge_work_factory=forge_work_factory,
         )
+
+    def test_forge_work_delegates_to_injected_adapter_and_caches(self):
+        calls = []
+
+        class Adapter:
+            def collect(self):
+                calls.append("collect")
+                return {"provider": "gitlab", "degraded": False, "groups": {}, "changes": []}
+
+        service = self.service(FakeRunner(), forge_work_factory=lambda config, runner: Adapter())
+        self.assertEqual("gitlab", service.forge_work()["provider"])
+        self.assertEqual("gitlab", service.forge_work()["provider"])
+        self.assertEqual(["collect"], calls)
 
     def coordinator(self, first_drain_failure=None):
         class FakeDispatcher:
@@ -3015,6 +3029,12 @@ class DashboardAssetContractTest(unittest.TestCase):
             for path in self.dashboard.glob("*.mjs")
         }
 
+    def test_all_dashboard_modules_are_served(self):
+        self.assertEqual(
+            {path.name for path in self.dashboard.glob("*.mjs")},
+            {asset for asset, _ in SERVER.ASSET_ROUTES.values() if asset.endswith(".mjs")},
+        )
+
     def test_agents_are_compact_and_details_are_progressively_disclosed(self):
         agents = self.modules["agents.mjs"]
         self.assertIn('className = "agent-row"', agents)
@@ -3592,11 +3612,11 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
 
     def test_model_change_waits_for_an_inflight_refresh_before_a_fresh_status_fetch(self):
+        self.assertIn('import {refreshAfterPending} from "./refresh.mjs";', self.javascript)
         self.assertRegex(
             self.javascript,
             r"async function refreshFresh\([^)]*\)\s*{\s*"
-            r"if \(refreshPromise\) \{\s*await refreshPromise;\s*}\s*"
-            r"return refresh\(",
+            r"return refreshAfterPending\(refreshPromise, refresh",
         )
 
     def test_usage_and_model_styles_are_compact_and_responsive(self):

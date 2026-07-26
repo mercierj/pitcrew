@@ -28,6 +28,7 @@ from scripts.pitcrew_proposals import ProposalError, ProposalStore
 from scripts.pitcrew_preprod_review import PreprodReviewError, ReportStore
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts.pitcrew_run_store import RunStore, RunStoreError
+from scripts.pitcrew_forge_work import GitLabForgeWork
 try:
     from scripts.pitcrew_models import (
         PRICING_CURRENCY,
@@ -70,6 +71,13 @@ STATE_LABEL_PREFIX = "pitcrew-state::"
 
 class DashboardError(RuntimeError):
     pass
+
+
+def _forge_work_adapter(config: dict, command_runner: Callable):
+    providers = config.get("providers")
+    if not isinstance(providers, dict) or providers.get("forge") != "gitlab":
+        raise DashboardError("configured forge work adapter is unavailable")
+    return GitLabForgeWork(config, command_runner)
 
 
 def _timestamp(value: str) -> datetime:
@@ -150,6 +158,7 @@ class DashboardService:
         *,
         run_store: RunStore | None = None,
         run_dispatcher: RunDispatcher | None = None,
+        forge_work_factory: Callable | None = None,
     ):
         self.project = project
         self.runtime_dir = Path(runtime_dir)
@@ -177,6 +186,9 @@ class DashboardService:
             raise DashboardError("invalid preprod review configuration") from error
         self._gitlab_cache: dict | None = None
         self._gitlab_cached_at: datetime | None = None
+        self._forge_cache: dict | None = None
+        self._forge_cached_at: datetime | None = None
+        self.forge_work_factory = forge_work_factory or _forge_work_adapter
         self._last_successful_refresh: str | None = None
         self._schedule_cache: list[dict] | None = None
         self._control_lock = threading.RLock()
@@ -978,6 +990,31 @@ class DashboardService:
             if len(batch) < 100:
                 return collected
         raise DashboardError("GitLab pagination limit exceeded")
+
+    def _forge_cache_is_fresh(self, force_refresh: bool) -> bool:
+        return bool(
+            not force_refresh
+            and self._forge_cache is not None
+            and self._forge_cached_at is not None
+            and self._now() - self._forge_cached_at < timedelta(seconds=60)
+        )
+
+    def _cache_forge_work(self, payload: dict) -> dict:
+        self._forge_cache = payload
+        self._forge_cached_at = self._now()
+        return payload
+
+    def forge_work(self, force_refresh: bool = False) -> dict:
+        if self._forge_cache_is_fresh(force_refresh):
+            return self._forge_cache
+        adapter = self.forge_work_factory(self.config, self.command_runner)
+        try:
+            collected = adapter.collect()
+        except Exception as error:
+            raise DashboardError("configured forge work is unavailable") from error
+        if not isinstance(collected, dict):
+            raise DashboardError("configured forge work is invalid")
+        return self._cache_forge_work(collected)
 
     def gitlab_work(self, force_refresh: bool = False) -> dict:
         current = self._now()
