@@ -119,6 +119,26 @@ test("a degraded payload keeps the last healthy payload as stale", async () => {
   assert.equal(degraded.error, "GitLab indisponible");
 });
 
+test("a failed reconciliation preserves a successful GitLab refresh", async () => {
+  const store = createSourceStore(() => 1_000);
+  const gitlab = await store.load(
+    "gitlab",
+    async () => ({degraded: false, groups: {todo: []}}),
+  );
+  const reconciliation = await store.load("reconciliation", async () => {
+    throw new Error("reconciliation unavailable");
+  });
+
+  assert.equal(gitlab.error, null);
+  assert.equal(gitlab.lastSuccess, 1_000);
+  assert.deepEqual(store.get("gitlab").data, {
+    degraded: false,
+    groups: {todo: []},
+  });
+  assert.equal(reconciliation.error, "reconciliation unavailable");
+  assert.equal(reconciliation.data, null);
+});
+
 test("stable render guard avoids a second DOM replacement for equal state", () => {
   const guardedRender = createStableRenderGuard();
   const root = {

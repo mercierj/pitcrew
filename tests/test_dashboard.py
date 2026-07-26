@@ -3109,11 +3109,15 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.javascript.index("function sourceStatus")
         ]
         self.assertIn(
-            'await api.post("/api/reconciliations", {});',
+            '() => api.post("/api/reconciliations", {})',
+            gitlab_refresh,
+        )
+        self.assertIn(
+            'sourceStore.load(\n      "reconciliation"',
             gitlab_refresh,
         )
         self.assertLess(
-            gitlab_refresh.index('await api.post("/api/reconciliations", {});'),
+            gitlab_refresh.index('() => api.post("/api/reconciliations", {})'),
             gitlab_refresh.index("lastGitLabRefresh = now;"),
         )
         self.assertIn("let detailTicketView = null;", self.javascript)

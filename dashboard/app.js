@@ -1508,7 +1508,10 @@ async function refreshGitLab({manual = false, force = false} = {}) {
     renderGitLab(state.data, latestRuns);
   }
   if (!state.error) {
-    await api.post("/api/reconciliations", {});
+    await sourceStore.load(
+      "reconciliation",
+      () => api.post("/api/reconciliations", {}),
+    );
   }
   if (!state.error) lastGitLabRefresh = now;
   renderPilotageView();
@@ -1552,6 +1555,11 @@ function renderSourceStates() {
     sourceStatus("decisions", "Décisions", refreshHumanActions),
     sourceStatus("proposals", "Propositions", refreshHumanActions),
     sourceStatus("gitlab", "GitLab", () => refreshGitLab({manual: true})),
+    sourceStatus(
+      "reconciliation",
+      "Réconciliation des tickets",
+      () => refreshGitLab({manual: true}),
+    ),
     sourceStatus("runs", "Exécutions", refreshLocal),
   ]);
   renderSourceState(elements.agentsSourceState, [
@@ -1596,6 +1604,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         "preprod",
         "runs",
         "gitlab",
+        "reconciliation",
       ].some((name) => sourceStore.get(name).error);
       const refreshedAt = dateFormatter.format(new Date());
       setText(
