@@ -3,7 +3,12 @@ import {createDetailPanel} from "./detail-panel.mjs";
 import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
 import {renderAgents as renderAgentRows} from "./agents.mjs";
 import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
-import {historyPath, renderHistory, syncHistorySkills} from "./history.mjs";
+import {
+  createLatestRequestCoordinator,
+  historyPath,
+  renderHistory,
+  syncHistorySkills,
+} from "./history.mjs";
 
 const POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
@@ -954,17 +959,41 @@ async function changeModel(skill, model, previous, select) {
   }
 }
 
-async function refreshHistory() {
-  const history = await fetchJson(historyPath(
+async function loadHistory() {
+  const path = historyPath(
     elements.historySkill.value,
     elements.historyOutcome.value,
-  ));
-  sources.history = history;
+  );
+  const result = await coordinateHistoryRequest(() => fetchJson(path));
+  if (result.applied && !result.error) {
+    sources.history = result.data;
+  }
+  return result;
+}
+
+function showHistoryError() {
+  const message = "Impossible d’actualiser l’historique. Les données précédentes restent affichées.";
+  elements.globalBanner.className = "banner banner-error";
+  setText(elements.globalBanner, message);
+  setText(elements.operationalStatus, message);
+}
+
+async function refreshHistory() {
+  const result = await loadHistory();
+  if (!result.applied) {
+    return;
+  }
+  if (result.error) {
+    showHistoryError();
+    return;
+  }
   renderHistory(
     elements.activityList,
-    history,
+    result.data,
     sources.snapshot?.model_catalog,
   );
+  renderOverview(sources.snapshot);
+  setText(elements.operationalStatus, "Historique actualisé.");
 }
 
 async function refreshFresh(options = {}) {
@@ -989,12 +1018,11 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
           syncHistorySkills(elements.historySkill, payload?.agents);
           return payload;
         }),
-        fetchJson(historyPath(
-          elements.historySkill.value,
-          elements.historyOutcome.value,
-        )).then((payload) => {
-          sources.history = payload;
-          return payload;
+        loadHistory().then((result) => {
+          if (result.applied && result.error) {
+            throw result.error;
+          }
+          return result;
         }),
         fetchJson("/api/decisions").then((payload) => {
           sources.decisions = payload;
@@ -1008,7 +1036,9 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
       renderOverview(snapshot);
       renderLiveAgents(snapshot);
       renderAgents(snapshot);
-      renderHistory(elements.activityList, history, snapshot?.model_catalog);
+      if (history.applied && !history.error) {
+        renderHistory(elements.activityList, history.data, snapshot?.model_catalog);
+      }
       renderDecision(decisions);
       renderProposals(proposals);
       renderPilotageView();
@@ -1050,7 +1080,7 @@ elements.workflowSearch?.addEventListener("input", renderPilotageView);
 elements.workflowRole?.addEventListener("change", renderPilotageView);
 elements.historyFilters.addEventListener("submit", (event) => {
   event.preventDefault();
-  refreshHistory();
+  void refreshHistory().catch(showHistoryError);
 });
 
 refresh({ manual: true });

@@ -1,5 +1,18 @@
 import {formatDate, formatTokens} from "./format.mjs";
 
+export function createLatestRequestCoordinator() {
+  let latestRequest = 0;
+  return async function coordinateLatestRequest(loader) {
+    const request = ++latestRequest;
+    try {
+      const data = await loader();
+      return {applied: request === latestRequest, data};
+    } catch (error) {
+      return {applied: request === latestRequest, error};
+    }
+  };
+}
+
 export function historyPath(skill, outcome) {
   const query = new URLSearchParams();
   if (skill) {

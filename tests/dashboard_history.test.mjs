@@ -2,10 +2,21 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createLatestRequestCoordinator,
   historyPath,
   renderHistory,
   syncHistorySkills,
 } from "../dashboard/history.mjs";
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return {promise, resolve, reject};
+}
 
 class FakeElement {
   constructor(tagName) {
@@ -103,4 +114,29 @@ test("syncHistorySkills keeps a valid selection after a snapshot", () => {
     ["", "qa-run", "research-run"],
   );
   assert.equal(select.value, "qa-run");
+});
+
+test("latest request coordinator ignores a response completed out of order", async () => {
+  const coordinate = createLatestRequestCoordinator();
+  const first = deferred();
+  const second = deferred();
+
+  const firstResult = coordinate(() => first.promise);
+  const secondResult = coordinate(() => second.promise);
+  second.resolve(["latest"]);
+  assert.deepEqual(await secondResult, {applied: true, data: ["latest"]});
+
+  first.resolve(["stale"]);
+  assert.deepEqual(await firstResult, {applied: false, data: ["stale"]});
+});
+
+test("latest request coordinator returns the current rejection without throwing", async () => {
+  const coordinate = createLatestRequestCoordinator();
+  const error = new Error("history unavailable");
+
+  const result = await coordinate(() => Promise.reject(error));
+
+  assert.equal(result.applied, true);
+  assert.equal(result.error, error);
+  assert.equal("data" in result, false);
 });
