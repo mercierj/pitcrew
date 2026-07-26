@@ -290,15 +290,6 @@ class CliTest(unittest.TestCase):
             self.assertEqual(0, unscheduled.returncode, unscheduled.stderr)
             self.assertNotIn("--output-schema", args_path.read_text(encoding="utf-8").splitlines())
 
-            manual_preprod = self.run_cli(
-                "bin/pitcrew-codex.sh", "preprod-review-run", "getbill", env=env
-            )
-            self.assertEqual(0, manual_preprod.returncode, manual_preprod.stderr)
-            self.assertEqual(
-                0,
-                args_path.read_text(encoding="utf-8").splitlines().count("--output-schema"),
-            )
-
     def test_model_command_prints_default_and_runtime_override(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

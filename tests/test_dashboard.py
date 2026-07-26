@@ -2292,6 +2292,16 @@ class DashboardAssetContractTest(unittest.TestCase):
                 rf"(?s){re.escape(selector)}\s*{{[^}}]*"
                 r"grid-template-columns:\s*1fr;",
             )
+        tablet = self.styles.split("@media (max-width: 900px)", 1)[1].split(
+            "@media (max-width: 620px)",
+            1,
+        )[0]
+        self.assertRegex(
+            tablet,
+            r"(?s)\.agent-row-main\s*{[^}]*grid-template-columns:"
+            r"\s*minmax\(180px,\s*2fr\)"
+            r"\s*repeat\(3,\s*minmax\(0,\s*1fr\)\);",
+        )
 
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
         formatters = self.modules["format.mjs"]
