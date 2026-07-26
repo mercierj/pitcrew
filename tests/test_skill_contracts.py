@@ -228,6 +228,19 @@ class ReferenceContractTest(unittest.TestCase):
             (ROOT / "references/providers/gitlab.md").read_text(encoding="utf-8"),
         )
 
+    def test_implementer_recovers_processing_ticket_with_open_change_to_review(self):
+        implementer = (ROOT / "skills/implementer-run/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Open change exists", implementer)
+        self.assertIn("--state open", implementer)
+        self.assertIn("author_identity", implementer)
+        self.assertIn("target_branch", implementer)
+        self.assertIn('list_runs("$PROJECT", active_only=True)', implementer)
+        self.assertIn("active run owns this ticket", implementer)
+        self.assertIn('state="$STATE_REVIEW_ID"', implementer)
+        self.assertIn("Recovered stale $STATE_PROCESSING state", implementer)
+
     def test_stale_sweep_repairs_gitlab_merged_lifecycle_drift(self):
         stale = (ROOT / "skills/stale-sweep/SKILL.md").read_text(encoding="utf-8")
         gitlab = (ROOT / "references/providers/gitlab.md").read_text(
@@ -493,6 +506,25 @@ class ReferenceContractTest(unittest.TestCase):
             text = skill_file.read_text(encoding="utf-8")
             for marker in forbidden_pacing:
                 self.assertNotIn(marker, text, f"{skill_file} contains {marker}")
+
+    def test_unblock_surfaces_tickets_missing_a_bail_comment(self):
+        unblock = (ROOT / "skills/unblock/SKILL.md").read_text(encoding="utf-8")
+        for marker in (
+            "missing-bail-context",
+            "without a qualifying agent bail comment",
+            "What should happen next?",
+            "Send back to agent-todo with context",
+            "Keep blocked",
+            '"Investigate first — file a sibling research ticket" → `investigate-sibling`',
+            '"Send back to agent-todo with context" → `send-back-to-agent-todo`',
+            '"Close as won\'t-do" → `close-wontfix`',
+            '"Keep blocked" → `keep-deferred`',
+            "require non-empty notes",
+            "a tracker comment or change its state before",
+        ):
+            self.assertIn(marker, unblock)
+
+        self.assertNotIn("NEVER touch tickets that don't have a bail comment", unblock)
 
 
 if __name__ == "__main__":

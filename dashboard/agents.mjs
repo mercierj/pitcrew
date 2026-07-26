@@ -1,3 +1,4 @@
+import {captureOpenDetails} from "./pilotage.mjs";
 import {formatCost, formatDate, formatTokens} from "./format.mjs";
 
 const healthLabels = {
@@ -114,6 +115,7 @@ function agentRow(agent, handlers) {
   );
 
   const details = document.createElement("details");
+  details.setAttribute("data-detail-key", `agent:${agent.skill || "unknown"}`);
   const summary = document.createElement("summary");
   summary.textContent = "Voir les détails techniques et les contrôles";
   const detailGrid = document.createElement("div");
@@ -153,6 +155,7 @@ function agentRow(agent, handlers) {
 }
 
 export function renderAgents(root, disabledRoot, disabledCount, snapshot, handlers) {
+  const restoreOpenDetails = captureOpenDetails(root);
   const agents = Array.isArray(snapshot?.agents) ? snapshot.agents : [];
   const rows = agents.map((agent) => agentRow(agent, handlers));
   if (rows.length === 0) {
@@ -162,6 +165,7 @@ export function renderAgents(root, disabledRoot, disabledCount, snapshot, handle
     rows.push(empty);
   }
   root.replaceChildren(...rows);
+  restoreOpenDetails();
   const disabled = Array.isArray(snapshot?.disabled_roles) ? snapshot.disabled_roles : [];
   disabledCount.textContent = String(disabled.length);
   disabledRoot.replaceChildren(...disabled.map((role) => {

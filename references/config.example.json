@@ -15,6 +15,7 @@
   "release": {
     "autonomy": "off"
   },
+  "delivery": {"fix_autonomy": "off"},
   "architecture": {"interval_seconds": 604800},
   "preprod_review": {"base_ref": "origin/preprod", "compare_ref": "origin/develop", "history_limit": 10},
   "proposals": {"ledger": "$CONFIG_DIR/proposals.json"},

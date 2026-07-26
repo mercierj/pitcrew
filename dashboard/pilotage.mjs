@@ -47,6 +47,21 @@ const canonicalUrlOf = (resource) => (
       : ""
 );
 
+const ticketRunStatus = (run, capacity) => {
+  if (run?.state === "queued") {
+    return `En attente · position ${run.queue_position ?? "?"}`;
+  }
+  if (run?.state === "running") {
+    return (
+      `En cours · ${capacity?.running ?? 1}/`
+      + `${capacity?.max_concurrent ?? 3} places utilisées`
+    );
+  }
+  if (run?.state === "failed") return "Échec · Relancer";
+  if (run?.state === "cancelled") return "Annulé · Relancer";
+  return "";
+};
+
 export function formatUpdateAge(value, now = Date.now()) {
   const updatedAt = Date.parse(value);
   if (!Number.isFinite(updatedAt)) return "date inconnue";
@@ -60,6 +75,10 @@ export function formatUpdateAge(value, now = Date.now()) {
 
 export function enrichWorkflowEntry(entry, sources = {}) {
   const issueUrl = canonicalUrlOf(entry);
+  const activeRun = asArray(sources?.runs?.runs)
+    .find((run) => issueUrl && run?.target === issueUrl)
+    || entry?.active_run
+    || null;
   const decisions = asArray(sources?.decisions?.decisions)
     .concat(sources?.decisions?.pending ? [sources.decisions.pending] : []);
   const decision = decisions.find((candidate) => (
@@ -74,9 +93,12 @@ export function enrichWorkflowEntry(entry, sources = {}) {
     .filter((url) => typeof url === "string")
     .map((url) => mergeRequestsByUrl.get(url))
     .filter(Boolean);
-  const activeSkill = typeof entry?.active_run?.skill === "string"
-    ? entry.active_run.skill
+  const activeSkill = typeof activeRun?.skill === "string"
+    ? activeRun.skill
     : "";
+  const capacity = activeSkill
+    ? sources?.runs?.capacity?.[activeSkill]
+    : null;
   const agent = asArray(sources?.snapshot?.agents)
     .find((candidate) => activeSkill && candidate?.skill === activeSkill);
   const latestHistory = agent?.latest_history && typeof agent.latest_history === "object"
@@ -85,6 +107,7 @@ export function enrichWorkflowEntry(entry, sources = {}) {
 
   return {
     ...entry,
+    active_run: activeRun,
     delivery_context: {
       decision,
       labels: asArray(entry?.labels).filter((label) => (
@@ -93,10 +116,13 @@ export function enrichWorkflowEntry(entry, sources = {}) {
         && !/^pitcrew(?:-|::)/i.test(label)
       )),
       merge_requests: mergeRequests,
+      run_status: agent?.live_status?.phase
+        ? ""
+        : ticketRunStatus(activeRun, capacity),
       active_agent: activeSkill
         ? {
           skill: activeSkill,
-          phase: agent?.live_status?.phase || entry?.active_run?.phase || entry?.active_run?.state || "",
+          phase: agent?.live_status?.phase || activeRun?.phase || activeRun?.state || "",
           latest_history: latestHistory,
         }
         : null,
@@ -220,6 +246,20 @@ export function preserveFocus(root, render) {
   replacement?.focus();
 }
 
+export function captureOpenDetails(root) {
+  const openKeys = new Set(
+    [...root?.querySelectorAll?.("[data-detail-key]") || []]
+      .filter((details) => details.open)
+      .map((details) => details.getAttribute("data-detail-key"))
+      .filter(Boolean),
+  );
+  return () => {
+    [...root?.querySelectorAll?.("[data-detail-key]") || []].forEach((details) => {
+      details.open = openKeys.has(details.getAttribute("data-detail-key"));
+    });
+  };
+}
+
 const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {}) => {
   const card = document.createElement(done ? "li" : "article");
   card.className = done ? "done-card" : "action-card";
@@ -312,7 +352,12 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
       || entry.agent_action?.label
       || "Sans routage";
     const phase = entry.delivery_context?.active_agent?.phase;
-    route.textContent = phase ? `${responsibleSkill} · ${phase}` : responsibleSkill;
+    const runStatus = entry.delivery_context?.run_status;
+    route.textContent = runStatus
+      ? `${responsibleSkill} · ${runStatus}`
+      : phase
+        ? `${responsibleSkill} · ${phase}`
+        : responsibleSkill;
     const mergeRequest = entry.delivery_context?.merge_requests?.[0];
     const merge = document.createElement("p");
     merge.className = "workflow-card-merge";
@@ -323,6 +368,9 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
     action.type = "button";
     action.className = "button button-quiet";
     action.textContent = entry.agent_action?.label || "Voir le détail";
+    const activeRun = ["queued", "running"].includes(entry.active_run?.state);
+    action.disabled = activeRun;
+    action.setAttribute("aria-busy", activeRun ? "true" : "false");
     action.setAttribute("data-focus-key", focusKeyFor("workflow", entry));
     action.addEventListener("click", () => onOpen?.(entry));
     card.append(

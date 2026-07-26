@@ -106,16 +106,6 @@ def check(project: str, skill: str) -> dict:
             "skill": skill,
             "next_action": f"retry after {expires_at.isoformat().replace('+00:00', 'Z')}",
         }
-    skill_entry = state.get("skills", {}).get(skill) if isinstance(state.get("skills"), dict) else None
-    expires_at = active_cooldown(skill_entry, current, cooldown_seconds()) if skill_entry else None
-    if expires_at is not None:
-        return {
-            "decision": "noop",
-            "reason": "no-op cooldown is active for this skill",
-            "project": project,
-            "skill": skill,
-            "next_action": f"retry after {expires_at.isoformat().replace('+00:00', 'Z')}",
-        }
     return {"decision": "run", "project": project, "skill": skill}
 
 
@@ -131,20 +121,6 @@ def record_failure(project: str, reason: str, failed_at: str | None) -> dict:
 def record_noop(project: str, skill: str, reason: str, failed_at: str | None) -> dict:
     timestamp = failed_at or now().isoformat().replace("+00:00", "Z")
     parse_timestamp(timestamp)
-    path = state_path(project)
-    previous = read_state(path)
-    skills = previous.get("skills", {})
-    if not isinstance(skills, dict):
-        raise ValueError("provider circuit skills state is malformed")
-    skills = dict(skills)
-    skills[skill] = {"failed_at": timestamp, "reason": reason}
-    provider = previous.get("provider")
-    if provider is None and "failed_at" in previous:
-        provider = {"failed_at": previous["failed_at"], "reason": previous["reason"]}
-    state = {"skills": skills}
-    if provider is not None:
-        state["provider"] = provider
-    write_state(path, state)
     return {"status": "recorded", "project": project, "skill": skill, "failed_at": timestamp}
 
 

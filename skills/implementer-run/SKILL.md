@@ -61,6 +61,8 @@ FORGE_USER="<validated configured forge identity>"
 FORGE_OWNER="<configured forge owner-or-group>"
 SLACK_WEBHOOK_URL=$(jq -r '.slack.implementer_webhook_url // .slack.quickwins_webhook_url // empty' "$CONFIG_FILE")
 SLACK_USER_MENTION=$(jq -r '.slack.user_mention // empty' "$CONFIG_FILE")
+FIX_AUTONOMY=$(jq -r '.delivery.fix_autonomy // "off"' "$CONFIG_FILE")
+case "$FIX_AUTONOMY" in on|off) ;; *) bail "invalid fix autonomy policy";; esac
 repo_path()           { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .path' "$CONFIG_FILE" | sed "s|^~|$HOME|"; }
 repo_default_branch() { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .default_branch' "$CONFIG_FILE"; }
 repo_tags()           { jq -r --arg n "$1" '.repos[] | select(.name==$n) | .tags // [] | join(",")' "$CONFIG_FILE"; }
@@ -174,6 +176,7 @@ Throughout the run, every time something noteworthy happens, append a one-line e
 
 Append events at these moments:
 - **STEP 0 orphan recovered** — `EVENTS+=("recovered:<TICKET-id>")`
+- **STEP 0 open change recovered for review** — `EVENTS+=("recovered-review:<TICKET-id>:<change-url>")`
 - **STEP A merged after "go"** — `EVENTS+=("merged:<TICKET-id>:<repo>:<change-N>:<change-url>:<title>")`
 - **STEP A auto-merged low-risk (docs/tests, no human go)** — `EVENTS+=("auto-merged:<TICKET-id>:<repo>:<change-N>:<change-url>:<title>:<docs|tests>")`
 - **STEP A change-request fixes pushed** — `EVENTS+=("rerolled:...")`
@@ -342,8 +345,9 @@ If a ticket needs a repo that's NOT in `repos[]`, comment on configured tracker:
 Query configured tracker: `label=$AGENT_LABEL`, `state=$STATE_PROCESSING` (no assignee filter — the `agent` label is the only gate).
 
 For each result:
-- Look up the corresponding feature branch on configured forge: `LIST_ELIGIBLE_CHANGES --search "<TICKET-id> in:title" --state all --json number,state,source_branch,url --limit 1`
-  - **Open change exists** → not orphaned, just in-flight. Skip — it'll be handled by STEP A. Move on.
+- Look up all corresponding changes on configured forge: `LIST_ELIGIBLE_CHANGES --search "<TICKET-id> in:title" --state all --json number,state,source_branch,target_branch,url,author_identity,title --limit 10`
+  - **Open change exists** → recover only one change returned by a second `LIST_ELIGIBLE_CHANGES --search "<TICKET-id> in:title" --state open --json number,state,source_branch,target_branch,url,author_identity,title --limit 10` query when every condition holds: `state=open`; `author_identity == "$FORGE_USER"`; `target_branch` is the configured repository default branch; and the ticket reference is exact in the change title or source branch. Before any state mutation, inspect the durable queue with `RunStore(...).list_runs("$PROJECT", active_only=True)`; if an active run owns this ticket, log `recovery-skip:<TICKET-id>:active-run` and leave it in `$STATE_PROCESSING`. Otherwise the implementation worker has ended: recover the tracker lifecycle to `$STATE_REVIEW` so the reviewer and validator can see the existing change. Do not create a branch or change. Set state to `$STATE_REVIEW_ID`, immediately `INSPECT_TRACKER_ITEM`, and confirm `response.status == "$STATE_REVIEW"`. If it does not match, retry once with `state="$STATE_REVIEW_ID"`; if it still does not match, log `state-broken:<TICKET-id>:<got>→$STATE_REVIEW`, move the ticket to `$STATE_BLOCKED_ID`, and stop processing that ticket. On success, comment: `Recovered stale $STATE_PROCESSING state: open change <change-url> is awaiting review.` Then `log_event recovered-review <TICKET-id> <change-url>`. Inspect its merge status. If it is a conflict on an agent-authored change targeting the configured default branch, execute the **Conflict recovery** procedure in STEP A against this ticket and existing change. Otherwise, STEP A handles it in this same run.
+  - **Only merged or closed changes exist** → do not move the ticket to `$STATE_REVIEW` or `$STATE_TODO`; leave lifecycle reconciliation to `$pitcrew:stale-sweep`.
   - **No change found** → ORPHAN. Either you crashed mid-implementation or the previous run errored silently.
     - Best-effort cleanup: any matching local feature branch? `git branch --list "*<TICKET-id>*"` → delete. Any worktree at `$WORKTREE_ROOT/*<TICKET-id>*`? → `git worktree remove --force <path>`.
     - Set configured tracker ticket state to `$STATE_TODO`. Keep all labels (including `$AGENT_LABEL`) — the ticket goes back into the queue for a fresh attempt.
@@ -355,6 +359,18 @@ For each result:
 ONE configured tracker query: `label=$AGENT_LABEL`, `state=$STATE_REVIEW`. (Single label, single state. No more 3× query merge — the new workflow puts the burden on the state machine.)
 
 For each ticket in `$STATE_REVIEW`, gather two signals:
+
+**Conflict recovery:** before evaluating merge approval, inspect the matching open
+change's `detailed_merge_status`, `has_conflicts`, and current head SHA. If the
+change was authored by this implementer and targets the configured default branch,
+reuse its existing feature branch and MR: fetch `origin`, merge
+`origin/<default-branch>` into the feature branch (never rebase), resolve only
+bounded non-critical conflicts, run the focused checks, and push the new head. Do
+not create a second branch or MR. Re-run reviewer and validator on the new SHA.
+For conflicts over 50 lines, critical configuration, production behavior, or
+uncertain semantics, move the ticket to `$STATE_BLOCKED` with a precise human
+review note. A conflicted MR must never remain available to the dashboard's
+manual merge action.
 
 **Signal A — configured tracker comment from the human** (per HARD RULE 14: sticky "go"). Find the most recent ACTIONABLE comment by `$ASSIGNEE_EMAIL` authored AFTER the agent's **FIRST** "change ready" comment on this ticket (not the last — the first, so re-readies don't reset the gate). An actionable comment is one that contains `\bgo\b` (case-insensitive), `\bno\b`, `\bwait\b`, `\bhold\b`, `\bstop\b`, or asks for specific changes. Chit-chat / acknowledgments are not actionable — skip them when finding "the most recent actionable comment".
 
@@ -396,11 +412,12 @@ classify_pr_diff() {
 }
 ```
 
-**Classify the combined signal as ONE of these verdicts** (precedence: WAIT > CHANGES > GO > LOW_RISK_AUTO_MERGE > SIGNED_OFF > NONE — your veto always wins, then reviewer change-requests, then explicit go, then low-risk auto, then plain signed-off):
+**Classify the combined signal as ONE of these verdicts** (precedence: WAIT > AUTONOMOUS_FIX_MERGE > CHANGES > GO > LOW_RISK_AUTO_MERGE > SIGNED_OFF > NONE — a human veto always wins):
 
 | Verdict | Trigger | Action |
 |---|---|---|
 | `WAIT` | Signal A most-recent actionable comment matches `\b(no|wait|hold|stop)\b` | skip, leave alone |
+| `AUTONOMOUS_FIX_MERGE` | `FIX_AUTONOMY=on`, ticket has the configured improvement label, is in `$STATE_TODO` or `$STATE_BLOCKED`, and Signal A is not WAIT | merge automatically; bug tickets remain human-gated and feature proposals remain human-approved |
 | `CHANGES` | Signal B state = `CHANGES_REQUESTED`, OR review body contains "blocking" / "must fix" / "critical" / "Verdict: CHANGES_REQUESTED", OR Signal A asks for specific changes (not go/wait/hold/no/stop) | auto-fix (see below) |
 | `GO` | Signal A most-recent actionable comment matches `\bgo\b` (case-insensitive) — and not later overridden by WAIT | merge (see below) |
 | `LOW_RISK_AUTO_MERGE` | Signal B is signed-off AND `classify_pr_diff` returns `docs` or `tests` AND Signal A is not WAIT (per HARD RULE 13) | merge automatically — no human "go" needed |
@@ -412,6 +429,12 @@ classify_pr_diff() {
 - If green: `MERGE_CHANGE <N> --squash --delete-branch`. After the merge succeeds, call `CLOSE_LIFECYCLE <TICKET-id>` through the configured tracker provider. This applies `$STATE_DONE`, preserves all labels, posts the required `Merged ✓ <change URL>` audit comment, and closes the issue. Immediately re-read the ticket and verify the issue is closed and has `$STATE_DONE`; if either check fails, retry once, then log `close-broken:<TICKET-id>` and stop without claiming completion.
 - Clean up worktree: `cd <main-repo-path> && git worktree remove --force "$WORKTREE_ROOT/<repo>-<TICKET-id>" 2>/dev/null && git branch -D <feature-branch> 2>/dev/null; git worktree prune || true`
 - `log_event merged <TICKET-id> <repo> <change-N> <change-url> "<title>"`
+
+**AUTONOMOUS_FIX_MERGE action:**
+- Run `READ_CHANGE_CHECKS <N>` and retain its result as observed evidence; a red, pending, or absent CI result does not block this path.
+- Run `MERGE_CHANGE <N> --squash --delete-branch`, then `CLOSE_LIFECYCLE <TICKET-id>` and re-read the ticket to verify it is closed with `$STATE_DONE`.
+- Comment: `Autonomous improvement merge ✓ <change URL> — CI result observed: <status>.` Log `autonomous-improvement-merged` with the ticket, change URL, and observed CI status.
+- This applies only to the improvement label in `$STATE_TODO` or `$STATE_BLOCKED`; never apply it to `$BUG_LABEL`, feature/proposal tickets, prod/preprod actions, secret reads, database writes, or destructive Git.
 
 **LOW_RISK_AUTO_MERGE action (per HARD RULE 13):**
 - Capture the diff bucket: `BUCKET=$(classify_pr_diff <N> <repo>)` — will be `docs` or `tests`.

@@ -19,6 +19,7 @@
     ]
   },
   "release": {"autonomy": "off"},
+  "delivery": {"fix_autonomy": "off"},
   "agents": {
     "architecture-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "routing_mode": "observe"},
     "preprod-review-run": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "routing_mode": "observe"},

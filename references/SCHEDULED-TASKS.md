@@ -146,7 +146,7 @@ cadence model as upstream Pitcrew:
 
 Ticket runs are stored in
 `${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/runs.sqlite3`. The default is
-three concurrent tickets per role; configure an override with
+three concurrent tickets per role; optionally configure an override with
 `execution.max_concurrent_per_skill.<role>`. Additional tickets stay durable in
 FIFO order (for example, the fourth ticket waits for a slot). Repeated admission
 of the same target returns the active run rather than creating another worker.
@@ -178,7 +178,8 @@ cancels active coordinated ticket workers and suspends queued tickets.
 The runner checks that state before repository/model resolution and returns a
 structured no-op without invoking Codex. This blocks both launchd and manual
 scheduled-mode starts. `resume-all` is explicit, reinstalls the enabled jobs,
-and resumes only the queued ticket runs; it does not trigger an immediate pass.
+and resumes only the queued ticket runs; it does not restart cancelled running
+work or trigger an immediate pass.
 The dashboard's **Tout arrêter** button
 performs the same action after confirmation and shows **Exécutions bloquées**
 while the switch is active.
@@ -197,8 +198,10 @@ needs a human decision; it never selects the answer itself. Releaser remains
 disabled.
 
 Each job invokes `bin/pitcrew-codex.sh` with `--scheduled`. The runner uses a
-per-role lock, an ephemeral Codex session, workspace-write sandboxing, explicit
-network access, and `approval_policy=never`; it never bypasses the sandbox.
+per-role lock, an ephemeral Codex session, a role-scoped sandbox, explicit
+network access for provider-backed roles, and `approval_policy=never`; it never
+bypasses the sandbox. On macOS, provider-backed roles use the network-capable
+sandbox because workspace-write network access is not effective for subprocesses.
 Full Codex transcripts are discarded. Only the role's bounded final summary is
 kept at `${CODEX_HOME:-$HOME/.codex}/pitcrew/getbill/logs/<skill>.last.txt`.
 

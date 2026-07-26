@@ -3,24 +3,24 @@
 ## Objectif
 
 Permettre à chaque projet Pitcrew d'activer un mode qui ne laisse plus les
-correctifs bloqués par une approbation humaine, une revue humaine ou une CI
-rouge/absente. Les propositions de fonctionnalités restent soumises à une
-approbation explicite dans le dashboard avant toute création ou progression de
-ticket.
+travaux `improvement` bloqués par une approbation humaine, une revue humaine ou
+une CI rouge/absente. Les bugs et les propositions de fonctionnalités restent
+dans leurs circuits humains existants.
 
 ## Périmètre et limites
 
 Le paramètre persistant est propre à chaque projet et vaut `off` par défaut.
-Lorsqu'il est activé, il s'applique uniquement aux changements qualifiés de
-correctifs par le flux de livraison. Il autorise leur fusion après les
+Lorsqu'il est activé, il s'applique uniquement aux tickets portant le label
+configuré `improvement`, dans les états `todo` ou `blocked`. Il autorise leur fusion après les
 vérifications locales minimales du rôle, même si les contrôles distants de CI,
 de revue ou de `go` humain sont absents ou négatifs.
 
 Le mode ne change pas les protections indépendantes : aucune action de prod ou
 préprod, migration, lecture de secret, écriture de base de données ou opération
-Git destructive n'est autorisée par ce paramètre. Les fonctionnalités
-continuent d'emprunter le registre de propositions local et nécessitent
-l'action dashboard `Approuver` avant d'être transformées en travail distant.
+Git destructive n'est autorisée par ce paramètre. Il ne s'applique jamais aux
+tickets `bug`, ni aux fonctionnalités : celles-ci continuent d'emprunter le
+registre de propositions local et nécessitent l'action dashboard `Approuver`
+avant d'être transformées en travail distant.
 
 ## Configuration et persistance
 
@@ -52,16 +52,18 @@ changement.
 
 ## Flux de livraison
 
-Les décisions de fusion des rôles de correction consultent la politique du
+Les décisions de fusion des rôles de livraison consultent la politique du
 projet au moment de décider, après avoir rechargé l'issue et la demande de
 changement. Avec `fix_autonomy=on`, les gates `review approved`, `human go` et
-`CI green` ne bloquent plus la fusion. Le rôle ajoute au commentaire/ticket et
-à l'historique le fait que la fusion a été effectuée en mode autonome, avec le
-résultat CI observé.
+`CI green` ne bloquent plus la fusion seulement pour un ticket `improvement`
+en `todo` ou `blocked`. Le rôle ajoute au commentaire/ticket et à l'historique
+le fait que la fusion a été effectuée en mode autonome, avec le résultat CI
+observé.
 
-Avec `off`, le comportement actuel est inchangé. Un ticket de fonctionnalité
-ne peut pas devenir autonome : son approbation est déterminée exclusivement
-par le registre de propositions, avant son routage vers un agent.
+Avec `off`, le comportement actuel est inchangé. Les tickets `bug` et de
+fonctionnalité ne peuvent pas devenir autonomes : l'approbation d'une
+fonctionnalité est déterminée exclusivement par le registre de propositions,
+avant son routage vers un agent.
 
 ## Vérification
 
@@ -71,7 +73,8 @@ par le registre de propositions, avant son routage vers un agent.
   les requêtes non authentifiées ou invalides.
 - L'interface rend l'interrupteur, son état initial et son état après succès ou
   erreur.
-- La décision de livraison conserve les gates avec `off` et choisit la fusion
-  avec `on` malgré une CI rouge/absente et sans `go` humain.
+- La décision de livraison conserve les gates avec `off`, les conserve aussi
+  pour `bug` et les fonctionnalités avec `on`, et choisit la fusion pour un
+  `improvement` éligible malgré une CI rouge/absente et sans `go` humain.
 - Les tests de propositions confirment que le mode ne crée ni n'approuve une
   idée de fonctionnalité.

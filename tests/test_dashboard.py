@@ -1012,6 +1012,29 @@ class DashboardServiceTest(unittest.TestCase):
                 with self.assertRaises(DashboardError):
                     service.launch_ticket_agent("implementer-run", invalid)
 
+    def test_ticket_launch_normalizes_gitlab_work_item_urls(self):
+        runner = FakeRunner()
+        for entry in runner.schedule:
+            if entry["skill"] == "unblock":
+                entry["enabled"] = True
+        store, dispatcher = self.coordinator()
+        service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
+        target = "https://gitlab.com/getbill1/getbill/-/work_items/14"
+        issue = {
+            "iid": 14,
+            "state": "opened",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+        }
+
+        with mock.patch.object(service, "_gitlab_document", return_value=issue):
+            result = service.launch_ticket_agent("unblock", target)
+
+        self.assertIn(result["state"], {"queued", "running"})
+        self.assertEqual(
+            "https://gitlab.com/getbill1/getbill/-/issues/14",
+            store.get(result["run_id"])["target"],
+        )
+
     def test_gitlab_work_is_read_only_and_overlays_active_runs(self):
         store, dispatcher = self.coordinator()
         service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
@@ -1024,6 +1047,32 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertFalse(ticket["agent_action"]["available"])
         self.assertEqual("Ticket en attente ou en cours", ticket["agent_action"]["unavailable_reason"])
         mutation.assert_not_called()
+
+    def test_gitlab_work_overlays_active_run_for_work_item_url(self):
+        issue = dict(gitlab_issues()[3])
+        issue.update(
+            {
+                "iid": 14,
+                "state": "opened",
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+                "web_url": "https://gitlab.com/getbill1/getbill/-/work_items/14",
+            }
+        )
+        store, dispatcher = self.coordinator()
+        service = self.service(
+            FakeRunner(issue_pages=[[issue]]),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+        target = "https://gitlab.com/getbill1/getbill/-/issues/14"
+        store.enqueue(project="getbill", skill="unblock", source="dashboard", target=target)
+
+        work = service.gitlab_work(force_refresh=True)
+
+        ticket = work["groups"]["blocked"][0]
+        self.assertEqual(target, ticket["active_run"]["target"])
+        self.assertFalse(ticket["agent_action"]["available"])
+        self.assertEqual("Ticket en attente ou en cours", ticket["agent_action"]["unavailable_reason"])
 
     def test_runs_snapshot_counts_legacy_live_worker_without_lowering_maximum(self):
         store, dispatcher = self.coordinator()
@@ -3041,7 +3090,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             "crew-health",
         ):
             self.assertIn(f'id="{identifier}"', self.html)
-        for identifier in ("proposals", "decision-banner", "overview", "gitlab-work"):
+        for identifier in ("proposals", "decision-banner", "gitlab-work"):
             self.assertRegex(
                 self.html,
                 rf'<section[^>]+id="{identifier}"[^>]+\bhidden\b',
@@ -3500,6 +3549,7 @@ class DashboardAssetContractTest(unittest.TestCase):
 
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
         formatters = self.modules["format.mjs"]
+        self.assertNotIn('id="overview" class="panel overview" aria-labelledby="overview-title" hidden', self.html)
         for identifier in ("metric-tokens-7d", "metric-cost-7d", "metric-cost-total"):
             self.assertIn(f'id="{identifier}"', self.html)
         self.assertIn('document.createElement("select")', self.javascript)

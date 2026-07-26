@@ -10,6 +10,14 @@ readonly SKILLS=(
   product-discovery-run preprod-review-run security-run
 )
 
+# macOS currently ignores workspace-write network access for Codex subprocesses.
+# These roles call the configured forge/tracker from inside the worker, so they
+# need the network-capable sandbox. Read-only/local roles retain workspace-write.
+readonly NETWORKED_SKILLS=(
+  coverage-run dev-verify-run implementer-run investigate-run manager-run
+  ops-run releaser-run reviewer-run stale-sweep unblock validator-run
+)
+
 usage() {
   echo "usage: pitcrew-codex.sh <skill> [project] [--target <ticket>] [--dry-run] [--scheduled] [--coordinated-run <uuid>]" >&2
 }
@@ -21,6 +29,26 @@ is_allowed_skill() {
     [[ "$candidate" == "$skill" ]] && return 0
   done
   return 1
+}
+
+uses_provider_network() {
+  local candidate="$1"
+  local skill
+  for skill in "${NETWORKED_SKILLS[@]}"; do
+    [[ "$candidate" == "$skill" ]] && return 0
+  done
+  return 1
+}
+
+release_is_armed() {
+  python3 -c '
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    config = json.load(handle)
+raise SystemExit(0 if config.get("release", {}).get("autonomy", "off") != "off" else 1)
+' "$CONFIG"
 }
 
 SKILL="${1:-}"
@@ -211,6 +239,9 @@ if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]]; then
       <<<"$PREFLIGHT")" || {
       fail_pre_model "preflight response is invalid"
     }
+    if [[ -n "$TARGET" && "$PREFLIGHT_REASON" == "no-op cooldown is active for this skill" ]]; then
+      PREFLIGHT_DECISION="run"
+    else
     record_gate cooldown "$PREFLIGHT_REASON" noop "$TARGET" \
       "$GATE_FINGERPRINT" >/dev/null
     printf '%s\n' "$PREFLIGHT" | python3 -c '
@@ -225,6 +256,7 @@ value.pop("decision", None)
 print(json.dumps(value, separators=(",", ":")))
 '
     exit 0
+    fi
   elif [[ "$PREFLIGHT_DECISION" != "run" ]]; then
     fail_pre_model "preflight response is invalid"
   fi
@@ -377,7 +409,7 @@ REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT"
   fail_pre_model "configured repository is unavailable: $REPO"
 }
 
-PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. The Pitcrew coverage helper is at $REPO_ROOT/scripts/research_coverage.py; use it when the research skill requires coverage rotation. Fail closed when a configured provider or permission is unavailable."
+PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. The Pitcrew repository root is $REPO_ROOT. When a skill refers to references/<file>, read $REPO_ROOT/references/<file>; do not resolve that path relative to the project checkout. Fail closed if the required Pitcrew reference is missing or unreadable. The Pitcrew coverage helper is at $REPO_ROOT/scripts/research_coverage.py; use it when the research skill requires coverage rotation. Fail closed when a configured provider or permission is unavailable."
 if [[ -n "$TARGET" && "$TARGET_SOURCE" == "directed" ]]; then
   PROMPT+=" Operate on exactly this directed target: $TARGET. Validate it with references/DIRECTED-TARGET.md before any provider lookup."
 elif [[ -n "$TARGET" && "$TARGET_SOURCE" == "eligibility" ]]; then
@@ -397,8 +429,17 @@ if "$SCHEDULED" && [[ "$SKILL" == "unblock" ]]; then
   PROMPT+=" This is an unattended scheduled run. When a human decision is required, do not leave the question only in the final response: atomically persist the exact pending question, choices, ticket context, and status=blocked in $RUNTIME_ROOT/$PROJECT/unblock-state.json as required by skills/unblock/SKILL.md, then stop. The dashboard reads that file and cannot read this log."
 fi
 
+# Implementer must update the configured repository's Git metadata to create
+# isolated worktrees. The other roles retain the normal workspace boundary.
+SANDBOX_MODE="workspace-write"
+if [[ "$SKILL" == "implementer-run" ]] \
+  || { uses_provider_network "$SKILL" \
+    && { [[ "$SKILL" != "releaser-run" ]] || release_is_armed; }; }; then
+  SANDBOX_MODE="danger-full-access"
+fi
+
 if "$DRY_RUN"; then
-  printf '%s\n' "cd=$REPO" "model=$MODEL" "reasoning_effort=${REASONING_EFFORT:-inherited}" "routing_mode=$ROUTING_MODE" "prompt=$PROMPT"
+  printf '%s\n' "cd=$REPO" "model=$MODEL" "reasoning_effort=${REASONING_EFFORT:-inherited}" "routing_mode=$ROUTING_MODE" "sandbox=$SANDBOX_MODE" "prompt=$PROMPT"
   exit 0
 fi
 
@@ -413,13 +454,6 @@ CODEX_ARGS=(
 )
 if [[ -n "$REASONING_EFFORT" ]]; then
   CODEX_ARGS+=( -c "model_reasoning_effort=\"$REASONING_EFFORT\"" )
-fi
-
-# Implementer must update the configured repository's Git metadata to create
-# isolated worktrees. The other roles retain the normal workspace boundary.
-SANDBOX_MODE="workspace-write"
-if [[ "$SKILL" == "implementer-run" ]]; then
-  SANDBOX_MODE="danger-full-access"
 fi
 
 if "$LOCKED_RUN"; then

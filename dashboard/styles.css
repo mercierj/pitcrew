@@ -169,6 +169,15 @@ footer {
   margin: 0;
 }
 
+.fix-autonomy-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
 .global-state {
   color: rgba(255, 255, 255, 0.82);
   font-size: 0.78rem;

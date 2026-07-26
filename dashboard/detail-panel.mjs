@@ -1,9 +1,11 @@
-export function createDetailPanel(dialog, title, content, closeButton) {
+export function createDetailPanel(dialog, title, content, closeButton, {onOpen, onClose} = {}) {
   let previousFocus = null;
   let previousFocusKey = null;
+  let closeRequested = false;
 
   function close() {
     if (dialog?.open) {
+      closeRequested = true;
       dialog.close();
     }
   }
@@ -25,6 +27,7 @@ export function createDetailPanel(dialog, title, content, closeButton) {
     }
     if (!dialog.open) {
       dialog.showModal();
+      onOpen?.();
     }
     closeButton?.focus();
   }
@@ -36,6 +39,12 @@ export function createDetailPanel(dialog, title, content, closeButton) {
     }
   });
   dialog?.addEventListener("close", () => {
+    if (!closeRequested) {
+      dialog.showModal();
+      closeButton?.focus();
+      return;
+    }
+    closeRequested = false;
     let focusTarget = null;
     if (
       previousFocus
@@ -54,6 +63,7 @@ export function createDetailPanel(dialog, title, content, closeButton) {
     }
     previousFocus = null;
     previousFocusKey = null;
+    onClose?.();
   });
 
   return {open, close};

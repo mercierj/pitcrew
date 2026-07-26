@@ -1092,6 +1092,14 @@ class CliTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("reasoning_effort=medium", result.stdout)
             self.assertIn("routing_mode=observe", result.stdout)
+            self.assertIn(
+                f"The Pitcrew repository root is {ROOT}.",
+                result.stdout,
+            )
+            self.assertIn(
+                f"read {ROOT}/references/<file>; do not resolve that path relative to the project checkout",
+                result.stdout,
+            )
 
     def test_runner_dry_run_prints_configured_model_and_reasoning_effort(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1382,6 +1390,30 @@ class CliTest(unittest.TestCase):
             self.assertEqual("cooldown", record["gate_decision"])
             self.assertEqual("getbill1/getbill#7", record["target_id"])
 
+    def test_manual_target_bypasses_skill_noop_cooldown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            recorded = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts/pitcrew_preflight.py"),
+                    "record-noop", "--project", "getbill", "--skill", "implementer-run",
+                    "--reason", "no eligible item",
+                ],
+                cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(0, recorded.returncode, recorded.stderr)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "implementer-run", "getbill",
+                "--target", "getbill1/getbill#16", "--scheduled", "--dry-run", env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("cd=", result.stdout)
+
     def test_authentication_failure_opens_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -1427,13 +1459,13 @@ class CliTest(unittest.TestCase):
             self.assertEqual("noop", json.loads(second.stdout)["status"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
 
-    def test_structured_noop_without_legacy_phrase_opens_skill_cooldown(self):
-        self._assert_structured_status_opens_skill_cooldown("noop")
+    def test_structured_noop_without_legacy_phrase_does_not_open_skill_cooldown(self):
+        self._assert_structured_status_does_not_open_skill_cooldown("noop")
 
-    def test_structured_blocked_without_legacy_phrase_opens_skill_cooldown(self):
-        self._assert_structured_status_opens_skill_cooldown("blocked")
+    def test_structured_blocked_without_legacy_phrase_does_not_open_skill_cooldown(self):
+        self._assert_structured_status_does_not_open_skill_cooldown("blocked")
 
-    def _assert_structured_status_opens_skill_cooldown(self, status):
+    def _assert_structured_status_does_not_open_skill_cooldown(self, status):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
             marker = root / "codex-started"
@@ -1489,12 +1521,7 @@ class CliTest(unittest.TestCase):
             deadline = time.monotonic() + 3
             while not circuit.is_file() and time.monotonic() < deadline:
                 time.sleep(.02)
-            self.assertTrue(circuit.is_file())
-            state = json.loads(circuit.read_text(encoding="utf-8"))
-            self.assertEqual(
-                f"{status} capacity window closed",
-                state["skills"]["research-run"]["reason"],
-            )
+            self.assertFalse(circuit.is_file())
             marker.unlink()
 
             second = self.run_cli(
@@ -1506,10 +1533,10 @@ class CliTest(unittest.TestCase):
             )
 
             self.assertEqual(0, second.returncode, second.stderr)
-            payload = json.loads(second.stdout)
-            self.assertEqual("noop", payload["status"])
-            self.assertIn("cooldown", payload["reason"])
-            self.assertFalse(marker.exists())
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), second.stdout)
 
     def run_cli(self, *args, env=None):
         return subprocess.run(
@@ -2130,6 +2157,51 @@ class CliTest(unittest.TestCase):
                 latest["usage"],
             )
             self.assertNotIn("thread_1", history_path.read_text(encoding="utf-8"))
+
+    def test_provider_roles_use_network_capable_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root)}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "stale-sweep",
+                "getbill",
+                "--scheduled",
+                "--dry-run",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("sandbox=danger-full-access", result.stdout)
+
+    def test_armed_releaser_uses_network_capable_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            config_path = root / ".codex/pitcrew/getbill/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["release"]["autonomy"] = "prepare"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "releaser-run",
+                "getbill",
+                "--dry-run",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("sandbox=danger-full-access", result.stdout)
 
     def test_scheduled_runner_queues_three_distinct_targets_then_drains_fifo(self):
         from scripts.pitcrew_run_store import RunStore

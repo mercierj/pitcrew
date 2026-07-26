@@ -183,3 +183,19 @@ test("buildActionQueue excludes merge requests targeting protected deployment br
 
   assert.deepEqual(queue, []);
 });
+
+test("buildActionQueue does not offer conflicted merge requests for manual merge", () => {
+  const queue = buildActionQueue({
+    work: { merge_requests: [
+      issue("opened", 20, {
+        resource_type: "merge_request",
+        canonical_url: "https://gitlab.example/group/app/-/merge_requests/20",
+        target_branch: "develop",
+        detailed_merge_status: "conflict",
+        has_conflicts: true,
+      }),
+    ] },
+  });
+
+  assert.deepEqual(queue, []);
+});

@@ -11,6 +11,7 @@ class FakeElement {
     this.dataset = {};
     this.disabled = false;
     this._textContent = "";
+    this.attributes = new Map();
   }
 
   set textContent(value) {
@@ -35,6 +36,26 @@ class FakeElement {
   }
 
   addEventListener() {}
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (node) => {
+      if (selector === "[data-detail-key]" && node.getAttribute?.("data-detail-key")) {
+        matches.push(node);
+      }
+      node.children?.forEach(visit);
+    };
+    this.children.forEach(visit);
+    return matches;
+  }
 }
 
 globalThis.document = {
@@ -162,4 +183,17 @@ test("renderAgents surfaces a bounded latest-run summary in every compact row", 
   }
   assert.match(normalizedText(rows[0]), /Compte rendu utile/u);
   assert.match(normalizedText(rows[1]), /Aucun compte rendu récent./u);
+});
+
+test("renderAgents keeps an opened agent diagnostic open across polling", () => {
+  const root = element();
+  const snapshot = {agents: [{skill: "qa-run"}], disabled_roles: []};
+
+  renderAgents(root, element(), element(), snapshot, handlers);
+  const diagnostic = root.querySelectorAll("[data-detail-key]")[0];
+  diagnostic.open = true;
+
+  renderAgents(root, element(), element(), snapshot, handlers);
+
+  assert.equal(root.querySelectorAll("[data-detail-key]")[0].open, true);
 });

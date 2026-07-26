@@ -75,6 +75,7 @@
     ]
   },
   "release": {"autonomy": "off"},
+  "delivery": {"fix_autonomy": "off"},
   "architecture": {"interval_seconds": 604800},
   "preprod_review": {"base_ref": "origin/preprod", "compare_ref": "origin/develop", "history_limit": 10},
   "agents": {
@@ -98,7 +99,6 @@
   },
   "project": {
     "instructions": ["AGENTS.md"],
-    "architecture_index": "graphify-out/wiki/index.md",
     "architecture_report": "graphify-out/GRAPH_REPORT.md",
     "references": {
       "security": ".claude/SECURITY.md",

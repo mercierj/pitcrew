@@ -191,6 +191,7 @@ def issue_decision(
         "implementer-run": (
             {labels["agent"], states["todo"]},
             {labels["agent"], states["review"]},
+            {labels["agent"], states["processing"]},
         ),
         "validator-run": ({labels["agent"], states["review"]},),
         "investigate-run": (

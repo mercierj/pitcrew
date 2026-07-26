@@ -277,7 +277,7 @@ class EligibilityTest(unittest.TestCase):
         self.assertIn("order_by=iid", endpoint)
         self.assertIn("sort=asc", endpoint)
 
-    def test_implementer_accepts_todo_or_review_and_selects_ascending_iid(self):
+    def test_implementer_accepts_processing_todo_or_review_and_selects_ascending_iid(self):
         issues = [
             {
                 "iid": 9,
@@ -289,7 +289,7 @@ class EligibilityTest(unittest.TestCase):
             },
             {
                 "iid": 2,
-                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+                "labels": ["pitcrew-agent", "pitcrew-state::processing"],
             },
         ]
 
@@ -301,7 +301,7 @@ class EligibilityTest(unittest.TestCase):
         )
 
         self.assertEqual("eligible", decision["decision"])
-        self.assertEqual("getbill1/getbill#4", decision["target_id"])
+        self.assertEqual("getbill1/getbill#2", decision["target_id"])
 
     def test_issue_probe_fetches_second_page_before_declaring_empty(self):
         page_one = [

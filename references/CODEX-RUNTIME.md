@@ -26,11 +26,14 @@ default, and config components and fail closed before invoking Codex.
 After that validation, `bin/pitcrew-codex.sh` grants Codex access to the selected
 project's runtime directory and configured repository through `--add-dir`. The
 runtime directory lets skills persist local state; the repository grant lets
-Git-backed worktrees update metadata such as `.git/FETCH_HEAD`. The
-`implementer-run` role additionally uses Codex's `danger-full-access` sandbox
-because macOS can reject Git metadata writes outside the Pitcrew workspace;
-this exception is limited to the configured local repository and implementer
-role. All other roles retain `workspace-write`. This boundary does not claim to pin filesystem
+Git-backed worktrees update metadata such as `.git/FETCH_HEAD`.
+
+On macOS, Codex's `workspace-write` network setting is not effective for
+subprocesses. Roles that call the configured forge or tracker therefore use the
+network-capable `danger-full-access` sandbox; local/read-only roles retain
+`workspace-write`. The provider-role list is maintained in
+`bin/pitcrew-codex.sh` and is intentionally narrower than all scheduled roles.
+The implementer role also requires that mode for Git metadata writes. This boundary does not claim to pin filesystem
 objects across the process handoff; implementers have a
 sandbox-safe isolated-clone fallback when the checkout's Git metadata is
 protected.

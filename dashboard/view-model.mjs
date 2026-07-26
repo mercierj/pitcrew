@@ -94,7 +94,12 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
     actions.push({ kind: "agent-failure", key: `agent:${skill}`, label: "Diagnostiquer", priority: 1, timestamp: agent.latest_history?.finished_at || "", resource: agent });
   }
   for (const mergeRequest of asArray(work?.merge_requests)) {
-    if (!mergeRequest || ["preprod", "prod"].includes(mergeRequest.target_branch)) continue;
+    if (
+      !mergeRequest
+      || ["preprod", "prod"].includes(mergeRequest.target_branch)
+      || mergeRequest.has_conflicts === true
+      || mergeRequest.detailed_merge_status === "conflict"
+    ) continue;
     const key = resourceKey(mergeRequest, "merge_request");
     if (!key) continue;
     actions.push({

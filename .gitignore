@@ -14,5 +14,6 @@ config.json
 # local scratch
 *.log
 *.tmp
+.playwright-cli/
 __pycache__/
 *.py[cod]

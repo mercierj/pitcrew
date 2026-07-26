@@ -5,12 +5,47 @@ import {readFile} from "node:fs/promises";
 import {createDetailPanel} from "../dashboard/detail-panel.mjs";
 import {
   preserveFocus,
+  captureOpenDetails,
+  enrichWorkflowEntry,
   renderActionFeedback,
   renderActionList,
   renderItemDetail,
   renderPilotage,
   summarizeAgentFailure,
 } from "../dashboard/pilotage.mjs";
+
+test("durable local run overrides the cached GitLab run in workflow cards", () => {
+  const target = "https://gitlab.example/group/app/-/issues/42";
+  const cachedRun = {
+    run_id: "cached",
+    skill: "implementer-run",
+    target,
+    state: "running",
+  };
+  const localRun = {
+    run_id: "durable",
+    skill: "implementer-run",
+    target,
+    state: "failed",
+  };
+
+  const enriched = enrichWorkflowEntry(
+    {
+      canonical_url: target,
+      web_url: target,
+      active_run: cachedRun,
+      agent_action: {skill: "implementer-run"},
+    },
+    {
+      runs: {runs: [localRun]},
+      snapshot: {agents: []},
+      work: {merge_requests: []},
+    },
+  );
+
+  assert.deepEqual(enriched.active_run, localRun);
+  assert.equal(enriched.delivery_context.active_agent.phase, "failed");
+});
 
 class Focusable extends EventTarget {
   constructor() {
@@ -86,6 +121,7 @@ class Element extends EventTarget {
     const matches = [];
     const visit = (node) => {
       if (selector === "[data-focus-key]" && node.getAttribute?.("data-focus-key")) matches.push(node);
+      if (selector === "[data-detail-key]" && node.getAttribute?.("data-detail-key")) matches.push(node);
       node.children?.forEach(visit);
     };
     this.children.forEach(visit);
@@ -96,6 +132,145 @@ class Element extends EventTarget {
     document.activeElement = this;
   }
 }
+
+test("workflow cards localize durable queue state and disable active launches", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: (tagName) => new Element(tagName),
+  };
+  const workflowBoard = new Element();
+  const targets = [
+    "https://gitlab.example/group/app/-/issues/1",
+    "https://gitlab.example/group/app/-/issues/2",
+  ];
+  renderPilotage(
+    {workflowBoard},
+    {
+      work: {
+        groups: {
+          todo: targets.map((target, index) => ({
+            resource_type: "issue",
+            canonical_url: target,
+            web_url: target,
+            iid: index + 1,
+            lifecycle: "todo",
+            title: `Ticket ${index + 1}`,
+            agent_action: {
+              skill: "implementer-run",
+              label: "Lancer l’implémentation",
+              available: true,
+            },
+          })),
+        },
+        merge_requests: [],
+      },
+      runs: {
+        runs: [
+          {
+            run_id: "running",
+            skill: "implementer-run",
+            target: targets[0],
+            state: "running",
+            queue_position: 0,
+          },
+          {
+            run_id: "queued",
+            skill: "implementer-run",
+            target: targets[1],
+            state: "queued",
+            queue_position: 1,
+          },
+        ],
+        capacity: {
+          "implementer-run": {running: 3, max_concurrent: 3},
+        },
+      },
+      snapshot: {agents: []},
+    },
+    {filters: () => ({})},
+  );
+
+  const todoLane = workflowBoard.children
+    .find((lane) => lane.children[0]?.textContent === "À faire · 2");
+  const [runningCard, queuedCard] = todoLane.children.slice(1);
+  const runningText = runningCard.children
+    .map((child) => child.textContent)
+    .join(" | ");
+  const queuedText = queuedCard.children
+    .map((child) => child.textContent)
+    .join(" | ");
+  const runningButton = runningCard.children
+    .find((child) => child.tagName === "button");
+  const queuedButton = queuedCard.children
+    .find((child) => child.tagName === "button");
+
+  assert.match(runningText, /En cours · 3\/3 places utilisées/);
+  assert.match(queuedText, /En attente · position 1/);
+  assert.equal(runningButton.disabled, true);
+  assert.equal(queuedButton.disabled, true);
+  assert.equal(runningButton.getAttribute("aria-busy"), "true");
+  assert.equal(queuedButton.getAttribute("aria-busy"), "true");
+  globalThis.document = originalDocument;
+});
+
+test("failed workflow run is localized and can be retried", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: (tagName) => new Element(tagName),
+  };
+  const workflowBoard = new Element();
+  const target = "https://gitlab.example/group/app/-/issues/3";
+  renderPilotage(
+    {workflowBoard},
+    {
+      work: {
+        groups: {
+          todo: [{
+            resource_type: "issue",
+            canonical_url: target,
+            web_url: target,
+            iid: 3,
+            lifecycle: "todo",
+            title: "Ticket 3",
+            agent_action: {
+              skill: "implementer-run",
+              label: "Lancer l’implémentation",
+              available: true,
+            },
+          }],
+        },
+        merge_requests: [],
+      },
+      runs: {
+        runs: [{
+          run_id: "failed",
+          skill: "implementer-run",
+          target,
+          state: "failed",
+          queue_position: 0,
+        }],
+        capacity: {
+          "implementer-run": {running: 0, max_concurrent: 3},
+        },
+      },
+      snapshot: {agents: []},
+    },
+    {filters: () => ({})},
+  );
+
+  const todoLane = workflowBoard.children
+    .find((lane) => lane.children[0]?.textContent === "À faire · 1");
+  const card = todoLane.children[1];
+  const cardText = card.children.map((child) => child.textContent).join(" | ");
+  const button = card.children.find((child) => child.tagName === "button");
+
+  assert.match(cardText, /Échec · Relancer/);
+  assert.equal(button.disabled, false);
+  assert.equal(button.getAttribute("aria-busy"), "false");
+  globalThis.document = originalDocument;
+});
 
 test("agent failure summaries extract useful JSON fields and stay bounded", () => {
   const context = summarizeAgentFailure(JSON.stringify({
@@ -402,6 +577,22 @@ test("polling render preserves a focused control by its stable key", () => {
   globalThis.document = originalDocument;
 });
 
+test("polling render preserves open details by stable key", () => {
+  const root = new Element();
+  const current = new Element("details");
+  current.setAttribute("data-detail-key", "decision:42");
+  current.open = true;
+  root.append(current);
+
+  const restore = captureOpenDetails(root);
+  const replacement = new Element("details");
+  replacement.setAttribute("data-detail-key", "decision:42");
+  root.replaceChildren(replacement);
+  restore();
+
+  assert.equal(root.children[0].open, true);
+});
+
 test("detail transitions preserve the explicit external focus target", () => {
   const external = new Focusable();
   const unrelated = new Focusable();
@@ -440,6 +631,57 @@ test("detail transitions preserve the explicit external focus target", () => {
   assert.equal(unrelated.focusCalls, 0);
   assert.equal(internalAction.focusCalls, 0);
   delete globalThis.document;
+});
+
+test("detail lifecycle notifies polling pause and resume once per open session", () => {
+  const originalDocument = globalThis.document;
+  const dialog = new Dialog();
+  const title = {textContent: ""};
+  const content = new Element();
+  const body = {nodeType: 1};
+  const closeButton = new Focusable();
+  const lifecycle = [];
+  globalThis.document = {
+    activeElement: closeButton,
+    contains: () => true,
+  };
+  const controller = createDetailPanel(dialog, title, content, closeButton, {
+    onOpen: () => lifecycle.push("pause"),
+    onClose: () => lifecycle.push("resume"),
+  });
+
+  controller.open({heading: "Détail", body});
+  controller.open({heading: "Détail actualisé", body});
+  assert.deepEqual(lifecycle, ["pause"]);
+
+  controller.close();
+  assert.deepEqual(lifecycle, ["pause", "resume"]);
+
+  globalThis.document = originalDocument;
+});
+
+test("an unsolicited dialog close keeps the diagnostic open and polling paused", () => {
+  const originalDocument = globalThis.document;
+  const dialog = new Dialog();
+  const title = {textContent: ""};
+  const content = new Element();
+  const closeButton = new Focusable();
+  const lifecycle = [];
+  globalThis.document = {
+    activeElement: closeButton,
+    contains: () => true,
+  };
+  const controller = createDetailPanel(dialog, title, content, closeButton, {
+    onOpen: () => lifecycle.push("pause"),
+    onClose: () => lifecycle.push("resume"),
+  });
+
+  controller.open({heading: "Diagnostic", body: {nodeType: 1}});
+  dialog.close();
+
+  assert.equal(dialog.open, true);
+  assert.deepEqual(lifecycle, ["pause"]);
+  globalThis.document = originalDocument;
 });
 
 test("closing detail restores focus to a polling replacement with the same stable key", () => {
@@ -531,5 +773,36 @@ test("automatic refresh preserves the viewport without changing manual refresh",
   assert.match(
     refreshSource,
     /if \(scrollPosition\) window\.scrollTo\(scrollPosition\.x, scrollPosition\.y\);/,
+  );
+});
+
+test("answered decisions refresh without closing the detail modal", async () => {
+  const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
+  const submitDecision = appSource
+    .split("async function submitDecision(pending, answer) {")[1]
+    .split("function runsByTarget(")[0];
+  const openItem = appSource
+    .split("function openItem(entry) {")[1]
+    .split("function openAllActions(")[0];
+
+  assert.match(
+    submitDecision,
+    /await refresh\(\{ manual: true \}\);/,
+  );
+  assert.doesNotMatch(submitDecision, /detailController\.close\(\);/);
+});
+
+test("local refresh exposes durable runs to the pilotage workflow", async () => {
+  const appSource = await readFile(
+    new URL("../dashboard/app.js", import.meta.url),
+    "utf8",
+  );
+  const refreshLocal = appSource
+    .split("async function refreshLocal()")[1]
+    .split("async function refreshHumanActions()")[0];
+
+  assert.match(
+    refreshLocal,
+    /if \(runs\.data\) \{\s*sources\.runs = runs\.data;\s*latestRuns = runs\.data;\s*\}/,
   );
 });

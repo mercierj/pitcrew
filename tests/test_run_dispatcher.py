@@ -324,6 +324,7 @@ class RunDispatcherTest(unittest.TestCase):
     def test_default_validator_resolves_role_lifecycle_labels_from_config(self):
         cases = [
             ("implementer-run", ["agent-label", "review-label"]),
+            ("implementer-run", ["agent-label", "processing-label"]),
             ("validator-run", ["agent-label", "review-label"]),
             ("reviewer-run", ["agent-label", "review-label"]),
             ("investigate-run", ["agent-label", "investigate-label", "todo-label"]),
@@ -364,34 +365,32 @@ class RunDispatcherTest(unittest.TestCase):
         self.assertEqual(len(cases), len(spawned))
         self.assertEqual(len(cases), provider.call_count)
 
-    def test_default_validator_allows_reconcile_stale_sweep_for_blocked_ticket(self):
+    def test_reconciliation_stale_sweep_accepts_open_merged_drift_lifecycles(self):
         provider = mock.Mock(
             return_value=self.provider_result(
                 labels=["agent-label", "blocked-label"],
             )
         )
+        spawned = []
         run = self.store.enqueue(
             project="demo",
             skill="stale-sweep",
             source="reconcile",
             target="https://gitlab.example/crew/demo/-/issues/7",
         )
-        spawned = []
         with mock.patch.object(
             dispatcher_module,
             "load_runtime_config",
             return_value=self.gitlab_config(),
         ):
-            dispatcher = RunDispatcher(
+            RunDispatcher(
                 self.store,
                 "/runner",
                 process_factory=lambda *args, **kwargs: (
                     spawned.append((args, kwargs)) or FakeProcess()
                 ),
                 provider_runner=provider,
-            )
-
-            dispatcher.drain("demo", {"stale-sweep": 1})
+            ).drain("demo", {"stale-sweep": 1})
 
         self.assertEqual("running", self.store.get(run["run_id"])["state"])
         self.assertEqual(1, len(spawned))
@@ -553,6 +552,49 @@ class RunDispatcherTest(unittest.TestCase):
             [candidate["target"] for candidate in seen],
         )
         self.assertTrue(all(candidate["run_id"] == run["run_id"] for candidate in seen))
+
+    def test_stale_sweep_binds_every_open_agent_lifecycle_state(self):
+        for issue_iid, lifecycle in enumerate((
+            "todo-label",
+            "processing-label",
+            "review-label",
+            "blocked-label",
+            "done-label",
+        ), start=7):
+            with self.subTest(lifecycle=lifecycle):
+                canonical = (
+                    "https://gitlab.example/crew/demo/-/issues/"
+                    f"{issue_iid}"
+                )
+                run = self.store.enqueue(
+                    project="demo",
+                    skill="stale-sweep",
+                    source="reconcile",
+                )
+                provider = mock.Mock(
+                    return_value=self.provider_result(
+                        iid=issue_iid,
+                        labels=["agent-label", lifecycle]
+                    )
+                )
+                dispatcher = RunDispatcher(
+                    self.store,
+                    "/runner",
+                    provider_runner=provider,
+                )
+
+                with mock.patch.object(
+                    dispatcher_module,
+                    "load_runtime_config",
+                    return_value=self.gitlab_config(),
+                ):
+                    bound = dispatcher.bind_target(
+                        "demo",
+                        run["run_id"],
+                        canonical,
+                    )
+
+                self.assertEqual(canonical, bound["target"])
 
     def test_bind_same_pretargeted_run_is_idempotent_without_validation(self):
         target = "getbill1/getbill!7"

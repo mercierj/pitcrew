@@ -21,6 +21,10 @@
         <span id="global-state" class="global-state">État global : en fonctionnement</span>
         <button id="global-stop-button" class="button button-danger" type="button">Tout arrêter</button>
         <button id="global-resume-button" class="button button-primary" type="button" hidden>Réactiver les agents</button>
+        <label class="fix-autonomy-control" for="fix-autonomy-toggle">
+          <input id="fix-autonomy-toggle" type="checkbox">
+          Correctifs autonomes
+        </label>
         <p id="global-action-status" class="action-state" aria-live="polite"></p>
       </div>
     </div>
@@ -100,7 +104,7 @@
           <div id="decision-content" aria-live="polite"></div>
         </section>
 
-        <section id="overview" class="panel overview" aria-labelledby="overview-title" hidden>
+        <section id="overview" class="panel overview" aria-labelledby="overview-title">
           <div class="section-heading">
             <div>
               <p class="eyebrow">Vue d’ensemble</p>

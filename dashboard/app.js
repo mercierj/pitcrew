@@ -40,6 +40,7 @@ const elements = {
   refreshState: document.querySelector("#refresh-state"),
   globalStopButton: document.querySelector("#global-stop-button"),
   globalResumeButton: document.querySelector("#global-resume-button"),
+  fixAutonomyToggle: document.querySelector("#fix-autonomy-toggle"),
   globalState: document.querySelector("#global-state"),
   globalActionStatus: document.querySelector("#global-action-status"),
   operationalStatus: document.querySelector("#operational-status"),
@@ -96,7 +97,15 @@ const elements = {
   },
 };
 
-const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, preprod: {}, work: {}};
+const sources = {
+  snapshot: {},
+  history: [],
+  decisions: {},
+  proposals: {},
+  preprod: {},
+  work: {},
+  runs: {runs: [], capacity: {}, has_active: false},
+};
 const sourceStore = createSourceStore();
 const renderGitLabWhenChanged = createStableRenderGuard();
 const coordinateHistoryRequest = createLatestRequestCoordinator();
@@ -155,6 +164,10 @@ function setText(element, value) {
   if (element) {
     element.textContent = value == null ? "" : String(value);
   }
+}
+
+function clearDetailActionStatus() {
+  renderActionFeedback(elements.detailActionStatus, null);
 }
 
 function setActionState(key, kind, message) {
@@ -506,6 +519,9 @@ function renderOverview(snapshot) {
   if (elements.globalResumeButton) {
     elements.globalResumeButton.hidden = !globalStopped;
   }
+  if (elements.fixAutonomyToggle) {
+    elements.fixAutonomyToggle.checked = snapshot?.fix_autonomy === "on";
+  }
   if (globalStopped) {
     elements.globalBanner.classList.add("banner-error");
     setText(elements.globalBanner, "Exécutions bloquées : aucun nouvel agent ne sera lancé.");
@@ -801,6 +817,7 @@ async function submitDecision(pending, answer) {
     );
     setText(elements.operationalStatus, "Décision enregistrée ; unblock est lancé.");
     await refresh({ manual: true });
+    clearDetailActionStatus();
   } catch {
     setText(elements.operationalStatus, "Impossible d’enregistrer la décision.");
   } finally {
@@ -1208,6 +1225,7 @@ function actionForEntry(entry) {
 
 function openItem(entry) {
   if (!entry) return;
+  clearDetailActionStatus();
   const detail = renderItemDetail(entry, {forEntry: actionForEntry});
   detailController.open(detail);
   const resource = issueResource(entry);
@@ -1225,6 +1243,7 @@ function openItem(entry) {
 }
 
 function openAllActions(queue = currentActionQueue, returnFocusTo = null) {
+  clearDetailActionStatus();
   detailTicketView = null;
   const body = document.createElement("div");
   body.className = "all-actions";
@@ -1449,7 +1468,10 @@ async function refreshLocal() {
       elements.globalResumeButton.hidden = snapshot.data.global_state !== "stopped";
     }
   }
-  if (runs.data) latestRuns = runs.data;
+  if (runs.data) {
+    sources.runs = runs.data;
+    latestRuns = runs.data;
+  }
   renderOverview(sources.snapshot);
   renderLiveAgents(sources.snapshot);
   renderAgents(sources.snapshot);
@@ -1646,6 +1668,26 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
 elements.refreshButton.addEventListener("click", () => refresh({ manual: true }));
 elements.globalStopButton?.addEventListener("click", () => globalControl("stop-all"));
 elements.globalResumeButton?.addEventListener("click", () => globalControl("resume-all"));
+elements.fixAutonomyToggle?.addEventListener("change", async () => {
+  const mode = elements.fixAutonomyToggle.checked ? "on" : "off";
+  elements.fixAutonomyToggle.disabled = true;
+  try {
+    await runAction(
+      "fix-autonomy",
+      {
+        pending: "Mise à jour du mode autonome.",
+        success: mode === "on" ? "Correctifs autonomes activés." : "Correctifs autonomes désactivés.",
+        error: "Impossible de modifier le mode autonome.",
+      },
+      () => api.action({action: "set-fix-autonomy", mode}),
+    );
+    await refresh({manual: true});
+  } catch {
+    await refresh({manual: true});
+  } finally {
+    elements.fixAutonomyToggle.disabled = false;
+  }
+});
 elements.preprodReviewTrigger?.addEventListener("click", () => runPreprodReviewAction("trigger-preprod-review"));
 elements.preprodReviewStop?.addEventListener("click", () => runPreprodReviewAction("stop-preprod-review"));
 elements.workflowSearch?.addEventListener("input", renderPilotageView);

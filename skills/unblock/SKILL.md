@@ -125,7 +125,7 @@ structured no-op without a tracker mutation or checkout write.
 4. **NEVER close (`$STATE_DONE`) a ticket without leaving a comment that says why.** Audit trail matters.
 5. **NEVER ask two questions in parallel.** Sequential only — the lock in `unblock-state.json` prevents concurrent fires from racing, but within ONE fire be careful to await each answer before asking the next.
 6. **NEVER auto-decide for the operator.** If a ticket's bail reason is ambiguous, ask. Don't pattern-match it into a wrong shape silently.
-7. **NEVER touch tickets that don't have a bail comment** (i.e. tickets that landed in `$STATE_BLOCKED` somehow without a "Bailed mid-implementation" / "Scope too big" / "needs human" trailing comment from an agent). Comment on the ticket asking what happened, leave state alone, move on.
+7. **Tickets without a qualifying bail comment require operator intent.** Do not infer a bail reason or change their tracker state automatically. Classify them as `missing-bail-context`, persist one question, and apply only the operator's selected existing STEP 7 action.
 8. **When creating an investigate-sibling, the `investigate` label is MANDATORY on the new ticket.** Without it, `$pitcrew:implementer-run`'s STEP B routing-skip won't see it as investigation work — implementer picks it up and bails at STEP C, defeating the entire flow. After `save_issue` creates the sibling, IMMEDIATELY `get_issue` on the new ticket ID and verify `.labels` includes `$INVESTIGATE_LABEL`. If missing, call `save_issue` again with the full corrected label set. **Past failure mode: a sibling was filed WITHOUT the `investigate` label and had to be fixed manually. Don't repeat.**
 
 ═══ STATE FILE ═══
@@ -241,9 +241,10 @@ ticket = INSPECT_TRACKER_ITEM(id="<TICKET-id>")
   - "needs human pickup"
   Use `LIST_TRACKER_COMMENTS(issueId="<TICKET-id>")` and scan from the most recent backwards.
 
-If no bail comment is found, this ticket landed in `$STATE_BLOCKED` without an agent bail.
-Post a comment explaining that the reason is unclear, update `state.asked` with
-`action: "no-bail-comment"` so it is not reprocessed, and stop.
+If no bail comment is found, this ticket landed in `$STATE_BLOCKED` without a
+qualifying agent bail comment. Set its shape to `missing-bail-context`; do not post
+a tracker comment or change its state before the operator answers the Step 6
+question. This preserves the ticket while making it actionable from the dashboard.
 
 **STEP 4. Classify the bail shape.**
 
@@ -257,6 +258,7 @@ Pick ONE of these shapes by matching keywords in the bail comment + ticket body:
 | `auth-sensitive` | Bail mentions "auth-sensitive" / "tenant" / "RBAC" / "JWT" / "security" | (rare, but the implementer auto-bails this class) |
 | `fix-exhausted` | Bail mentions "Auto-fix exhausted" / "2 attempts" / "Two fix attempts" | (implementer hit its 2-retry cap) |
 | `ci-red` | Bail mentions "CI red after 2 fix attempts" | (implementer can't get CI green) |
+| `missing-bail-context` | No qualifying agent bail comment exists | Ticket entered blocked without a recorded reason |
 | `generic` | Anything else | Fallback |
 
 **STEP 5. Acquire the pending_question lock.**
@@ -384,6 +386,29 @@ options:
   - label: "Close the change + ticket — bad direction"
     description: "The work was the wrong shape. Comment + close change + $STATE_DONE."
 ```
+
+### Shape: `missing-bail-context`
+
+```
+question:   "<ticket-id> is blocked without a qualifying agent bail comment. What should happen next?"
+header:     "Missing context"
+options:
+  - label: "Investigate first — file a sibling research ticket"
+    description: "Create a read-only investigation sibling when the original blocker is unclear. The parent remains blocked until findings are posted."
+  - label: "Send back to agent-todo with context"
+    description: "Move to $STATE_TODO only with the scope or blocker context you provide in 'Other'."
+  - label: "Close as won't-do"
+    description: "Move to $STATE_DONE with your audit comment."
+  - label: "Keep blocked"
+    description: "Leave the ticket in $STATE_BLOCKED until you have more context."
+```
+
+For this shape only, map the exact selected label before Step 7:
+
+- "Investigate first — file a sibling research ticket" → `investigate-sibling`
+- "Send back to agent-todo with context" → `send-back-to-agent-todo`
+- "Close as won't-do" → `close-wontfix`
+- "Keep blocked" → `keep-deferred`
 
 ### Shape: `generic` (fallback)
 
@@ -515,6 +540,10 @@ Cooldown on parent: extend to whenever the sibling's state changes (we'll detect
 
 ### If action is `send-back-to-agent-todo`:
 
+- For `missing-bail-context`, require non-empty notes before changing state. If the
+  operator did not provide context, keep the pending question locked and ask for a
+  one-to-three-sentence blocker or scope note; do not post a comment or move the
+  ticket to `$STATE_TODO` yet.
 - Comment on the ticket with the answer's free-form context (notes or "Other" text): `Unblocker: <your context>. Resetting to $STATE_TODO.`
 - Move state to `$STATE_TODO_ID` (preserve labels).
 
@@ -693,13 +722,13 @@ Scheduling belongs to the Codex scheduled task or external caller; this skill ne
 
 - **configured tracker unavailable** → `[unblock] configured tracker not available, exiting.` Lock released.
 - **Current-thread question timeout** (you never answer in this session lifetime) → lock stays set with `asked_at`; next fire detects stale lock (>24h) and clears, but in practice you can just kill the session or wait for the operator.
-- **Ticket malformed** (no bail comment, no labels, weird state) → comment on ticket asking what happened, set `state.asked[<id>].action = "malformed"`, stop, exit.
+- **Ticket malformed** (no labels, invalid state, or unreadable required fields) → comment on ticket asking what happened, set `state.asked[<id>].action = "malformed"`, stop, exit. A ticket without a qualifying bail comment is not malformed: use `missing-bail-context`.
 - **Child-creation partial failure** (e.g. 3 of 5 children created, then API error) → already-created children are kept; comment on parent listing what succeeded + failed; ask the operator in a follow-up whether to retry the rest or treat the partial as done.
 
 ═══ TONE ═══
 
 - configured tracker comments: terse, factual. Start with `Unblocker: ` so they're greppable.
-- Current-thread questions: brief, specific. Cite the ticket ID + the bail one-liner. Don't ask the operator to re-read the whole ticket.
+- Current-thread questions: brief, specific. Cite the ticket ID + the bail one-liner, or explicitly say that no qualifying bail comment exists. Don't ask the operator to re-read the whole ticket.
 - Run output: one log line per step, ONE final summary line.
 
 Begin.

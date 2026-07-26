@@ -48,6 +48,7 @@ PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 DEFAULT_MAX_CONCURRENT_PER_SKILL = 3
 MAX_CONCURRENT_PER_SKILL = 16
+FIX_AUTONOMY_VALUES = {"off", "on"}
 
 
 class ConfigError(ValueError):
@@ -122,6 +123,13 @@ def _mapping(config: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ConfigError(f"{key} must be an object")
     return value
+
+
+def fix_autonomy(config: Mapping[str, Any]) -> str:
+    delivery = config.get("delivery", {})
+    if not isinstance(delivery, Mapping):
+        raise ConfigError("delivery must be an object")
+    return delivery.get("fix_autonomy", "off")
 
 
 def validate(config: Mapping[str, Any]) -> None:
@@ -200,6 +208,13 @@ def validate(config: Mapping[str, Any]) -> None:
         raise ConfigError("release must be an object")
     if release.get("autonomy", "off") not in {"off", "prepare", "dev", "full"}:
         raise ConfigError("release.autonomy is unsupported")
+    delivery = config.get("delivery", {})
+    if not isinstance(delivery, Mapping):
+        raise ConfigError("delivery must be an object")
+    if set(delivery) - {"fix_autonomy"}:
+        raise ConfigError("delivery contains unsupported fields")
+    if fix_autonomy(config) not in FIX_AUTONOMY_VALUES:
+        raise ConfigError("delivery.fix_autonomy must be off or on")
     safety = config.get("safety", {})
     if not isinstance(safety, Mapping):
         raise ConfigError("safety must be an object")
@@ -631,6 +646,32 @@ def update_runtime_model(
         validate(updated)
         serialized = json.dumps(updated, indent=2) + "\n"
         _replace_runtime_config(project_fd, serialized)
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+        os.close(project_fd)
+
+
+def update_runtime_fix_autonomy(
+    project: str,
+    mode: str,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    if mode not in FIX_AUTONOMY_VALUES:
+        raise ConfigError("delivery.fix_autonomy must be off or on")
+    values = os.environ if env is None else env
+    project_fd = _open_runtime_project_for_read(project, values)
+    lock_fd: int | None = None
+    try:
+        lock_fd = _lock_runtime_config(project_fd)
+        config = _load_runtime_config_from_fd(project_fd)
+        delivery = dict(config.get("delivery", {}))
+        delivery["fix_autonomy"] = mode
+        updated = dict(config)
+        updated["delivery"] = delivery
+        validate(updated)
+        _replace_runtime_config(project_fd, json.dumps(updated, indent=2) + "\n")
     finally:
         if lock_fd is not None:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

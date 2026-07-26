@@ -63,7 +63,7 @@ class PreflightTest(unittest.TestCase):
             result = self.run_helper("check", "--project", "getbill", "--skill", "reviewer-run", env=env)
             self.assertEqual("run", json.loads(result.stdout)["decision"])
 
-    def test_noop_cooldown_is_scoped_to_one_skill(self):
+    def test_noop_does_not_block_the_next_scheduled_pass(self):
         with tempfile.TemporaryDirectory() as temp:
             env = {**os.environ, "CODEX_HOME": temp}
             record = self.run_helper(
@@ -71,10 +71,8 @@ class PreflightTest(unittest.TestCase):
                 "--reason", "no eligible item", env=env,
             )
             self.assertEqual(0, record.returncode, record.stderr)
-            blocked = self.run_helper("check", "--project", "getbill", "--skill", "implementer-run", env=env)
-            allowed = self.run_helper("check", "--project", "getbill", "--skill", "reviewer-run", env=env)
-            self.assertEqual("noop", json.loads(blocked.stdout)["decision"])
-            self.assertEqual("run", json.loads(allowed.stdout)["decision"])
+            next_pass = self.run_helper("check", "--project", "getbill", "--skill", "implementer-run", env=env)
+            self.assertEqual("run", json.loads(next_pass.stdout)["decision"])
 
     def test_record_gate_writes_no_model_history(self):
         with tempfile.TemporaryDirectory() as temp:

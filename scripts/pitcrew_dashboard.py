@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, urlsplit
 
-from scripts.pitcrew_config import ConfigError, update_runtime_model, validate
+from scripts.pitcrew_config import (
+    ConfigError,
+    fix_autonomy,
+    update_runtime_fix_autonomy,
+    update_runtime_model,
+    validate,
+)
 from scripts.pitcrew_config import max_concurrent_for
 from scripts.pitcrew_history import HistoryStore, classify_record
 from scripts.pitcrew_proposals import ProposalError, ProposalStore
@@ -192,6 +198,10 @@ class DashboardService:
             )
         self._preprod_process: subprocess.Popen | None = None
 
+    @property
+    def _unblock_state_path(self) -> Path:
+        return self.runtime_dir / "state" / "unblock-state.json"
+
     def _load_config(self) -> dict:
         try:
             value = json.loads(
@@ -338,7 +348,7 @@ class DashboardService:
             }
 
     def decisions(self) -> dict:
-        state_path = self.runtime_dir / "unblock-state.json"
+        state_path = self._unblock_state_path
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -480,7 +490,7 @@ class DashboardService:
         return payload
 
     def submit_decision(self, ticket_id: str, answer: str, notes: str) -> dict:
-        state_path = self.runtime_dir / "unblock-state.json"
+        state_path = self._unblock_state_path
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
@@ -729,6 +739,7 @@ class DashboardService:
             "project": self.project,
             "generated_at": self._now().isoformat(),
             "global_state": self._global_state(schedule),
+            "fix_autonomy": fix_autonomy(self.config),
             "counts": {
                 "enabled": len(agents),
                 "disabled": len(disabled_roles),
@@ -861,6 +872,11 @@ class DashboardService:
         for issues in groups.values():
             for issue in issues:
                 target = issue.get("web_url")
+                if isinstance(target, str):
+                    try:
+                        target, _ = self._canonical_ticket_target(target)
+                    except DashboardError:
+                        target = None
                 active_run = active_by_target.get(target) if isinstance(target, str) else None
                 issue["active_run"] = active_run
                 action = issue.get("agent_action")
@@ -875,20 +891,28 @@ class DashboardService:
     def _canonical_ticket_target(self, target: str) -> tuple[str, int]:
         parsed = urlsplit(target)
         configured_host = str(self.config["gitlab"].get("host", ""))
-        prefix = f"/{self.gitlab_project}/-/issues/"
+        prefixes = (
+            f"/{self.gitlab_project}/-/issues/",
+            f"/{self.gitlab_project}/-/work_items/",
+        )
         if (
             parsed.scheme != "https"
             or parsed.netloc != configured_host
             or parsed.query
             or parsed.fragment
-            or not parsed.path.startswith(prefix)
         ):
+            raise DashboardError("invalid ticket target")
+        prefix = next(
+            (candidate for candidate in prefixes if parsed.path.startswith(candidate)),
+            None,
+        )
+        if prefix is None:
             raise DashboardError("invalid ticket target")
         raw_iid = parsed.path.removeprefix(prefix)
         if not raw_iid.isdigit() or int(raw_iid) <= 0:
             raise DashboardError("invalid ticket target")
         iid = int(raw_iid)
-        return f"https://{configured_host}{prefix}{iid}", iid
+        return f"https://{configured_host}/{self.gitlab_project}/-/issues/{iid}", iid
 
     def _ticket_lifecycle(self, issue: object, iid: int) -> str:
         if not isinstance(issue, dict) or issue.get("iid") != iid or issue.get("state") != "opened":
@@ -1277,6 +1301,12 @@ class DashboardService:
             if isinstance(pipeline, dict) and isinstance(pipeline.get("status"), str)
             else None
         )
+        normalized["has_conflicts"] = merge_request.get("has_conflicts") is True
+        normalized["detailed_merge_status"] = (
+            merge_request.get("detailed_merge_status")
+            if isinstance(merge_request.get("detailed_merge_status"), str)
+            else None
+        )
         normalized["resource_type"] = "merge_request"
         normalized["canonical_url"] = (
             merge_request.get("web_url")
@@ -1470,3 +1500,14 @@ class DashboardService:
                 "pid": self._trigger(skill),
                 "model": model,
             }
+
+    def set_fix_autonomy(self, mode: str) -> dict:
+        with self._control_lock:
+            try:
+                update_runtime_fix_autonomy(self.project, mode)
+                self.config = self._load_config()
+            except (ConfigError, OSError) as error:
+                raise DashboardError(
+                    _redacted_error(str(error), "failed to update autonomous fixes policy")
+                ) from error
+            return {"accepted": True, "fix_autonomy": fix_autonomy(self.config)}

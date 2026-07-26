@@ -78,7 +78,11 @@ def _required_labels(
     if any(not isinstance(value, str) or not value for value in values):
         raise TargetValidationUnavailable("target validation is unavailable")
     roles = {
-        "implementer-run": (frozenset((agent, todo)), frozenset((agent, review))),
+        "implementer-run": (
+            frozenset((agent, todo)),
+            frozenset((agent, review)),
+            frozenset((agent, processing)),
+        ),
         "validator-run": (frozenset((agent, review)),),
         "reviewer-run": (frozenset((agent, review)),),
         "investigate-run": (frozenset((agent, investigate, todo)),),

@@ -82,17 +82,17 @@ Codex scheduled tasks should request one skill, one project, and one bounded pas
 Ticket-targeted work uses a durable local queue at
 `${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/runs.sqlite3`. Each role runs up
 to **3** tickets concurrently by default; `execution.max_concurrent_per_skill`
-can override that limit per role. A fourth ticket remains in FIFO order until a
-slot is released. Re-submitting the same ticket returns its existing queued or
-running run instead of starting another worker.
+can optionally override that limit per role. A fourth ticket remains in FIFO
+order until a slot is released. Re-submitting the same ticket returns its
+existing queued or running run instead of starting another worker.
 
 The dashboard keeps queued, running, and failed ticket state across reloads.
 Queued/running tickets cannot be launched again; a failed ticket requires an
 explicit manual retry. Terminal rows are retained for seven days.
 
 **Tout arrêter** cancels active coordinated workers and suspends queued tickets.
-**Réactiver** resumes the queue only; it does not immediately launch a new
-scheduled pass.
+`resume-all` (**Réactiver**) resumes only those queued tickets; it does not
+immediately launch a new scheduled pass.
 Start with read-only or review-oriented roles:
 
 ```text

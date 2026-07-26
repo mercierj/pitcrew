@@ -349,6 +349,20 @@ def create_server(
                     return
                 self._send_json(202, result)
                 return
+            if action == "set-fix-autonomy":
+                if set(request) != {"action", "mode"} or request.get("mode") not in {"off", "on"}:
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = service.set_fix_autonomy(request["mode"])
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
             if action == "answer-decision":
                 if (
                     set(request) != {"action", "ticket_id", "answer", "notes"}

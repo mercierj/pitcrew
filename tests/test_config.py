@@ -12,6 +12,7 @@ from pathlib import Path
 from scripts.pitcrew_config import (
     ConfigError,
     DIRECTORY_FLAGS,
+    fix_autonomy,
     _lock_runtime_config,
     _write_exclusive_config,
     load_runtime_config,
@@ -19,6 +20,7 @@ from scripts.pitcrew_config import (
     max_concurrent_for,
     migrate_legacy,
     runtime_root,
+    update_runtime_fix_autonomy,
     update_runtime_model,
     validate,
     write_project,
@@ -35,6 +37,39 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def test_delivery_fix_autonomy_defaults_off_and_accepts_known_values(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+
+        validate(profile)
+        self.assertEqual("off", fix_autonomy(profile))
+        for value in ("off", "on"):
+            with self.subTest(value=value):
+                candidate = json.loads(json.dumps(profile))
+                candidate["delivery"] = {"fix_autonomy": value}
+                validate(candidate)
+                self.assertEqual(value, fix_autonomy(candidate))
+
+    def test_delivery_fix_autonomy_rejects_invalid_shape(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        for value in (True, "enabled", {"fix_autonomy": "enabled"}):
+            with self.subTest(value=value):
+                candidate = json.loads(json.dumps(profile))
+                candidate["delivery"] = value
+                with self.assertRaisesRegex(ConfigError, "delivery"):
+                    validate(candidate)
+
+    def test_update_runtime_fix_autonomy_replaces_only_delivery_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"CODEX_HOME": str(Path(temp).resolve())}
+            destination = write_project(ROOT / "profiles/getbill.json", "getbill", env)
+            original = json.loads(destination.read_text(encoding="utf-8"))
+
+            update_runtime_fix_autonomy("getbill", "on", env)
+
+            updated = json.loads(destination.read_text(encoding="utf-8"))
+            original["delivery"]["fix_autonomy"] = "on"
+            self.assertEqual(original, updated)
+
     def test_profiles_configure_architecture_manager_source(self):
         getbill = json.loads((ROOT / "profiles/getbill.json").read_text(encoding="utf-8"))
         source = next(item for item in getbill["manager"]["sources"] if item["name"] == "architecture")
