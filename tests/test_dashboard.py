@@ -2632,6 +2632,40 @@ class DashboardAssetContractTest(unittest.TestCase):
                 rf"(?:async\s+)?function\s+{function_name}\b",
             )
 
+    def test_css_supports_laptop_shell_workflow_and_accessibility(self):
+        for selector in (
+            ".app-header",
+            ".app-shell",
+            ".app-sidebar",
+            ".action-queue-list",
+            ".workflow-columns",
+            ".workflow-lane",
+            ".agent-row",
+            "#detail-panel",
+            ".source-state-stale",
+        ):
+            self.assertIn(selector, self.styles)
+        self.assertIn("position: sticky", self.styles)
+        self.assertIn("overflow-x: auto", self.styles)
+        self.assertIn(":focus-visible", self.styles)
+        self.assertIn("@media (max-width: 900px)", self.styles)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", self.styles)
+
+    def test_pilotage_layout_is_responsive_and_wraps_content(self):
+        for token in (
+            ".app-shell",
+            "grid-template-columns: 190px minmax(0, 1fr)",
+            "grid-template-columns: 72px minmax(0, 1fr)",
+            "#app-navigation",
+            ".workflow-lane",
+            ".workflow-card",
+            "min-width: 0",
+            "overflow-wrap: anywhere",
+            "#detail-panel",
+            "@media (max-width: 620px)",
+        ):
+            self.assertIn(token, self.styles)
+
     def test_history_module_keeps_filters_and_safe_metadata(self):
         history = self.modules["history.mjs"]
         self.assertIn("export function renderHistory", history)

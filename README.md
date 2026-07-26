@@ -174,11 +174,14 @@ cd /Users/jo/Prog/pitcrew
 ./bin/pitcrew-dashboard
 ```
 
-Open `http://127.0.0.1:8765`. The server listens only on localhost and runs until
-you shut it down with Ctrl-C. It displays scheduler health, enabled agents,
-activity retained for seven days, and GitLab work. The GitLab panel enters a
-degraded state when GitLab is offline or unavailable, while local status,
-history, and controls continue to work.
+Open `http://127.0.0.1:8765`; the local server runs until you stop it with
+Ctrl-C. **Pilotage** shows human decisions first and groups
+active GitLab work into `À faire`, `En cours`, `En revue`, and `Bloqué`; work
+completed today is folded below the board. **Agents** contains compact operational
+rows with expandable model, usage, schedule, and control details. **Historique**
+keeps the seven-day run log and filters. GitLab failures mark the remote source
+as degraded and retain the last successful data while local monitoring and
+controls continue to work.
 
 For an enabled agent, **Trigger** starts one bounded pass immediately (the
 per-agent lock prevents overlap), **Stop** stops its current pass and unloads its
