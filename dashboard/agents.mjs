@@ -88,6 +88,7 @@ function latestRunSummary(summary) {
 }
 
 function agentRow(agent, handlers) {
+  const eventDriven = agent.trigger_mode === "event";
   const row = document.createElement("article");
   row.className = "agent-row";
   const header = document.createElement("div");
@@ -124,7 +125,9 @@ function agentRow(agent, handlers) {
     fact("Modèle", agent.configured_model || "Indisponible"),
     fact("Jetons", formatTokens(agent.usage_7d?.tokens?.total_tokens)),
     fact("Coût estimé", formatCost(agent.usage_7d?.estimated_cost_usd)),
-    fact("Fréquence", agent.interval_seconds ? `${agent.interval_seconds} s` : "Indisponible"),
+    ...(eventDriven ? [fact("Déclenchement", "Événement ou ticket")] : [
+      fact("Fréquence", agent.interval_seconds ? `${agent.interval_seconds} s` : "Indisponible"),
+    ]),
     fact("PID", agent.pid || "Indisponible"),
   );
   const latestSummary = document.createElement("p");
@@ -138,7 +141,9 @@ function agentRow(agent, handlers) {
   controls.className = "agent-controls";
   controls.append(
     actionButton("Déclencher", "trigger", agent.skill, handlers),
-    actionButton("Réinstaller", "restart", agent.skill, handlers),
+    ...(agent.restartable === false ? [] : [
+      actionButton("Réinstaller", "restart", agent.skill, handlers),
+    ]),
     actionButton("Arrêter", "stop", agent.skill, handlers, true),
   );
   details.append(

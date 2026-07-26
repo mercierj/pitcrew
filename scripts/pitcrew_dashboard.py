@@ -17,6 +17,7 @@ from urllib.parse import quote, urlsplit
 
 from scripts.pitcrew_config import (
     ConfigError,
+    EVENT_DRIVEN_ROLES,
     fix_autonomy,
     update_runtime_fix_autonomy,
     update_runtime_model,
@@ -711,6 +712,7 @@ class DashboardService:
         disabled_roles = []
         for entry in schedule:
             skill = entry["skill"]
+            event_driven = skill in EVENT_DRIVEN_ROLES
             latest = latest_by_skill.get(skill)
             latest_measured = next(
                 (
@@ -721,11 +723,11 @@ class DashboardService:
                 None,
             )
             loaded = bool(entry.get("loaded"))
-            interval = int(entry.get("interval_seconds", 0))
+            interval = None if event_driven else int(entry.get("interval_seconds", 0))
             live_status = self._live_status(skill)
             running = bool(entry.get("running")) or live_status is not None
             estimated = None
-            if loaded and latest is not None and interval > 0:
+            if loaded and latest is not None and interval is not None and interval > 0:
                 try:
                     estimated = (
                         _timestamp(latest["finished_at"])
@@ -740,6 +742,8 @@ class DashboardService:
                 "role_description": _skill_description(skill),
                 "live_status": live_status,
                 "interval_seconds": interval,
+                "trigger_mode": "event" if event_driven else "schedule",
+                "restartable": not event_driven,
                 "latest_history": latest,
                 "health": "stopped" if not loaded else classify_record(latest),
                 "estimated_next_pass": estimated,

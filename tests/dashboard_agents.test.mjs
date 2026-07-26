@@ -185,6 +185,25 @@ test("renderAgents surfaces a bounded latest-run summary in every compact row", 
   assert.match(normalizedText(rows[1]), /Aucun compte rendu récent./u);
 });
 
+test("renderAgents identifies event-driven roles without cadence or schedule controls", () => {
+  const root = element();
+
+  renderAgents(root, element(), element(), {
+    agents: [{
+      skill: "implementer-run",
+      trigger_mode: "event",
+      interval_seconds: null,
+      restartable: false,
+    }],
+    disabled_roles: [],
+  }, handlers);
+
+  const rowText = normalizedText(root);
+  assert.match(rowText, /Déclenchement Événement ou ticket/u);
+  assert.doesNotMatch(rowText, /Fréquence/u);
+  assert.doesNotMatch(rowText, /Réinstaller/u);
+});
+
 test("renderAgents keeps an opened agent diagnostic open across polling", () => {
   const root = element();
   const snapshot = {agents: [{skill: "qa-run"}], disabled_roles: []};

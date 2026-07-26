@@ -609,6 +609,7 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertTrue(
             all(set(entry) == {"profile", "label"} for entry in snapshot["model_catalog"].values())
         )
+
         self.assertEqual(4, snapshot["usage_7d"]["measured_runs"])
         self.assertEqual(1, snapshot["usage_7d"]["unmeasured_runs"])
         self.assertEqual("125", snapshot["usage_7d"]["tokens"]["input_tokens"])
@@ -631,6 +632,35 @@ class DashboardServiceTest(unittest.TestCase):
             {"text": True, "capture_output": True, "check": False},
             runner.calls[0][1],
         )
+
+    def test_snapshot_marks_delivery_roles_as_event_driven_without_a_schedule(self):
+        self.write_history()
+
+        snapshot = self.service(FakeRunner()).snapshot()
+        roles = {
+            role["skill"]
+            for role in (*snapshot["agents"], *snapshot["disabled_roles"])
+        }
+        by_skill = {
+            role["skill"]: role
+            for role in (*snapshot["agents"], *snapshot["disabled_roles"])
+        }
+
+        for skill in (
+            "manager-run", "implementer-run", "reviewer-run", "validator-run",
+            "investigate-run", "unblock",
+        ):
+            with self.subTest(skill=skill):
+                self.assertIn(skill, roles)
+                role = by_skill[skill]
+                self.assertEqual("event", role["trigger_mode"])
+                self.assertIsNone(role["interval_seconds"])
+                self.assertIsNone(role["estimated_next_pass"])
+                self.assertFalse(role["restartable"])
+
+        self.assertEqual("schedule", by_skill["research-run"]["trigger_mode"])
+        self.assertEqual(1800, by_skill["research-run"]["interval_seconds"])
+        self.assertTrue(by_skill["research-run"]["restartable"])
 
     def test_decisions_returns_pending_question_with_context(self):
         self.write_pending_decision()

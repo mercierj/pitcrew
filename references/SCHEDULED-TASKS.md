@@ -159,8 +159,13 @@ from todo, processing recovery, and review continuation.
 
 ## Local headless scheduler
 
-The fork includes an idempotent macOS `launchd` adapter for the same independent
-cadence model as upstream Pitcrew:
+The fork includes an idempotent macOS `launchd` adapter for periodic discovery,
+observation, and reconciliation roles. Delivery roles (`manager-run`,
+`implementer-run`, `reviewer-run`, `validator-run`, `investigate-run`, and
+`unblock`) are event-driven: dashboard actions and validated lifecycle events
+admit them through the durable coordinator. They have no interval or restartable
+LaunchAgent. `stale-sweep` remains the periodic recovery path for missed or
+externally changed lifecycle state.
 
 ### Durable ticket-run coordinator
 
@@ -263,7 +268,7 @@ local scheduler and agent health, seven days of history, and GitLab work. If
 GitLab is unavailable, its panel is marked degraded and the local panels and
 controls continue to operate.
 
-Controls are restricted to enabled skills:
+Controls are restricted to enabled periodic skills:
 
 - **Trigger** starts one bounded scheduled-mode pass; the role lock prevents an
   overlapping pass.

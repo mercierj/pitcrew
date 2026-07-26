@@ -102,7 +102,12 @@ Use $pitcrew:reviewer-run for project getbill. Perform one bounded pass.
 Use $pitcrew:architecture-run for project getbill. Perform one bounded read-only pass.
 ```
 
-Observe the first runs before enabling implementation workflows. Do not schedule
+Observe the first runs before enabling implementation workflows. Delivery roles
+(`manager-run`, `implementer-run`, `reviewer-run`, `validator-run`,
+`investigate-run`, and `unblock`) are event-driven: dashboard actions and
+validated lifecycle events admit them through the durable coordinator. They
+have no polling interval or restartable LaunchAgent; `stale-sweep` remains the
+periodic recovery path for missed or externally changed lifecycle state. Do not schedule
 `$pitcrew:releaser-run` for GetBill: release autonomy is off and every prod or
 preprod action requires a fresh explicit approval.
 
@@ -213,12 +218,15 @@ failure does not break local agent status, history, or decisions: the provider p
 The /api/gitlab compatibility alias is temporary and available only for a GitLab configuration.
 
 **Agents** contains compact operational rows with expandable model, usage,
-schedule, and control details. **Historique** keeps the seven-day run log and
+trigger mode, and control details. Event-driven delivery roles show no cadence
+or restart schedule. **Historique** keeps the seven-day run log and
 filters.
 
-For an enabled agent, **Trigger** starts one bounded pass immediately (the
-per-agent lock prevents overlap), **Stop** stops its current pass and unloads its
-schedule, and **Restart** installs or reloads its schedule. Release, prod, and
+For a periodic enabled agent, **Trigger** starts one bounded pass immediately
+(the per-agent lock prevents overlap), **Stop** stops its current pass and
+unloads its schedule, and **Restart** installs or reloads its schedule.
+Event-driven delivery roles are admitted by the durable coordinator instead of a
+LaunchAgent schedule. Release, prod, and
 remote Preprod environment/deployment controls are explicitly absent. The sole
 exception is the local, read-only, manual-only Preprod review panel; it cannot
 deploy or perform remote environment actions. The status CLI remains available:
