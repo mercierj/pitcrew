@@ -173,6 +173,39 @@ class GitLabForgeWorkTest(unittest.TestCase):
         self.assertTrue(work["degraded"])
         self.assertEqual([], work["groups"]["todo"])
 
+    def test_ticket_reference_does_not_match_a_longer_ticket_number(self):
+        import json
+        import subprocess
+
+        issue = {
+            "iid": 1,
+            "title": "Ticket one",
+            "description": "",
+            "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+            "state": "opened",
+            "web_url": "https://gitlab.com/acme/payments/-/issues/1",
+        }
+        change = {
+            "iid": 15,
+            "title": "Fix ticket fifteen",
+            "state": "merged",
+            "web_url": "https://gitlab.com/acme/payments/-/merge_requests/15",
+            "source_branch": "fix/fifteen",
+            "target_branch": "main",
+            "author": {"username": "octocat"},
+            "head_pipeline": {"status": "success"},
+            "sha": "a" * 40,
+            "description": "Closes #15",
+        }
+
+        def runner(args, **kwargs):
+            payload = [change] if "merge_requests" in args[-1] else [issue]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+        work = GitLabForgeWork(gitlab_config(), runner).collect()
+
+        self.assertEqual([], work["groups"]["blocked"][0]["related_change_urls"])
+
 
 class GitHubRunner:
     def __init__(self, malformed=False):

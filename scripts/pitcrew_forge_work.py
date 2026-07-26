@@ -18,6 +18,11 @@ class ForgeWorkError(ValueError):
     pass
 
 
+def references_ticket(text: str, issue_number: int) -> bool:
+    """Return whether text contains this exact numeric ticket reference."""
+    return re.search(rf"(?<![\w#])#{issue_number}(?!\d)", text) is not None
+
+
 def _label_value(labels: object, prefix: str) -> str | None:
     if not isinstance(labels, list):
         return None
@@ -104,7 +109,9 @@ class GitLabForgeWork:
         for change in changes:
             if f"!{change['number']}" in text:
                 related.add(change["canonical_url"])
-            if isinstance(issue_number, int) and f"#{issue_number}" in str(change.get("_text", "")):
+            if isinstance(issue_number, int) and references_ticket(
+                str(change.get("_text", "")), issue_number
+            ):
                 related.add(change["canonical_url"])
         return sorted(related)
 
@@ -283,7 +290,13 @@ class GitHubForgeWork:
         text = " ".join(str(issue.get(key, "")) for key in ("body", "html_url"))
         related = set()
         for change in changes:
-            if f"#{change['number']}" in text or (isinstance(number, int) and f"#{number}" in str(change)):
+            if (
+                f"#{change['number']}" in text
+                or (
+                    isinstance(number, int)
+                    and references_ticket(str(change), number)
+                )
+            ):
                 related.add(change["canonical_url"])
         return sorted(related)
 
