@@ -8,6 +8,45 @@ const LIFECYCLE_LABELS = {
 };
 
 const asArray = (value) => Array.isArray(value) ? value : [];
+const ACTION_CONTEXT_LIMIT = 180;
+
+const normalizeContextText = (value) => (
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
+);
+
+const boundedContextText = (value, limit = ACTION_CONTEXT_LIMIT) => {
+  const normalized = normalizeContextText(value);
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit - 1).trimEnd()}…`;
+};
+
+export function summarizeAgentFailure(summary, fallback = "Diagnostic requis.") {
+  let parsed = summary;
+  if (typeof summary === "string") {
+    try {
+      parsed = JSON.parse(summary);
+    } catch {
+      return boundedContextText(summary) || boundedContextText(fallback);
+    }
+  }
+
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const reason = normalizeContextText(
+      parsed.reason || parsed.error || parsed.message || parsed.summary,
+    );
+    const nextAction = normalizeContextText(parsed.next_action || parsed.nextAction);
+    if (reason && nextAction) {
+      return boundedContextText(
+        `Raison : ${reason} · Prochaine action : ${nextAction}`,
+      );
+    }
+    if (reason) return boundedContextText(reason);
+    if (nextAction) return boundedContextText(`Prochaine action : ${nextAction}`);
+    return boundedContextText(fallback);
+  }
+
+  return boundedContextText(parsed) || boundedContextText(fallback);
+}
 
 const resourceOf = (entry) => (
   entry?.resource && typeof entry.resource === "object" ? entry.resource : entry
@@ -42,7 +81,10 @@ const contextOf = (entry) => {
     return resource.question || "Une réponse est requise.";
   }
   if (kind === "agent-failure") {
-    return resource.latest_history?.summary || resource.health || "Diagnostic requis.";
+    return summarizeAgentFailure(
+      resource.latest_history?.summary,
+      resource.health || "Diagnostic requis.",
+    );
   }
   if (kind === "merge-request") {
     return `${resource.source_branch || "Branche inconnue"} → ${resource.target_branch || "Branche inconnue"}`;

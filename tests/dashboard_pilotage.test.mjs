@@ -6,7 +6,9 @@ import {createDetailPanel} from "../dashboard/detail-panel.mjs";
 import {
   preserveFocus,
   renderActionFeedback,
+  renderActionList,
   renderItemDetail,
+  summarizeAgentFailure,
 } from "../dashboard/pilotage.mjs";
 
 class Focusable extends EventTarget {
@@ -14,11 +16,20 @@ class Focusable extends EventTarget {
     super();
     this.connected = true;
     this.focusCalls = 0;
+    this.attributes = new Map();
   }
 
   focus() {
     document.activeElement = this;
     this.focusCalls += 1;
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
   }
 }
 
@@ -84,6 +95,53 @@ class Element extends EventTarget {
     document.activeElement = this;
   }
 }
+
+test("agent failure summaries extract useful JSON fields and stay bounded", () => {
+  const context = summarizeAgentFailure(JSON.stringify({
+    reason: "  Smoke   paiement échoué ",
+    next_action: " Relancer\nle scénario ciblé ",
+  }));
+  assert.equal(
+    context,
+    "Raison : Smoke paiement échoué · Prochaine action : Relancer le scénario ciblé",
+  );
+
+  const longFallback = `Préfixe ${"incident ".repeat(40)}`;
+  assert.equal(summarizeAgentFailure(longFallback).length <= 180, true);
+  assert.equal(summarizeAgentFailure(longFallback).endsWith("…"), true);
+});
+
+test("action cards render the bounded agent failure context instead of raw JSON", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    activeElement: null,
+    createElement: (tagName) => new Element(tagName),
+  };
+  const root = new Element();
+  renderActionList(root, [{
+    kind: "agent-failure",
+    key: "agent:qa-run",
+    resource: {
+      skill: "qa-run",
+      health: "failed",
+      latest_history: {
+        summary: JSON.stringify({
+          reason: "Le smoke test a échoué",
+          next_action: "Inspecter le premier écart",
+          noisy_payload: "x".repeat(500),
+        }),
+      },
+    },
+  }]);
+
+  const [, context] = root.children[0].children;
+  assert.equal(
+    context.textContent,
+    "Raison : Le smoke test a échoué · Prochaine action : Inspecter le premier écart",
+  );
+  assert.equal(context.textContent.includes("noisy_payload"), false);
+  globalThis.document = originalDocument;
+});
 
 test("detail launch action sends only one request after it resolves", async () => {
   const originalDocument = globalThis.document;
@@ -208,6 +266,67 @@ test("detail transitions preserve the explicit external focus target", () => {
   assert.equal(external.focusCalls, 1);
   assert.equal(unrelated.focusCalls, 0);
   assert.equal(internalAction.focusCalls, 0);
+  delete globalThis.document;
+});
+
+test("closing detail restores focus to a polling replacement with the same stable key", () => {
+  const original = new Focusable();
+  original.setAttribute("data-focus-key", "workflow:issue:42");
+  const replacement = new Focusable();
+  replacement.setAttribute("data-focus-key", "workflow:issue:42");
+  const unrelated = new Focusable();
+  unrelated.setAttribute("data-focus-key", "workflow:issue:99");
+  const closeButton = new Focusable();
+  const dialog = new Dialog();
+  const title = {textContent: ""};
+  const content = new Element();
+  globalThis.document = {
+    activeElement: original,
+    contains: (node) => node.connected,
+    querySelectorAll(selector) {
+      assert.equal(selector, "[data-focus-key]");
+      return [replacement, unrelated];
+    },
+  };
+  const controller = createDetailPanel(dialog, title, content, closeButton);
+  controller.open({
+    body: {nodeType: 1, connected: true},
+    returnFocusTo: original,
+  });
+
+  original.connected = false;
+  controller.close();
+
+  assert.equal(original.focusCalls, 0);
+  assert.equal(replacement.focusCalls, 1);
+  assert.equal(unrelated.focusCalls, 0);
+  delete globalThis.document;
+});
+
+test("closing detail does not move focus when a detached trigger has no replacement", () => {
+  const original = new Focusable();
+  original.setAttribute("data-focus-key", "workflow:issue:42");
+  const unrelated = new Focusable();
+  const closeButton = new Focusable();
+  const dialog = new Dialog();
+  const title = {textContent: ""};
+  const content = new Element();
+  globalThis.document = {
+    activeElement: original,
+    contains: (node) => node.connected,
+    querySelectorAll: () => [unrelated],
+  };
+  const controller = createDetailPanel(dialog, title, content, closeButton);
+  controller.open({
+    body: {nodeType: 1, connected: true},
+    returnFocusTo: original,
+  });
+
+  original.connected = false;
+  controller.close();
+
+  assert.equal(original.focusCalls, 0);
+  assert.equal(unrelated.focusCalls, 0);
   delete globalThis.document;
 });
 

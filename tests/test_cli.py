@@ -922,11 +922,25 @@ class CliTest(unittest.TestCase):
             run = run_store.enqueue(project="getbill", skill="research-run", source="scheduled")
             run_store.claim_ready(project="getbill", capacities={"research-run": 1})
 
-            scheduled = self.run_cli(
-                "bin/pitcrew-codex.sh", "research-run", "getbill", "--scheduled",
-                "--coordinated-run", run["run_id"], env=env
+            scheduled = subprocess.Popen(
+                [
+                    str(ROOT / "bin/pitcrew-codex.sh"),
+                    "research-run",
+                    "getbill",
+                    "--scheduled",
+                    "--coordinated-run",
+                    run["run_id"],
+                ],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
             )
-            self.assertEqual(0, scheduled.returncode, scheduled.stderr)
+            run_store.mark_pid(run["run_id"], scheduled.pid)
+            _, scheduled_stderr = scheduled.communicate(timeout=5)
+            self.assertEqual(0, scheduled.returncode, scheduled_stderr)
             args = args_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(1, args.count("--output-schema"))
             schema_index = args.index("--output-schema")
@@ -2211,15 +2225,18 @@ class CliTest(unittest.TestCase):
             target = "https://gitlab.com/getbill1/getbill/-/issues/42"
             run = store.enqueue(project="getbill", skill="implementer-run", source="scheduled", target=target)
             store.claim_ready(project="getbill", capacities={"implementer-run": 1})
-            coordinated = subprocess.run(
+            coordinated = subprocess.Popen(
                 [str(ROOT / "bin/pitcrew-codex.sh"), "implementer-run", "getbill", "--target", target, "--scheduled", "--coordinated-run", run["run_id"]],
                 cwd=root,
                 env=env,
                 text=True,
-                capture_output=True,
-                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
             )
-            self.assertEqual(0, coordinated.returncode, coordinated.stderr)
+            store.mark_pid(run["run_id"], coordinated.pid)
+            _, coordinated_stderr = coordinated.communicate(timeout=5)
+            self.assertEqual(0, coordinated.returncode, coordinated_stderr)
             self.assertEqual(run["run_id"], captured.read_text(encoding="utf-8"))
 
             legacy = subprocess.run(

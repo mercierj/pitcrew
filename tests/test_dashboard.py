@@ -2448,11 +2448,14 @@ class DashboardAssetContractTest(unittest.TestCase):
             "showModal",
             'addEventListener("close"',
             "previousFocus",
-            "previousFocus.focus()",
+            "previousFocusKey",
+            'querySelectorAll("[data-focus-key]")',
+            "focusTarget?.focus()",
             "event.target === dialog",
         ):
             self.assertIn(token, detail_panel)
         self.assertNotIn("innerHTML", detail_panel)
+        self.assertNotIn("CSS.escape", detail_panel)
 
         for token in (
             'from "./pilotage.mjs"',
@@ -2673,10 +2676,29 @@ class DashboardAssetContractTest(unittest.TestCase):
             3,
             len(re.findall(r"<button\b[^>]*\bclass=\"[^\"]*\bnav-item\b", self.html)),
         )
+        self.assertRegex(
+            self.html,
+            r'<details\b(?=[^>]*\bid="done-work")[^>]*>\s*'
+            r'<summary\b(?=[^>]*\bid="done-work-title")[^>]*>'
+            r'Travail terminé\s*<span id="done-count">0</span></summary>',
+        )
+        self.assertNotRegex(
+            self.html,
+            r'<details\b(?=[^>]*\bid="done-work")[^>]*\bopen\b',
+        )
         self.assertNotIn("site-header", self.html)
         self.assertNotIn(".site-header", self.styles)
         self.assertNotIn(".app-shell > main", self.styles)
         self.assertNotIn(".nav-count", self.styles)
+        self.assertRegex(
+            self.styles,
+            r"(?s)\.action-queue-list\s*{[^}]*align-items:\s*start;",
+        )
+        self.assertRegex(
+            self.styles,
+            r"(?s)\.action-card p[^}]*-webkit-line-clamp:\s*3;",
+        )
+        self.assertIn("#done-work > summary", self.styles)
 
     def test_pilotage_layout_is_responsive_and_wraps_content(self):
         for token in (

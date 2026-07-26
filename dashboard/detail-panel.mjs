@@ -1,5 +1,6 @@
 export function createDetailPanel(dialog, title, content, closeButton) {
   let previousFocus = null;
+  let previousFocusKey = null;
 
   function close() {
     if (dialog?.open) {
@@ -11,6 +12,7 @@ export function createDetailPanel(dialog, title, content, closeButton) {
     if (!dialog || !title || !content) return;
     if (!dialog.open) {
       previousFocus = returnFocusTo || document.activeElement;
+      previousFocusKey = previousFocus?.getAttribute?.("data-focus-key") || null;
     }
     title.textContent = String(heading);
     content.replaceChildren();
@@ -34,14 +36,24 @@ export function createDetailPanel(dialog, title, content, closeButton) {
     }
   });
   dialog?.addEventListener("close", () => {
+    let focusTarget = null;
     if (
       previousFocus
       && typeof previousFocus.focus === "function"
       && document.contains(previousFocus)
     ) {
       previousFocus.focus();
+    } else if (previousFocusKey) {
+      focusTarget = [...document.querySelectorAll("[data-focus-key]")]
+        .find((control) => (
+          control.getAttribute("data-focus-key") === previousFocusKey
+          && document.contains(control)
+          && typeof control.focus === "function"
+        )) || null;
+      focusTarget?.focus();
     }
     previousFocus = null;
+    previousFocusKey = null;
   });
 
   return {open, close};
