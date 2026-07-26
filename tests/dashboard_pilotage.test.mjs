@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 
 import {createDetailPanel} from "../dashboard/detail-panel.mjs";
+import {preserveFocus, renderItemDetail} from "../dashboard/pilotage.mjs";
 
 class Focusable extends EventTarget {
   constructor() {
@@ -32,6 +33,127 @@ class Dialog extends EventTarget {
     this.dispatchEvent(new Event("close"));
   }
 }
+
+class Element extends EventTarget {
+  constructor(tagName = "div") {
+    super();
+    this.tagName = tagName;
+    this.children = [];
+    this.attributes = new Map();
+    this.connected = true;
+    this.disabled = false;
+    this.textContent = "";
+  }
+
+  append(...children) {
+    this.children.push(...children);
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  replaceChildren(...children) {
+    this.children.forEach((child) => { child.connected = false; });
+    this.children = children;
+  }
+
+  contains(node) {
+    return node === this || this.children.some((child) => child.contains?.(node) || child === node);
+  }
+
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (node) => {
+      if (selector === "[data-focus-key]" && node.getAttribute?.("data-focus-key")) matches.push(node);
+      node.children?.forEach(visit);
+    };
+    this.children.forEach(visit);
+    return matches;
+  }
+
+  focus() {
+    document.activeElement = this;
+  }
+}
+
+test("detail launch action sends only one request after it resolves", async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tagName) => new Element(tagName),
+    createTextNode: (textContent) => ({textContent}),
+  };
+  let launches = 0;
+  let resolveLaunch;
+  const detail = renderItemDetail(
+    {kind: "issue", key: "issue:42", resource: {title: "Ticket", agent_action: {label: "Lancer", available: true}}},
+    {forEntry: () => [{label: "Lancer", singleUse: true, successLabel: "Lancement accepté", run: () => new Promise((resolve) => {
+      launches += 1;
+      resolveLaunch = () => resolve(true);
+    })}]},
+  );
+  const [actions] = detail.body.children.filter((child) => child.className === "detail-actions");
+  const [button] = actions.children;
+
+  button.dispatchEvent(new Event("click"));
+  button.dispatchEvent(new Event("click"));
+  assert.equal(launches, 1);
+  assert.equal(button.disabled, true);
+
+  resolveLaunch();
+  await new Promise((resolve) => setImmediate(resolve));
+  button.dispatchEvent(new Event("click"));
+  assert.equal(launches, 1);
+  assert.equal(button.textContent, "Lancement accepté");
+  globalThis.document = originalDocument;
+});
+
+test("ordinary detail actions remain repeatable", async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tagName) => new Element(tagName),
+    createTextNode: (textContent) => ({textContent}),
+  };
+  let calls = 0;
+  const detail = renderItemDetail(
+    {kind: "decision", key: "decision:42", resource: {title: "Décision"}},
+    {forEntry: () => [{label: "Approuver", run: async () => { calls += 1; }}]},
+  );
+  const [actions] = detail.body.children.filter((child) => child.className === "detail-actions");
+  const [button] = actions.children;
+
+  button.dispatchEvent(new Event("click"));
+  await new Promise((resolve) => setImmediate(resolve));
+  button.dispatchEvent(new Event("click"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 2);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Approuver");
+  globalThis.document = originalDocument;
+});
+
+test("polling render preserves a focused control by its stable key", () => {
+  const originalDocument = globalThis.document;
+  const root = new Element();
+  const current = new Element("button");
+  current.setAttribute("data-focus-key", "workflow:issue:42");
+  root.append(current);
+  globalThis.document = {activeElement: current};
+
+  preserveFocus(root, () => {
+    const replacement = new Element("button");
+    replacement.setAttribute("data-focus-key", "workflow:issue:42");
+    root.replaceChildren(replacement);
+  });
+
+  assert.equal(document.activeElement, root.children[0]);
+  globalThis.document = originalDocument;
+});
 
 test("detail transitions preserve the explicit external focus target", () => {
   const external = new Focusable();

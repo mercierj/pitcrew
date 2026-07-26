@@ -82,7 +82,19 @@ const appendFact = (root, label, value) => {
   root.append(paragraph);
 };
 
-const createItemCard = (entry, onOpen, {done = false} = {}) => {
+const focusKeyFor = (scope, entry) => `${scope}:${entry?.key || titleOf(entry)}`;
+
+export function preserveFocus(root, render) {
+  const active = document.activeElement;
+  const focusKey = root?.contains?.(active) ? active?.getAttribute?.("data-focus-key") : null;
+  render();
+  if (!focusKey) return;
+  const replacement = [...root.querySelectorAll("[data-focus-key]")]
+    .find((control) => control.getAttribute("data-focus-key") === focusKey);
+  replacement?.focus();
+}
+
+const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {}) => {
   const card = document.createElement(done ? "li" : "article");
   card.className = done ? "done-card" : "action-card";
   const title = document.createElement("h3");
@@ -93,6 +105,7 @@ const createItemCard = (entry, onOpen, {done = false} = {}) => {
   button.type = "button";
   button.className = "button button-quiet";
   button.textContent = done ? "Voir le détail" : entry?.label || "Ouvrir";
+  button.setAttribute("data-focus-key", focusKeyFor(focusScope, entry));
   button.addEventListener("click", () => onOpen?.(entry));
   card.append(title, context, button);
   return card;
@@ -121,15 +134,17 @@ export function renderCrewHealth(root, snapshot = {}) {
 
 export function renderActionList(root, queue = [], onOpen) {
   if (!root) return;
-  root.replaceChildren();
-  if (!queue.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "Aucune action ne nécessite votre attention.";
-    root.append(empty);
-    return;
-  }
-  queue.forEach((entry) => root.append(createItemCard(entry, onOpen)));
+  preserveFocus(root, () => {
+    root.replaceChildren();
+    if (!queue.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "Aucune action ne nécessite votre attention.";
+      root.append(empty);
+      return;
+    }
+    queue.forEach((entry) => root.append(createItemCard(entry, onOpen)));
+  });
 }
 
 const renderWorkflowLane = (lifecycle, entries, onOpen) => {
@@ -159,6 +174,7 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
     action.type = "button";
     action.className = "button button-quiet";
     action.textContent = entry.agent_action?.label || "Voir le détail";
+    action.setAttribute("data-focus-key", focusKeyFor("workflow", entry));
     action.addEventListener("click", () => onOpen?.(entry));
     card.append(title, route, action);
     lane.append(card);
@@ -174,38 +190,45 @@ export function renderPilotage(roots = {}, sources = {}, handlers = {}) {
   }
   renderActionList(roots.actionQueueList, queue.slice(0, 3), handlers.openItem);
   if (roots.actionQueueMore) {
-    roots.actionQueueMore.replaceChildren();
-    if (queue.length > 3) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "button button-quiet";
-      button.textContent = `Voir toutes (${queue.length})`;
-      button.addEventListener("click", () => handlers.openAllActions?.(queue, button));
-      roots.actionQueueMore.append(button);
-    }
+    preserveFocus(roots.actionQueueMore, () => {
+      roots.actionQueueMore.replaceChildren();
+      if (queue.length > 3) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "button button-quiet";
+        button.textContent = `Voir toutes (${queue.length})`;
+        button.setAttribute("data-focus-key", "action-queue-more");
+        button.addEventListener("click", () => handlers.openAllActions?.(queue, button));
+        roots.actionQueueMore.append(button);
+      }
+    });
   }
 
-  roots.workflowBoard?.replaceChildren(
-    ...ACTIVE_LIFECYCLES.map((lifecycle) => (
-      renderWorkflowLane(lifecycle, workflow[lifecycle], handlers.openItem)
-    )),
-  );
+  if (roots.workflowBoard) {
+    preserveFocus(roots.workflowBoard, () => roots.workflowBoard.replaceChildren(
+      ...ACTIVE_LIFECYCLES.map((lifecycle) => (
+        renderWorkflowLane(lifecycle, workflow[lifecycle], handlers.openItem)
+      )),
+    ));
+  }
 
   if (roots.doneCount) {
     roots.doneCount.textContent = String(workflow.done.length);
   }
   if (roots.doneList) {
-    roots.doneList.replaceChildren();
-    if (!workflow.done.length) {
-      const empty = document.createElement("li");
-      empty.className = "empty-state";
-      empty.textContent = "Aucun travail terminé aujourd’hui.";
-      roots.doneList.append(empty);
-    } else {
-      workflow.done.forEach((entry) => (
-        roots.doneList.append(createItemCard(entry, handlers.openItem, {done: true}))
-      ));
-    }
+    preserveFocus(roots.doneList, () => {
+      roots.doneList.replaceChildren();
+      if (!workflow.done.length) {
+        const empty = document.createElement("li");
+        empty.className = "empty-state";
+        empty.textContent = "Aucun travail terminé aujourd’hui.";
+        roots.doneList.append(empty);
+      } else {
+        workflow.done.forEach((entry) => (
+          roots.doneList.append(createItemCard(entry, handlers.openItem, {done: true, focusScope: "done"}))
+        ));
+      }
+    });
   }
 
   renderCrewHealth(roots.crewHealth, sources?.snapshot);
@@ -274,7 +297,17 @@ export function renderItemDetail(entry, handlers = {}) {
       button.className = action.className || "button button-primary";
       button.textContent = action.label || "Continuer";
       button.disabled = Boolean(action.disabled);
-      button.addEventListener("click", () => action.run?.(button, actionRoot));
+      button.addEventListener("click", async () => {
+        if (button.disabled) return;
+        if (action.singleUse) button.disabled = true;
+        const completed = await action.run?.(button, actionRoot);
+        if (!action.singleUse) return;
+        if (completed === false) {
+          button.disabled = false;
+          return;
+        }
+        button.textContent = action.successLabel || "Action acceptée";
+      });
       actionRoot.append(button);
     });
     body.append(actionRoot);

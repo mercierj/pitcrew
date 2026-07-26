@@ -820,8 +820,10 @@ async function launchTicketAgent(issue, button, actions) {
     });
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
     await refresh({ manual: true });
+    return true;
   } catch {
     setText(elements.operationalStatus, `Impossible de lancer ${skill} pour ce ticket.`);
+    return false;
   } finally {
     pendingTicketActions.delete(target);
   }
@@ -994,6 +996,8 @@ function actionForEntry(entry) {
     return [{
       label: agentAction.label || "Lancer l’agent",
       disabled: pendingTicketActions.has(target),
+      singleUse: true,
+      successLabel: "Lancement accepté",
       run: (button, actions) => launchTicketAgent(resource, button, actions),
     }];
   }
