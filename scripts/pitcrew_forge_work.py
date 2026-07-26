@@ -335,24 +335,84 @@ def canonical_issue_target(config: Mapping[str, object], target: object) -> str:
     if provider == "github":
         binding = config.get("github")
         path_key = "repository"
-        prefix_suffix = "/issues/"
+        prefix_suffixes = ("/issues/",)
     elif provider == "gitlab":
         binding = config.get("gitlab")
         path_key = "project_path"
-        prefix_suffix = "/-/issues/"
+        # GitLab work-item URLs are accepted for compatibility, but stored
+        # under the canonical issue URL so coordinator keys remain stable.
+        prefix_suffixes = ("/-/issues/", "/-/work_items/")
     else:
         raise ForgeWorkError("tracker does not expose native issues")
     if not isinstance(binding, Mapping):
         raise ForgeWorkError("ticket target does not match configured binding")
     host = _string_field(binding.get("host"), "provider.host")
     project = _string_field(binding.get(path_key), "provider.project")
-    expected = f"/{project}{prefix_suffix}"
-    if parsed.netloc != host or not parsed.path.startswith(expected):
+    expected = next(
+        (f"/{project}{suffix}" for suffix in prefix_suffixes if parsed.path.startswith(f"/{project}{suffix}")),
+        None,
+    )
+    if parsed.netloc != host or expected is None:
         raise ForgeWorkError("ticket target does not match configured binding")
     number = parsed.path.removeprefix(expected)
     if not number.isdigit() or int(number) <= 0:
         raise ForgeWorkError("ticket target number is invalid")
+    if provider == "gitlab":
+        return f"https://{host}/{project}/-/issues/{number}"
     return value
+
+
+def ticket_agent_action(
+    *,
+    issue: Mapping[str, object],
+    labels: Mapping[str, str],
+    enabled_skills: set[str],
+    active_run: Mapping[str, object] | None,
+    globally_stopped: bool,
+) -> dict | None:
+    lifecycle = issue.get("lifecycle")
+    issue_labels = issue.get("labels")
+    target = issue.get("canonical_url")
+    if not isinstance(lifecycle, str) or not isinstance(issue_labels, list) or not isinstance(target, str):
+        return None
+    if not all(isinstance(value, str) for value in issue_labels):
+        return None
+    required = ("agent", "bug", "investigate")
+    if not all(isinstance(labels.get(key), str) and labels[key] for key in required):
+        return None
+    label_set = set(issue_labels)
+    if lifecycle == "todo":
+        if labels["agent"] not in label_set or labels["investigate"] in label_set:
+            return None
+        skill, label = (
+            ("bugfixer-run", "Corriger ce bug")
+            if labels["bug"] in label_set
+            else ("implementer-run", "Lancer l’implémentation")
+        )
+    elif lifecycle == "blocked":
+        skill, label = "unblock", "Débloquer ce ticket"
+    elif lifecycle == "done":
+        skill, label = "stale-sweep", "Vérifier la clôture"
+    else:
+        return None
+    active_state = active_run.get("state") if isinstance(active_run, Mapping) else None
+    available = (
+        skill in enabled_skills
+        and not globally_stopped
+        and active_state not in {"queued", "running"}
+    )
+    return {
+        "skill": skill,
+        "label": label,
+        "target": target,
+        "available": available,
+        "run_state": active_state,
+        "unavailable_reason": (
+            None if available
+            else "Exécution déjà active" if active_state in {"queued", "running"}
+            else "Agent indisponible"
+        ),
+    }
 
 
 def _string_field(value: object, field: str) -> str:

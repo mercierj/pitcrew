@@ -5,6 +5,7 @@ from scripts.pitcrew_forge_work import (
     GitHubForgeWork,
     GitLabForgeWork,
     canonical_issue_target,
+    ticket_agent_action,
     normalize_change,
     normalize_issue,
 )
@@ -245,3 +246,45 @@ class GitHubForgeWorkTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ForgeWorkError):
                     canonical_issue_target(self.config, value)
+
+    def test_canonical_issue_target_normalizes_gitlab_work_items(self):
+        config = gitlab_config()
+        self.assertEqual(
+            "https://gitlab.com/acme/payments/-/issues/12",
+            canonical_issue_target(
+                config,
+                "https://gitlab.com/acme/payments/-/work_items/12",
+            ),
+        )
+
+
+class ForgeWorkActionTest(unittest.TestCase):
+    def setUp(self):
+        self.labels = {"agent": "pitcrew-agent", "bug": "bug", "investigate": "investigate"}
+        self.enabled = {"bugfixer-run", "implementer-run", "unblock", "stale-sweep"}
+
+    def issue(self, labels, lifecycle):
+        return {"labels": labels, "lifecycle": lifecycle, "canonical_url": "https://github.com/acme/payments/issues/12"}
+
+    def test_routes_lifecycle_and_bug_labels(self):
+        cases = (
+            (["pitcrew-agent", "bug"], "todo", "bugfixer-run", "Corriger ce bug"),
+            (["pitcrew-agent", "enhancement"], "todo", "implementer-run", "Lancer l’implémentation"),
+            (["pitcrew-agent"], "blocked", "unblock", "Débloquer ce ticket"),
+            (["pitcrew-agent"], "done", "stale-sweep", "Vérifier la clôture"),
+        )
+        for labels, lifecycle, skill, label in cases:
+            with self.subTest(labels=labels, lifecycle=lifecycle):
+                action = ticket_agent_action(issue=self.issue(labels, lifecycle), labels=self.labels, enabled_skills=self.enabled, active_run=None, globally_stopped=False)
+                self.assertEqual(skill, action["skill"])
+                self.assertEqual(label, action["label"])
+                self.assertTrue(action["available"])
+
+    def test_todo_bug_requires_agent_and_excludes_investigation(self):
+        self.assertIsNone(ticket_agent_action(issue=self.issue(["bug"], "todo"), labels=self.labels, enabled_skills=self.enabled, active_run=None, globally_stopped=False))
+        self.assertIsNone(ticket_agent_action(issue=self.issue(["pitcrew-agent", "bug", "investigate"], "todo"), labels=self.labels, enabled_skills=self.enabled, active_run=None, globally_stopped=False))
+
+    def test_active_run_disables_action(self):
+        action = ticket_agent_action(issue=self.issue(["pitcrew-agent", "bug"], "todo"), labels=self.labels, enabled_skills=self.enabled, active_run={"state": "queued"}, globally_stopped=False)
+        self.assertFalse(action["available"])
+        self.assertEqual("queued", action["run_state"])
