@@ -142,6 +142,20 @@ acting roles.
 The fork includes an idempotent macOS `launchd` adapter for the same independent
 cadence model as upstream Pitcrew:
 
+### Durable ticket-run coordinator
+
+Ticket runs are stored in
+`${CODEX_HOME:-$HOME/.codex}/pitcrew/<project>/runs.sqlite3`. The default is
+three concurrent tickets per role; configure an override with
+`execution.max_concurrent_per_skill.<role>`. Additional tickets stay durable in
+FIFO order (for example, the fourth ticket waits for a slot). Repeated admission
+of the same target returns the active run rather than creating another worker.
+
+The dashboard reads this store, so queued, running, and failed states survive a
+page reload. Queued and running ticket CTAs are disabled; failed runs are retried
+only by an explicit operator action. Terminal coordinator records are retained
+for seven days.
+
 ```bash
 python3 bin/pitcrew-schedule.py list --project getbill
 python3 bin/pitcrew-schedule.py install --project getbill
@@ -159,11 +173,13 @@ python3 bin/pitcrew-schedule.py status --project getbill
 python3 bin/pitcrew-schedule.py resume-all --project getbill
 ```
 
-`stop-all` records the stopped state and unloads every enabled launchd job.
+`stop-all` records the stopped state and unloads every enabled launchd job. It
+cancels active coordinated ticket workers and suspends queued tickets.
 The runner checks that state before repository/model resolution and returns a
 structured no-op without invoking Codex. This blocks both launchd and manual
 scheduled-mode starts. `resume-all` is explicit, reinstalls the enabled jobs,
-and does not trigger an immediate pass. The dashboard's **Tout arrêter** button
+and resumes only the queued ticket runs; it does not trigger an immediate pass.
+The dashboard's **Tout arrêter** button
 performs the same action after confirmation and shows **Exécutions bloquées**
 while the switch is active.
 

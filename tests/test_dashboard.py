@@ -1676,7 +1676,7 @@ class FakeDashboardService:
         self.calls.append(("launch_ticket_agent", skill, target))
         if skill not in {"implementer-run", "unblock", "stale-sweep"}:
             raise DashboardError("action rejected")
-        return {"run_id": "run-1", "state": "queued", "queue_position": 0, "created": True}
+        return {"run_id": "run-1", "state": "queued", "queue_position": 1, "created": True}
 
 
 class DashboardEntryPointTest(unittest.TestCase):

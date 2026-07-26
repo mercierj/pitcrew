@@ -101,7 +101,7 @@ class RunStoreTest(unittest.TestCase):
         self.assertEqual([run["run_id"] for run in runs[:3]], [run["run_id"] for run in claimed])
         snapshot = self.store.snapshot("demo", {"implementer-run": 3})
         queued = [run for run in snapshot["runs"] if run["state"] == "queued"]
-        self.assertEqual((runs[3]["run_id"], 0), (queued[0]["run_id"], queued[0]["queue_position"]))
+        self.assertEqual((runs[3]["run_id"], 1), (queued[0]["run_id"], queued[0]["queue_position"]))
         self.store.finish(claimed[0]["run_id"], state="succeeded")
         self.assertEqual([runs[3]["run_id"]], [run["run_id"] for run in self.store.claim_ready(project="demo", capacities={"implementer-run": 3})])
 
@@ -352,11 +352,11 @@ class RunStoreTest(unittest.TestCase):
 
     def test_get_includes_role_queue_position(self):
         first, second = self.enqueue("T-first"), self.enqueue("T-second")
-        self.assertEqual(0, self.store.get(first["run_id"])["queue_position"])
-        self.assertEqual(1, self.store.get(second["run_id"])["queue_position"])
+        self.assertEqual(1, self.store.get(first["run_id"])["queue_position"])
+        self.assertEqual(2, self.store.get(second["run_id"])["queue_position"])
         self.store.claim_ready(project="demo", capacities={"implementer-run": 1})
         self.assertEqual(0, self.store.get(first["run_id"])["queue_position"])
-        self.assertEqual(0, self.store.get(second["run_id"])["queue_position"])
+        self.assertEqual(1, self.store.get(second["run_id"])["queue_position"])
 
     def test_request_cancel_marks_running_runs_only(self):
         running = self.enqueue("T-running")
@@ -384,7 +384,7 @@ class RunStoreTest(unittest.TestCase):
             for run in snapshot["runs"]
         ))
         self.assertEqual(0, snapshot["runs"][0]["queue_position"])
-        self.assertEqual(0, snapshot["runs"][1]["queue_position"])
+        self.assertEqual(1, snapshot["runs"][1]["queue_position"])
         self.assertEqual({"running": 1, "queued": 1, "max_concurrent": 2}, snapshot["capacity"]["implementer-run"])
         self.assertEqual({"running": 0, "queued": 0, "max_concurrent": 4}, snapshot["capacity"]["qa-run"])
 

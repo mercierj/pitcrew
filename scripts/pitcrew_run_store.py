@@ -705,7 +705,7 @@ class RunStore:
             if result is not None:
                 result["queue_position"] = 0
                 if result["state"] == "queued":
-                    result["queue_position"] = connection.execute("SELECT COUNT(*) FROM runs WHERE project=? AND skill=? AND state='queued' AND queue_sequence<?", (result["project"], result["skill"], result["queue_sequence"])).fetchone()[0]
+                    result["queue_position"] = 1 + connection.execute("SELECT COUNT(*) FROM runs WHERE project=? AND skill=? AND state='queued' AND queue_sequence<?", (result["project"], result["skill"], result["queue_sequence"])).fetchone()[0]
             return result
         except sqlite3.Error as error:
             raise RunStoreError("database operation failed") from error
@@ -857,8 +857,8 @@ class RunStore:
                 for field in ("run_id", "project", "skill", "target", "state")
             }
             if copy["state"] == "queued":
-                copy["queue_position"] = queued_positions.get(copy["skill"], 0)
-                queued_positions[copy["skill"]] = copy["queue_position"] + 1
+                copy["queue_position"] = queued_positions.get(copy["skill"], 0) + 1
+                queued_positions[copy["skill"]] = copy["queue_position"]
             else:
                 copy["queue_position"] = 0
             output.append(copy)
