@@ -21,7 +21,7 @@ from pitcrew_run_store import RunStateError, RunStore, RunStoreError
 
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
-LAUNCHER_PID_WAIT_SECONDS = 1.0
+LAUNCHER_PID_WAIT_SECONDS = 5.0
 LAUNCHER_PID_POLL_SECONDS = 0.01
 NO_SUMMARY = "No bounded final summary was produced."
 STRUCTURED_STATUSES = {"success", "noop", "blocked", "failed"}

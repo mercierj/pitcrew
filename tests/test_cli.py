@@ -450,6 +450,68 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         finally:
             sys.path.remove(scripts_path)
 
+    def test_coordinated_launcher_wait_tolerates_scheduler_delay(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            rows = iter(
+                (
+                    {
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "target": None,
+                        "gate_decision": None,
+                        "gate_reason": None,
+                        "gate_fingerprint": None,
+                        "pid": None,
+                    },
+                    {
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "target": None,
+                        "gate_decision": None,
+                        "gate_reason": None,
+                        "gate_fingerprint": None,
+                        "pid": 4242,
+                    },
+                )
+            )
+
+            class Store:
+                def get(self, _run_id):
+                    return next(rows)
+
+            args = __import__("types").SimpleNamespace(
+                project="demo",
+                skill="qa-run",
+                run_id="run-1",
+                target_id=None,
+                gate_decision=None,
+                gate_reason=None,
+                fingerprint=None,
+                launcher_pid=4242,
+            )
+            clock = iter((0.0, 1.5))
+            with (
+                mock.patch.object(
+                    helper.time,
+                    "monotonic",
+                    side_effect=lambda: next(clock),
+                ),
+                mock.patch.object(helper.time, "sleep"),
+                mock.patch.object(helper.os, "getppid", return_value=4242),
+                mock.patch.object(helper.os, "getpgrp", return_value=4242),
+            ):
+                result = helper.wait_for_coordinated_run(args, Store())
+
+            self.assertEqual(4242, result["pid"])
+        finally:
+            sys.path.remove(scripts_path)
+
     def test_coordinated_launcher_pid_timeout_rejects_without_effects(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)
@@ -494,7 +556,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                     "--launcher-pid", "4242",
                     "--", "true",
                 ]
-                clock = iter((0.0, 0.0, 2.0))
+                clock = iter((0.0, 0.0, 6.0))
                 with (
                     mock.patch.object(sys, "argv", args),
                     mock.patch.object(helper, "RunStore", Store),
@@ -504,7 +566,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                     mock.patch.object(
                         helper.time,
                         "monotonic",
-                        side_effect=lambda: next(clock, 2.0),
+                        side_effect=lambda: next(clock, 6.0),
                     ),
                     mock.patch.object(helper.time, "sleep"),
                 ):
