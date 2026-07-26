@@ -19,7 +19,7 @@ TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 ALL_STATES = ACTIVE_STATES + TERMINAL_STATES
 RETENTION = timedelta(days=7)
 STALE_HEARTBEAT = timedelta(seconds=30)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SOURCES = {"dashboard", "scheduled", "reconcile"}
 _TARGET_SOURCES = {"directed", "eligibility"}
 _GATE_DECISIONS = {"directed", "eligible", "unavailable"}
@@ -340,12 +340,34 @@ class RunStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise RunStoreError(f"unsupported schema version {version}")
+            if version == 1:
+                legacy_columns = tuple(
+                    row["name"] for row in connection.execute(
+                        "PRAGMA table_info(runs)"
+                    )
+                )
+                required_legacy_columns = (
+                    "run_id", "project", "skill", "source", "target",
+                    "dedupe_key", "state", "queue_sequence", "pid",
+                    "created_at", "started_at", "heartbeat_at", "finished_at",
+                    "phase", "cancel_requested", "error_code", "error_message",
+                    "predecessor_run_id",
+                )
+                required_current_columns = required_legacy_columns + (
+                    "target_source", "gate_decision", "gate_reason",
+                    "gate_fingerprint",
+                )
+                if legacy_columns not in {
+                    required_legacy_columns,
+                    required_current_columns,
+                }:
+                    raise RunStoreError("database schema mismatch for runs")
             for statement in (
                 """CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY, project TEXT NOT NULL, skill TEXT NOT NULL,
-                    source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile')),
+                    source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile','chain')),
                     target TEXT, dedupe_key TEXT NOT NULL,
                     state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
                     queue_sequence INTEGER NOT NULL, pid INTEGER,
@@ -385,6 +407,8 @@ class RunStore:
                     connection.execute(
                         f"ALTER TABLE runs ADD COLUMN {column} {definition}"
                     )
+            if version == 1:
+                self._migrate_version_one_runs(connection)
             self._validate_schema(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
@@ -400,6 +424,47 @@ class RunStore:
             raise RunStoreError("database initialization failed") from error
         finally:
             connection.close()
+
+    @staticmethod
+    def _migrate_version_one_runs(connection: sqlite3.Connection) -> None:
+        """Upgrade the immutable source constraint without enabling chain writes."""
+        connection.execute("ALTER TABLE runs RENAME TO runs_v1")
+        connection.execute("DROP INDEX active_run_dedupe")
+        connection.execute("DROP INDEX queue_by_project_skill")
+        connection.execute(
+            """CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY, project TEXT NOT NULL, skill TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile','chain')),
+                target TEXT, dedupe_key TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
+                queue_sequence INTEGER NOT NULL, pid INTEGER,
+                created_at TEXT NOT NULL, started_at TEXT, heartbeat_at TEXT, finished_at TEXT,
+                phase TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT, error_message TEXT, predecessor_run_id TEXT,
+                target_source TEXT CHECK(target_source IN ('directed','eligibility')),
+                gate_decision TEXT CHECK(gate_decision IN ('directed','eligible','unavailable')),
+                gate_reason TEXT, gate_fingerprint TEXT
+            )"""
+        )
+        columns = (
+            "run_id,project,skill,source,target,dedupe_key,state,queue_sequence,"
+            "pid,created_at,started_at,heartbeat_at,finished_at,phase,"
+            "cancel_requested,error_code,error_message,predecessor_run_id,"
+            "target_source,gate_decision,gate_reason,gate_fingerprint"
+        )
+        connection.execute(
+            f"INSERT INTO runs({columns}) SELECT {columns} FROM runs_v1"
+        )
+        connection.execute("DROP TABLE runs_v1")
+        connection.execute(
+            "CREATE UNIQUE INDEX active_run_dedupe ON runs(project, dedupe_key) "
+            "WHERE state IN ('queued','running')"
+        )
+        connection.execute(
+            "CREATE INDEX queue_by_project_skill "
+            "ON runs(project, skill, state, queue_sequence)"
+        )
+
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
         expected_tables = {
@@ -448,7 +513,9 @@ class RunStore:
                 raise RunStoreError(f"database schema mismatch for {table}")
 
         expected_checks = {
-            ("runs", "source"): ("dashboard", "scheduled", "reconcile"),
+            ("runs", "source"): (
+                "dashboard", "scheduled", "reconcile", "chain"
+            ),
             ("runs", "target_source"): ("directed", "eligibility"),
             (
                 "runs",

@@ -244,6 +244,7 @@ class RunStoreTest(unittest.TestCase):
     def test_invalid_values_are_public_errors(self):
         with self.assertRaises(RunStoreError): self.store.enqueue(project="", skill="x", source="dashboard")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="bad")
+        with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="chain")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="dashboard", target=" ")
         with self.assertRaises(RunStoreError): self.store.enqueue(project="demo", skill="x", source="dashboard", target="x" * 1001)
         run = self.enqueue()
@@ -546,7 +547,7 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
-    def test_legacy_version_one_adds_nullable_gate_columns(self):
+    def test_legacy_version_one_adds_nullable_gate_columns_and_upgrades_to_v2(self):
         path = Path(self.temp.name).resolve() / "legacy-v1.sqlite"
         with closing(sqlite3.connect(path)) as connection:
             connection.executescript(
@@ -605,17 +606,17 @@ class RunStoreTest(unittest.TestCase):
         self.assertIsNone(row["gate_fingerprint"])
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(
-                1,
+                SCHEMA_VERSION,
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
-    def test_schema_constants_tables_and_indexes_match_version_one(self):
+    def test_schema_constants_tables_and_indexes_match_version_two(self):
         self.assertEqual(("queued", "running"), ACTIVE_STATES)
         self.assertEqual(("succeeded", "failed", "cancelled"), TERMINAL_STATES)
         self.assertEqual(ACTIVE_STATES + TERMINAL_STATES, ALL_STATES)
         self.assertEqual(timedelta(days=7), RETENTION)
         self.assertEqual(timedelta(seconds=30), STALE_HEARTBEAT)
-        self.assertEqual(1, SCHEMA_VERSION)
+        self.assertEqual(2, SCHEMA_VERSION)
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(
                 [
@@ -659,6 +660,32 @@ class RunStoreTest(unittest.TestCase):
                         "PRAGMA index_info(queue_by_project_skill)"
                     )
                 ],
+            )
+
+    def test_version_two_keeps_legacy_chain_rows_readable_but_refuses_new_ones(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute(
+                "INSERT INTO runs("
+                "run_id,project,skill,source,target,dedupe_key,state,"
+                "queue_sequence,created_at,finished_at,phase"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "legacy-chain", "demo", "reviewer-run", "chain", "T-chain",
+                    "chain:legacy:T-chain", "cancelled", 1,
+                    "2026-07-26T12:00:00Z", "2026-07-26T12:01:00Z", "Annulé",
+                ),
+            )
+            connection.commit()
+
+        reopened = RunStore(self.path, now=self.clock)
+
+        self.assertEqual("chain", reopened.get("legacy-chain")["source"])
+        with self.assertRaisesRegex(RunStoreError, "source is invalid"):
+            reopened.enqueue(
+                project="demo",
+                skill="reviewer-run",
+                source="chain",
+                target="T-new",
             )
 
     def test_connections_are_fresh_private_and_configured(self):
@@ -867,12 +894,12 @@ class RunStoreTest(unittest.TestCase):
     def test_schema_migration_is_idempotent(self):
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(SCHEMA_VERSION, connection.execute("PRAGMA user_version").fetchone()[0])
         finally:
             connection.close()
         RunStore(self.path)
         connection = sqlite3.connect(self.path)
         try:
-            self.assertEqual(1, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(SCHEMA_VERSION, connection.execute("PRAGMA user_version").fetchone()[0])
         finally:
             connection.close()
