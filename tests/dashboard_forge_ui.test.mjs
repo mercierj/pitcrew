@@ -16,6 +16,7 @@ test("dashboard exposes provider-neutral forge work regions", () => {
     assert.doesNotMatch(html, new RegExp(`id="${legacy}"`));
   }
   assert.match(html, /Travail GitHub · GitLab/);
+  assert.match(javascript, /elements\.forgeWork\.hidden = false/);
 });
 
 test("dashboard renders normalized issues, changes, evidence and durable run state", () => {

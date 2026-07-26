@@ -69,6 +69,7 @@ const elements = {
   historyFilters: document.querySelector("#history-filters"),
   historySkill: document.querySelector("#history-skill"),
   historyOutcome: document.querySelector("#history-outcome"),
+  forgeWork: document.querySelector("#forge-work"),
   forgeGroups: document.querySelector("#forge-groups"),
   forgeState: document.querySelector("#forge-state"),
   changeList: document.querySelector("#change-list"),
@@ -883,6 +884,7 @@ function renderForgeWork(work = latestForgeWork, runs = latestRuns) {
   });
   if (!shouldRender) return false;
   if (!work) return;
+  elements.forgeWork.hidden = false;
   elements.forgeGroups.replaceChildren();
   renderChanges(work);
   const providerLabel = work?.provider === "github" ? "GitHub" : work?.provider === "gitlab" ? "GitLab" : "Forge";
