@@ -319,7 +319,7 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(payload)
             self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
             bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
-            self.assertEqual(5, len(bootouts))
+            self.assertEqual(11, len(bootouts))
 
     def test_stop_all_closes_admission_before_cancelling_and_booting_out(self):
         scheduler = load_scheduler_module()
@@ -472,6 +472,83 @@ class ScheduleTest(unittest.TestCase):
         )
         self.assertEqual(11, len([call for call in calls if call[0] == "bootout"]))
         self.assertIn("admission could not be closed", error.getvalue())
+
+    def test_stop_all_continues_after_legacy_cleanup_bootout_error(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        def launchctl(*args, **kwargs):
+            calls.append(args)
+            if args[1].endswith(".implementer-run"):
+                raise OSError("launchctl unavailable")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        scheduler.launchctl = launchctl
+        error = StringIO()
+        with tempfile.TemporaryDirectory() as temp, mock.patch("sys.stderr", error):
+            result = scheduler.stop_all(
+                "getbill",
+                {"HOME": str(Path(temp).resolve())},
+                lambda project, env: (_ for _ in ()).throw(OSError("database unavailable")),
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn(
+            "bootout gui/%d/io.getbill.pitcrew.getbill.architecture-run" % os.getuid(),
+            [" ".join(call) for call in calls],
+        )
+        self.assertIn("one or more scheduled agents could not be stopped", error.getvalue())
+
+    def test_stop_all_ignores_absent_legacy_launch_agents(self):
+        scheduler = load_scheduler_module()
+        calls = []
+
+        class Store:
+            def set_project_state(self, project, state):
+                pass
+
+        class Dispatcher:
+            def cancel_running(self, project, error_code):
+                pass
+
+        def launchctl(*args, **kwargs):
+            calls.append(args)
+            if any(args[1].endswith(f".{skill}") for skill in scheduler.EVENT_DRIVEN_ROLES):
+                return subprocess.CompletedProcess(args, 3, "", "Could not find service")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        scheduler.write_state = lambda project, state, env: None
+        scheduler.launchctl = launchctl
+        with tempfile.TemporaryDirectory() as temp:
+            result = scheduler.stop_all(
+                "getbill",
+                {"HOME": str(Path(temp).resolve())},
+                lambda project, env: (Store(), Dispatcher(), {}),
+            )
+
+        self.assertEqual(0, result)
+        self.assertIn(
+            "bootout gui/%d/io.getbill.pitcrew.getbill.architecture-run" % os.getuid(),
+            [" ".join(call) for call in calls],
+        )
+
+    def test_install_fails_when_legacy_cleanup_has_a_real_error(self):
+        scheduler = load_scheduler_module()
+        calls = []
+        scheduler.read_state = lambda project, env: "running"
+        scheduler.render = lambda project, output_dir, env, skill: [Path("research.plist")]
+        scheduler.launchctl = lambda *args, **kwargs: (
+            calls.append(args)
+            or subprocess.CompletedProcess(args, 23, "", "permission denied")
+        )
+
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            result = scheduler.install("getbill", Path("/tmp"), {"HOME": "/tmp"})
+
+        self.assertEqual(23, result)
+        self.assertFalse(any(call[0] == "bootstrap" for call in calls))
+        self.assertIn("legacy", error.getvalue())
 
     def test_resume_reopens_admission_and_drains_once_after_install(self):
         scheduler = load_scheduler_module()
@@ -744,11 +821,53 @@ class ScheduleTest(unittest.TestCase):
                 [path.name for path in output.glob("*.plist")],
             )
             commands = calls.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(3, len(commands))
-            self.assertTrue(all("research-run" in command for command in commands))
+            self.assertEqual(9, len(commands))
             self.assertEqual(
                 1,
                 sum(command.startswith("bootstrap ") for command in commands),
+            )
+
+    def test_install_boots_out_legacy_event_driven_launch_agents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / "LaunchAgents"
+            calls = root / "calls"
+            env = self.fake_launchctl_env(
+                root,
+                f"printf '%s\\n' \"$*\" >> {calls}\n",
+            )
+
+            result = self.run_scheduler(
+                "install",
+                "--project",
+                "getbill",
+                "--skill",
+                "research-run",
+                "--output-dir",
+                str(output),
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            bootouts = [
+                command for command in calls.read_text(encoding="utf-8").splitlines()
+                if command.startswith("bootout ")
+            ]
+            self.assertEqual(
+                {
+                    "bootout gui/%d/io.getbill.pitcrew.getbill.%s" % (os.getuid(), skill)
+                    for skill in (
+                        "manager-run",
+                        "implementer-run",
+                        "reviewer-run",
+                        "validator-run",
+                        "investigate-run",
+                        "unblock",
+                    )
+                },
+                set(bootouts) - {
+                    "bootout gui/%d/io.getbill.pitcrew.getbill.research-run" % os.getuid(),
+                },
             )
 
     def test_stop_boots_out_only_the_selected_launch_agent(self):

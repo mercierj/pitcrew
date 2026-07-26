@@ -92,6 +92,7 @@ def entries(
             if str(error) not in {
                 "runtime config path must not be a symlink or missing",
                 "directory anchor must not be a symlink or missing",
+                "directory anchor must be an absolute path",
             }:
                 raise
     result = [
@@ -237,6 +238,36 @@ def launchctl_failure(
     return result.returncode
 
 
+def legacy_launch_agent_is_absent(result: subprocess.CompletedProcess[str]) -> bool:
+    return result.returncode != 0 and re.search(
+        r"could not find (?:service|specified service)|no such (?:process|service)",
+        result.stderr,
+        re.IGNORECASE,
+    ) is not None
+
+
+def bootout_legacy_event_driven_jobs(project: str) -> int:
+    domain = f"gui/{os.getuid()}"
+    first_failure = 0
+    for skill in sorted(EVENT_DRIVEN_ROLES):
+        try:
+            result = launchctl(
+                "bootout",
+                f"{domain}/{launchd_label(project, skill)}",
+                check=False,
+            )
+        except Exception:
+            first_failure = first_failure or 2
+            continue
+        if (
+            result.returncode
+            and not legacy_launch_agent_is_absent(result)
+            and not first_failure
+        ):
+            first_failure = result.returncode
+    return first_failure
+
+
 def install(
     project: str,
     output_dir: Path,
@@ -251,6 +282,10 @@ def install(
         print("scheduler execution state is unavailable", file=sys.stderr)
         return 2
     paths = render(project, output_dir, env, skill)
+    cleanup_failure = bootout_legacy_event_driven_jobs(project)
+    if cleanup_failure:
+        print("failed to clean up legacy event-driven agents", file=sys.stderr)
+        return cleanup_failure
     domain = f"gui/{os.getuid()}"
     for path in paths:
         label = path.stem
@@ -386,6 +421,8 @@ def stop_all(
         except Exception:
             first_failure = first_failure or 2
             print("coordinated workers could not all be cancelled", file=sys.stderr)
+    legacy_failure = bootout_legacy_event_driven_jobs(project)
+    first_failure = first_failure or legacy_failure
     domain = f"gui/{os.getuid()}"
     for entry in entries(project, values):
         if not entry["enabled"]:

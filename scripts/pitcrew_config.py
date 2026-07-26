@@ -49,6 +49,14 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 DEFAULT_MAX_CONCURRENT_PER_SKILL = 3
 MAX_CONCURRENT_PER_SKILL = 16
 FIX_AUTONOMY_VALUES = {"off", "on"}
+EVENT_DRIVEN_ROLES = {
+    "manager-run",
+    "implementer-run",
+    "reviewer-run",
+    "validator-run",
+    "investigate-run",
+    "unblock",
+}
 
 
 class ConfigError(ValueError):
