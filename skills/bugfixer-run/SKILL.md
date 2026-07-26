@@ -55,6 +55,11 @@ canonical issue URL before the sensitive-routing comment, label transition,
 claim, or checkout mutation. On conflict, select another candidate or return a
 structured no-op.
 
+After binding, run `scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>`
+with the normalized current evidence. Only `route_investigate` permits sensitive
+routing and only the claim action permits a non-sensitive claim; an invalid or
+unexpected action fails closed to `$STATE_BLOCKED`.
+
 **STEP E — Route or claim.** A valid sensitive approval requires all three:
 
 1. `SENSITIVE_APPROVED_LABEL` exists.
@@ -100,6 +105,11 @@ Result: passed
 Validation: `<redacted focused commands>`
 ```
 
+After reproduction and verification evidence, run
+`scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>`. Only
+`open_change` permits opening or reusing a change; an invalid or unexpected
+action fails closed to `$STATE_BLOCKED` without guessing from provider prose.
+
 **STEP H — Open or reuse one change.** Use `FIND_OR_CREATE_CHANGE` to open or
 reuse one idempotent PR/MR. Include issue, root cause, red evidence, fix, green
 evidence, validation, and risks. Move to `$STATE_REVIEW` and post:
@@ -135,6 +145,10 @@ Immediately re-fetch expected issue state, source/target branches, open change,
 discussions, reviews, validation marker, checks, and head SHA. Then squash
 merge, delete the confirmed source branch, call `CLOSE_LIFECYCLE`, verify done
 plus closed, post the bounded summary, and finalize the coordinated run.
+
+Before merge or close, run `scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>`
+against the re-fetched evidence. Only `merge_close` permits those mutations; an
+invalid or unexpected action fails closed to `$STATE_BLOCKED`.
 
 Any provider mismatch, lost eligibility, stale signal, uncertain result, or
 mutation failure fails closed. Preserve a useful open change for human pickup;

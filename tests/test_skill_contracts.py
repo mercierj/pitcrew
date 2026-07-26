@@ -145,6 +145,10 @@ class ReferenceContractTest(unittest.TestCase):
             "required CI checks are green",
             "CLOSE_LIFECYCLE",
             "structured no-op",
+            "scripts/pitcrew_bugfix_lifecycle.py evaluate --snapshot <path>",
+            "route_investigate",
+            "open_change",
+            "merge_close",
         )
 
     def test_unblock_has_safe_sensitive_bug_return_path(self):
