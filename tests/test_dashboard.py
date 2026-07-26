@@ -2157,6 +2157,10 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn('await refresh({ manual: true });', self.javascript)
         self.assertIn('/api/decisions', self.javascript)
         self.assertIn('answer-decision', self.javascript)
+        self.assertLess(
+            self.javascript.index('fetchJson("/api/decisions")'),
+            self.javascript.index("renderGitLab(await fetchJson(gitlabPath));"),
+        )
         for function_name in (
             "fetchJson",
             "renderOverview",

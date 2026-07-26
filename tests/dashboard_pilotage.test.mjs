@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFile} from "node:fs/promises";
 
 import {createDetailPanel} from "../dashboard/detail-panel.mjs";
 
@@ -70,4 +71,15 @@ test("detail transitions preserve the explicit external focus target", () => {
   assert.equal(unrelated.focusCalls, 0);
   assert.equal(internalAction.focusCalls, 0);
   delete globalThis.document;
+});
+
+test("refresh loads decisions with its initial data and renders pilotage before GitLab", async () => {
+  const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
+  const refreshSource = appSource.split("async function refresh({")[1].split("elements.refreshButton.addEventListener")[0];
+  const initialLoad = refreshSource.split("const now = Date.now();")[0];
+
+  assert.match(initialLoad, /const \[snapshot, history, decisions, proposals\] = await Promise\.all\(/);
+  assert.match(initialLoad, /fetchJson\("\/api\/decisions"\)\.then\(\(payload\) => \{\s*sources\.decisions = payload;/);
+  assert.ok(initialLoad.indexOf("renderDecision(decisions);") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
+  assert.ok(initialLoad.indexOf("renderPilotageView();") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
 });

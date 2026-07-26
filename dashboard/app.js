@@ -1170,10 +1170,22 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     setText(elements.refreshState, "Actualisation en cours…");
     try {
       const [snapshot, history, decisions, proposals] = await Promise.all([
-        fetchJson("/api/status"),
-        fetchJson(historyPath()),
-        fetchJson("/api/decisions"),
-        fetchJson("/api/proposals"),
+        fetchJson("/api/status").then((payload) => {
+          sources.snapshot = payload;
+          return payload;
+        }),
+        fetchJson(historyPath()).then((payload) => {
+          sources.history = payload;
+          return payload;
+        }),
+        fetchJson("/api/decisions").then((payload) => {
+          sources.decisions = payload;
+          return payload;
+        }),
+        fetchJson("/api/proposals").then((payload) => {
+          sources.proposals = payload;
+          return payload;
+        }),
       ]);
       renderOverview(snapshot);
       renderLiveAgents(snapshot);
@@ -1181,6 +1193,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
       renderHistory(history, snapshot?.model_catalog);
       renderDecision(decisions);
       renderProposals(proposals);
+      renderPilotageView();
 
       const now = Date.now();
       if (!skipGitLab && (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS)) {
@@ -1192,6 +1205,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
           renderGitLab({ degraded: true, groups: {} });
         }
       }
+      renderPilotageView();
       setText(elements.refreshState, `Actualisé à ${dateFormatter.format(new Date())}`);
       setText(elements.operationalStatus, "Tableau de bord actualisé.");
     } catch {
