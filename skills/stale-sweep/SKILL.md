@@ -79,6 +79,20 @@ Validate the configured provider/host/owner-or-group/repository binding before e
 operation. If it cannot be validated or lacks the required generic operation, return the
 structured no-op and stop.
 
+### Coordinated target binding
+
+When `PITCREW_RUN_ID` is set, select at most one ticket-lifecycle reconciliation
+for this run. Before STEP 3, any tracker mutation, or checkout write, bind its canonical target:
+
+```text
+python3 <pitcrew-root>/scripts/pitcrew_run_dispatcher.py bind-target \
+  --project <project> --run-id "$PITCREW_RUN_ID" --target <canonical-url>
+```
+
+If `bind-target` reports a conflict, select another eligible ticket or return a
+structured no-op without mutation. Deploy-change cleanup remains unchanged only
+when this coordinated run has no directed ticket.
+
 
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.

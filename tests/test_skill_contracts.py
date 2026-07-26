@@ -175,6 +175,21 @@ class ReferenceContractTest(unittest.TestCase):
             "Never fall back",
         )
 
+    def test_coordinated_ticket_mutations_bind_the_run_first(self):
+        for relative_path in (
+            "references/DIRECTED-TARGET.md",
+            "skills/implementer-run/SKILL.md",
+            "skills/unblock/SKILL.md",
+            "skills/stale-sweep/SKILL.md",
+        ):
+            self.assert_markers(
+                relative_path,
+                "bind-target",
+                "PITCREW_RUN_ID",
+                "tracker mutation",
+                "checkout write",
+            )
+
     def test_implementer_has_sandbox_safe_clone_fallback(self):
         implementer = (ROOT / "skills/implementer-run/SKILL.md").read_text(
             encoding="utf-8"

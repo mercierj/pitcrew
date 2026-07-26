@@ -33,6 +33,20 @@ Before any lookup or mutation:
 Any mismatch returns a structured no-op. Never fall back to a different provider,
 host, workspace, owner, group, project, or repository.
 
+## Coordinated runs
+
+When `PITCREW_RUN_ID` is present, it is the local reservation for this one
+execution. Before the first tracker mutation or checkout write, bind the
+canonical validated target with:
+
+```text
+python3 <pitcrew-root>/scripts/pitcrew_run_dispatcher.py bind-target \
+  --project <project> --run-id "$PITCREW_RUN_ID" --target <canonical-url>
+```
+
+If `bind-target` reports a conflict, select another eligible target or return a
+structured no-op. Do not mutate the provider or write a checkout first.
+
 ## Role behavior
 
 - `implementer-run` implements the selected eligible issue.

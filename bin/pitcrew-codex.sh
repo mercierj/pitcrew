@@ -11,7 +11,7 @@ readonly SKILLS=(
 )
 
 usage() {
-  echo "usage: pitcrew-codex.sh <skill> [project] [--target <ticket>] [--dry-run] [--scheduled]" >&2
+  echo "usage: pitcrew-codex.sh <skill> [project] [--target <ticket>] [--dry-run] [--scheduled] [--coordinated-run <uuid>]" >&2
 }
 
 is_allowed_skill() {
@@ -35,6 +35,7 @@ PROJECT=""
 DRY_RUN=false
 SCHEDULED=false
 TARGET=""
+COORDINATED_RUN=""
 while (($#)); do
   case "$1" in
     --dry-run)
@@ -47,6 +48,11 @@ while (($#)); do
       shift
       [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
       TARGET="$1"
+      ;;
+    --coordinated-run)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      COORDINATED_RUN="$1"
       ;;
     --*)
       echo "pitcrew-codex: unknown argument: $1" >&2
@@ -68,6 +74,10 @@ if [[ -n "$PROJECT" ]]; then
 else
   PROJECT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" project)"
 fi
+if [[ -n "$COORDINATED_RUN" && "$SCHEDULED" != true ]]; then
+  echo "pitcrew-codex: --coordinated-run requires --scheduled" >&2
+  exit 2
+fi
 if ! EXECUTION_STATE="$(python3 "$REPO_ROOT/scripts/pitcrew_runtime_state.py" status --project "$PROJECT")"; then
   echo "pitcrew-codex: execution state is unavailable" >&2
   exit 2
@@ -77,7 +87,9 @@ if [[ "$EXECUTION_STATE" == "stopped" ]]; then
   exit 0
 fi
 CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
-if "$SCHEDULED"; then
+# Preflight belongs to the public entry point: a noop must not leave a claimed
+# coordinated row behind.  The internal worker has already passed this gate.
+if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]]; then
   PREFLIGHT="$(python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" check --project "$PROJECT" --skill "$SKILL")" || {
     echo "pitcrew-codex: preflight is unavailable" >&2
     exit 2
@@ -94,6 +106,45 @@ print(json.dumps(value, separators=(",", ":")))
     exit 0
   fi
 fi
+
+# The public scheduled entry point only admits work.  The dispatcher owns
+# capacity and starts a separate, already-claimed coordinated worker.
+if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]] && [[ "$DRY_RUN" != true ]]; then
+  DISPATCH_ARGS=(
+    python3 "$REPO_ROOT/scripts/pitcrew_run_dispatcher.py" enqueue
+    --project "$PROJECT"
+    --skill "$SKILL"
+  )
+  if [[ -n "$TARGET" ]]; then
+    DISPATCH_ARGS+=(--target "$TARGET")
+  fi
+  exec "${DISPATCH_ARGS[@]}"
+fi
+
+RUN_DB=""
+if [[ -n "$COORDINATED_RUN" ]]; then
+  RUN_DB="$RUNTIME_ROOT/$PROJECT/runs.sqlite3"
+  if ! python3 -c '
+import sys, uuid
+from pathlib import Path
+sys.path.insert(0, sys.argv[6])
+from scripts.pitcrew_run_store import RunStore, RunStoreError
+
+database, project, skill, target, run_id, _repo_root = sys.argv[1:]
+try:
+    uuid.UUID(run_id)
+    row = RunStore(Path(database)).get(run_id)
+except (ValueError, RunStoreError):
+    raise SystemExit(1)
+if row is None or row["project"] != project or row["skill"] != skill:
+    raise SystemExit(1)
+if (row["target"] or "") != target or row["state"] != "running":
+    raise SystemExit(1)
+' "$RUN_DB" "$PROJECT" "$SKILL" "$TARGET" "$COORDINATED_RUN" "$REPO_ROOT"; then
+    echo "pitcrew-codex: coordinated run is invalid" >&2
+    exit 2
+  fi
+fi
 MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")"
 REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
 [[ -n "$REPO" && -d "$REPO" ]] || {
@@ -104,6 +155,9 @@ REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT"
 PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. The Pitcrew coverage helper is at $REPO_ROOT/scripts/research_coverage.py; use it when the research skill requires coverage rotation. Fail closed when a configured provider or permission is unavailable."
 if [[ -n "$TARGET" ]]; then
   PROMPT+=" Operate on exactly this directed target: $TARGET. Validate it with references/DIRECTED-TARGET.md before any provider lookup."
+fi
+if [[ -n "$COORDINATED_RUN" ]]; then
+  PROMPT+=" This execution is coordinated as PITCREW_RUN_ID=$COORDINATED_RUN. Before the first tracker mutation or checkout write, bind the selected canonical ticket with: python3 $REPO_ROOT/scripts/pitcrew_run_dispatcher.py bind-target --project $PROJECT --run-id $COORDINATED_RUN --target <canonical-url>. If binding reports a conflict, select another eligible ticket or return a structured no-op without mutating the provider."
 fi
 if "$SCHEDULED" && [[ "$SKILL" == "unblock" ]]; then
   PROMPT+=" This is an unattended scheduled run. When a human decision is required, do not leave the question only in the final response: atomically persist the exact pending question, choices, ticket context, and status=blocked in $RUNTIME_ROOT/$PROJECT/unblock-state.json as required by skills/unblock/SKILL.md, then stop. The dashboard reads that file and cannot read this log."
@@ -134,12 +188,21 @@ fi
 if "$SCHEDULED"; then
   LOCK_ROOT="${PITCREW_LOCK_ROOT:-$RUNTIME_ROOT/$PROJECT/locks}"
   SUMMARY_DIR="$RUNTIME_ROOT/$PROJECT/logs"
-  SUMMARY_FILE="$SUMMARY_DIR/$SKILL.last.txt"
   LIVE_DIR="$RUNTIME_ROOT/$PROJECT/live"
-  LIVE_FILE="$LIVE_DIR/$SKILL.json"
   HISTORY_FILE="$RUNTIME_ROOT/$PROJECT/history.jsonl"
-  LOCK_FILE="$LOCK_ROOT/$SKILL.lock"
+  if [[ -n "$COORDINATED_RUN" ]]; then
+    LOCK_FILE="$LOCK_ROOT/runs/$COORDINATED_RUN.lock"
+    SUMMARY_FILE="$SUMMARY_DIR/runs/$COORDINATED_RUN.last.txt"
+    LIVE_FILE="$LIVE_DIR/runs/$COORDINATED_RUN.json"
+  else
+    LOCK_FILE="$LOCK_ROOT/$SKILL.lock"
+    SUMMARY_FILE="$SUMMARY_DIR/$SKILL.last.txt"
+    LIVE_FILE="$LIVE_DIR/$SKILL.json"
+  fi
   mkdir -p "$LOCK_ROOT" "$SUMMARY_DIR" "$LIVE_DIR"
+  if [[ -n "$COORDINATED_RUN" ]]; then
+    mkdir -p "$(dirname "$LOCK_FILE")" "$(dirname "$SUMMARY_FILE")" "$(dirname "$LIVE_FILE")"
+  fi
   chmod 700 "$LOCK_ROOT" "$SUMMARY_DIR"
   if [[ -e "$SUMMARY_FILE" ]]; then
     chmod 600 "$SUMMARY_FILE"
@@ -157,15 +220,28 @@ fi
 CODEX_ARGS+=("$PROMPT")
 
 if "$SCHEDULED"; then
-  python3 "$REPO_ROOT/scripts/pitcrew_locked_exec.py" \
-    --lock-file "$LOCK_FILE" \
-    --project "$PROJECT" \
-    --skill "$SKILL" \
-    --model "$MODEL" \
-    --summary-file "$SUMMARY_FILE" \
-    --live-file "$LIVE_FILE" \
-    --history-file "$HISTORY_FILE" \
-    -- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
+  set +e
+  LOCKED_ARGS=(
+    python3 "$REPO_ROOT/scripts/pitcrew_locked_exec.py"
+    --lock-file "$LOCK_FILE"
+    --project "$PROJECT"
+    --skill "$SKILL"
+    --model "$MODEL"
+    --summary-file "$SUMMARY_FILE"
+    --live-file "$LIVE_FILE"
+    --history-file "$HISTORY_FILE"
+  )
+  if [[ -n "$COORDINATED_RUN" ]]; then
+    LOCKED_ARGS+=(--run-db "$RUN_DB" --run-id "$COORDINATED_RUN")
+  fi
+  LOCKED_ARGS+=(-- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}")
+  if [[ -n "$COORDINATED_RUN" ]]; then
+    PITCREW_RUN_ID="$COORDINATED_RUN" "${LOCKED_ARGS[@]}"
+  else
+    "${LOCKED_ARGS[@]}"
+  fi
+  EXIT_CODE=$?
+  set -e
   if [[ -f "$SUMMARY_FILE" ]] && rg -qi 'authentication|invalid_grant|oauth grant' "$SUMMARY_FILE"; then
     python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-provider-failure \
       --project "$PROJECT" --reason "provider authentication failure" >/dev/null || true
@@ -174,6 +250,10 @@ if "$SCHEDULED"; then
       --project "$PROJECT" --skill "$SKILL" --reason "no eligible item" >/dev/null || true
   fi
   chmod 600 "$SUMMARY_FILE" 2>/dev/null || true
+  if [[ -n "$COORDINATED_RUN" ]]; then
+    python3 "$REPO_ROOT/scripts/pitcrew_run_dispatcher.py" drain --project "$PROJECT" >/dev/null || true
+  fi
+  exit "$EXIT_CODE"
 else
   exec "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}"
 fi

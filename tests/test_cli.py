@@ -325,6 +325,7 @@ class CliTest(unittest.TestCase):
             self.assertEqual("noop", payload["status"])
             self.assertIn("cooldown", payload["reason"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+            self.assertFalse((root / ".codex/pitcrew/getbill/runs.sqlite3").exists())
 
     def test_authentication_failure_opens_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -359,6 +360,9 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(0, first.returncode, first.stderr)
             circuit = root / ".codex/pitcrew/getbill/state/provider-circuit.json"
+            deadline = time.monotonic() + 3
+            while not circuit.is_file() and time.monotonic() < deadline:
+                time.sleep(.02)
             self.assertTrue(circuit.is_file())
             Path(env["FAKE_CODEX_MARKER"]).unlink()
             second = self.run_cli(
@@ -477,6 +481,9 @@ class CliTest(unittest.TestCase):
                 "bin/pitcrew-codex.sh", "implementer-run", "getbill", "--scheduled", env=env
             )
             self.assertEqual(0, result.returncode, result.stderr)
+            deadline = time.monotonic() + 3
+            while not (root / "codex-args").exists() and time.monotonic() < deadline:
+                time.sleep(.02)
             args = (root / "codex-args").read_text(encoding="utf-8")
             self.assertIn("--sandbox\ndanger-full-access", args)
 
@@ -545,9 +552,11 @@ class CliTest(unittest.TestCase):
             stdout, stderr = first.communicate(timeout=5)
             self.assertEqual(0, first.returncode, stderr)
             self.assertEqual(0, overlapping.returncode, overlapping.stderr)
+            first_payload = json.loads(stdout)
             payload = json.loads(overlapping.stdout)
-            self.assertEqual("noop", payload["status"])
-            self.assertIn("already running", payload["reason"])
+            self.assertEqual(first_payload["run_id"], payload["run_id"])
+            self.assertTrue(first_payload["created"])
+            self.assertFalse(payload["created"])
 
             args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
             self.assertIn("--ephemeral", args)
@@ -560,7 +569,7 @@ class CliTest(unittest.TestCase):
             self.assertIn("sandbox_workspace_write.network_access=true", args)
             self.assertIn("--output-last-message", args)
             self.assertIn(
-                ".codex/pitcrew/getbill/logs/research-run.last.txt",
+                ".codex/pitcrew/getbill/logs/runs/",
                 args,
             )
             self.assertEqual(
@@ -573,24 +582,18 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(
                 0o600,
-                (codex_home / "pitcrew/getbill/logs/research-run.last.txt").stat().st_mode
-                & 0o777,
+                next((codex_home / "pitcrew/getbill/logs/runs").glob("*.last.txt")).stat().st_mode & 0o777,
             )
             history_path = codex_home / "pitcrew/getbill/history.jsonl"
+            deadline = time.monotonic() + 4
+            while not history_path.is_file() and time.monotonic() < deadline:
+                time.sleep(.05)
             self.assertTrue(history_path.is_file())
             history = [
                 json.loads(line)
                 for line in history_path.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual(
-                ["noop", "success"],
-                [record["outcome"] for record in history],
-            )
-            overlap = history[0]
-            self.assertEqual(
-                "research-run already running",
-                json.loads(overlap["summary"])["reason"],
-            )
+            self.assertEqual(["success"], [record["outcome"] for record in history])
             for record in history:
                 self.assertTrue(record["started_at"].endswith("Z"))
                 self.assertTrue(record["finished_at"].endswith("Z"))
@@ -612,6 +615,139 @@ class CliTest(unittest.TestCase):
                 latest["usage"],
             )
             self.assertNotIn("thread_1", history_path.read_text(encoding="utf-8"))
+
+    def test_scheduled_runner_queues_three_distinct_targets_then_drains_fifo(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            gate, started = root / "gate", root / "started"
+            gate.touch()
+            started.mkdir()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_GATE": str(gate),
+                "FAKE_STARTED": str(started),
+            }
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "previous=''\nfor argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then printf 'done\\n' > \"$argument\"; touch \"$FAKE_STARTED/$(basename \"$argument\").started\"; fi\n"
+                "  previous=\"$argument\"\ndone\n"
+                "while [ -e \"$FAKE_GATE\" ]; do sleep .02; done\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            targets = [f"https://gitlab.com/getbill1/getbill/-/issues/{number}" for number in range(1, 5)]
+            responses = [
+                self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)
+                for target in targets
+            ]
+            self.assertTrue(all(response.returncode == 0 for response in responses))
+            runs = [json.loads(response.stdout) for response in responses]
+            store = RunStore(root / ".codex/pitcrew/getbill/runs.sqlite3")
+            deadline = time.monotonic() + 3
+            while len(list(started.glob("*.started"))) < 3 and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(3, len(list(started.glob("*.started"))))
+            self.assertEqual(["running", "running", "running", "queued"], [store.get(run["run_id"])["state"] for run in runs])
+            gate.unlink()
+            deadline = time.monotonic() + 5
+            while len(list(started.glob("*.started"))) < 4 and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertEqual(4, len(list(started.glob("*.started"))))
+            self.assertIn(store.get(runs[3]["run_id"])["state"], {"running", "succeeded"})
+            deadline = time.monotonic() + 5
+            while any(store.get(run["run_id"])["state"] == "running" for run in runs) and time.monotonic() < deadline:
+                time.sleep(.05)
+
+    def test_scheduled_runner_is_idempotent_for_same_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            gate = root / "gate"
+            gate.touch()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex"), "FAKE_GATE": str(gate)}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text("#!/usr/bin/env bash\nwhile [ -e \"$FAKE_GATE\" ]; do sleep .02; done\n", encoding="utf-8")
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            target = "https://gitlab.com/getbill1/getbill/-/issues/42"
+            first = self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)
+            second = self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertEqual(0, second.returncode, second.stderr)
+            first_payload, second_payload = json.loads(first.stdout), json.loads(second.stdout)
+            self.assertEqual(first_payload["run_id"], second_payload["run_id"])
+            self.assertTrue(first_payload["created"])
+            self.assertFalse(second_payload["created"])
+            gate.unlink()
+
+    def test_runner_rejects_untrusted_coordinated_run_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            result = subprocess.run(
+                [str(ROOT / "bin/pitcrew-codex.sh"), "implementer-run", "getbill", "--scheduled", "--coordinated-run", "not-a-uuid"],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("coordinated run is invalid", result.stderr)
+
+    def test_coordinated_runner_exports_only_its_run_id_to_codex(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            captured = root / "run-id"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\nprintf '%s' \"${PITCREW_RUN_ID-unset}\" > \"$FAKE_CODEX_ENV\"\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env.update({"CODEX_BIN": str(fake_codex), "FAKE_CODEX_ENV": str(captured)})
+            runtime = root / ".codex/pitcrew/getbill"
+            runtime.chmod(0o700)
+            store = RunStore(runtime / "runs.sqlite3")
+            target = "https://gitlab.com/getbill1/getbill/-/issues/42"
+            run = store.enqueue(project="getbill", skill="implementer-run", source="scheduled", target=target)
+            store.claim_ready(project="getbill", capacities={"implementer-run": 1})
+            coordinated = subprocess.run(
+                [str(ROOT / "bin/pitcrew-codex.sh"), "implementer-run", "getbill", "--target", target, "--scheduled", "--coordinated-run", run["run_id"]],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, coordinated.returncode, coordinated.stderr)
+            self.assertEqual(run["run_id"], captured.read_text(encoding="utf-8"))
+
+            legacy = subprocess.run(
+                [str(ROOT / "bin/pitcrew-codex.sh"), "research-run", "getbill"],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, legacy.returncode, legacy.stderr)
+            self.assertEqual("unset", captured.read_text(encoding="utf-8"))
 
     def test_scheduled_runner_records_failed_codex_exit(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -655,7 +791,15 @@ class CliTest(unittest.TestCase):
                 env=env,
             )
 
-            self.assertEqual(17, result.returncode, result.stderr)
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn("run_id", payload)
+            from scripts.pitcrew_run_store import RunStore
+            store = RunStore(codex_home / "pitcrew/getbill/runs.sqlite3")
+            deadline = time.monotonic() + 3
+            while store.get(payload["run_id"])["state"] == "running" and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual("failed", store.get(payload["run_id"])["state"])
             history_path = codex_home / "pitcrew/getbill/history.jsonl"
             self.assertTrue(history_path.is_file())
             history = [
@@ -703,9 +847,14 @@ class CliTest(unittest.TestCase):
                 env=env,
             )
 
-            self.assertEqual(127, result.returncode)
-            self.assertEqual("pitcrew lock: failed to launch command\n", result.stderr)
-            self.assertNotIn(secret, result.stderr)
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            from scripts.pitcrew_run_store import RunStore
+            store = RunStore(codex_home / "pitcrew/getbill/runs.sqlite3")
+            deadline = time.monotonic() + 3
+            while store.get(payload["run_id"])["state"] == "running" and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual("failed", store.get(payload["run_id"])["state"])
             history_path = codex_home / "pitcrew/getbill/history.jsonl"
             self.assertTrue(history_path.is_file())
             history = [
@@ -756,6 +905,9 @@ class CliTest(unittest.TestCase):
                 env=env,
             )
             self.assertEqual(0, result.returncode, result.stderr)
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
             self.assertTrue(marker.exists())
             self.assertTrue(lock.is_file())
             self.assertEqual(0o600, lock.stat().st_mode & 0o777)

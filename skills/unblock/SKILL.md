@@ -96,6 +96,17 @@ structured no-op and stop.
 
 **DIRECTED TARGET (optional):** Read `references/DIRECTED-TARGET.md`. Parse only its configured-provider URL and short-reference forms. Validate provider, host, workspace, owner or group, and configured repository before lookup. Operate on exactly one validated target, preserve every safety gate, then stop.
 
+**COORDINATED TARGET BINDING:** When `PITCREW_RUN_ID` is set, before the first
+tracker mutation or checkout write, bind the canonical ticket:
+
+```text
+python3 <pitcrew-root>/scripts/pitcrew_run_dispatcher.py bind-target \
+  --project <project> --run-id "$PITCREW_RUN_ID" --target <canonical-url>
+```
+
+If `bind-target` reports a conflict, select another eligible ticket or return a
+structured no-op without a tracker mutation or checkout write.
+
 
 **This file is the complete instruction set for this run.** Self-contained, deterministic, no external context needed.
 
