@@ -1,6 +1,8 @@
 import {createNavigation} from "./navigation.mjs";
 import {createDetailPanel} from "./detail-panel.mjs";
 import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
+import {renderAgents as renderAgentRows} from "./agents.mjs";
+import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
 
 const POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
@@ -13,11 +15,6 @@ const navigation = createNavigation(document.querySelector("#app-navigation"), {
 });
 
 const sessionToken = document.querySelector('meta[name="pitcrew-session"]')?.content ?? "";
-const dateFormatter = new Intl.DateTimeFormat("fr-FR", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: "Europe/Paris",
-});
 
 const elements = {
   refreshButton: document.querySelector("#refresh-button"),
@@ -124,42 +121,8 @@ function setText(element, value) {
   }
 }
 
-function formatDate(value) {
-  if (!value) {
-    return "Aucune exécution";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "Date indisponible";
-  }
-  return dateFormatter.format(date);
-}
-
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-function formatTokens(value) {
-  if (typeof value === "string" && /^\d+$/.test(value)) {
-    return new Intl.NumberFormat("fr-FR").format(BigInt(value));
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
-    return new Intl.NumberFormat("fr-FR").format(BigInt(value));
-  }
-  return "Données indisponibles";
-}
-
-function formatCost(value) {
-  if (typeof value !== "string") {
-    return "Données indisponibles";
-  }
-  const match = /^(\d+)(?:\.(\d+))?$/.exec(value);
-  if (!match) {
-    return "Données indisponibles";
-  }
-  const integer = new Intl.NumberFormat("fr-FR").format(BigInt(match[1]));
-  const decimals = (match[2] || "").padEnd(4, "0").slice(0, 6);
-  return `${integer},${decimals} USD`;
 }
 
 function formatUsd(value) {
@@ -304,17 +267,6 @@ function renderOverview(snapshot) {
   }
 }
 
-function createActionButton(action, skill, label, globalStopped) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.dataset.skill = skill;
-  button.className = action === "trigger" ? "button button-primary" : "button button-quiet";
-  button.textContent = label;
-  button.disabled = globalStopped || pendingSkills.has(skill);
-  button.addEventListener("click", () => control(action, skill));
-  return button;
-}
-
 function formatElapsed(value) {
   if (!value) {
     return "Durée indisponible";
@@ -385,91 +337,24 @@ function syncSkillButtons(skill) {
 }
 
 function renderAgents(snapshot) {
-  const agents = Array.isArray(snapshot?.agents) ? snapshot.agents : [];
-  const globalStopped = snapshot?.global_state === "stopped";
-  elements.agentGrid.replaceChildren();
-
-  if (agents.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "Aucun agent activé n’est disponible.";
-    elements.agentGrid.append(empty);
-  }
-
-  agents.forEach((agent) => {
-    const card = document.createElement("article");
-    card.className = "agent-card";
-
-    const heading = document.createElement("div");
-    heading.className = "agent-heading";
-    const title = document.createElement("h3");
-    title.textContent = agent.skill || "Agent sans nom";
-    heading.append(title, makeBadge(agent.health));
-
-    const roleDescription = document.createElement("p");
-    roleDescription.className = "agent-role-description";
-    roleDescription.textContent = agent.role_description || "Rôle non documenté.";
-
-    const facts = document.createElement("dl");
-    facts.className = "agent-facts";
-    const factValues = [
-      ["État local", agent.running ? "En cours" : agent.loaded ? "Planifié" : "Arrêté"],
-      ["Dernier passage", formatDate(agent.latest_history?.finished_at)],
-      ["Prochain passage estimé", formatDate(agent.estimated_next_pass)],
-      ["Intervalle", agent.interval_seconds ? `${agent.interval_seconds} s` : "Indisponible"],
-    ];
-    factValues.forEach(([label, value]) => {
-      const term = document.createElement("dt");
-      term.textContent = label;
-      const detail = document.createElement("dd");
-      detail.textContent = value;
-      facts.append(term, detail);
-    });
-
-    const summary = document.createElement("p");
-    summary.className = "agent-summary";
-    summary.textContent = agent.latest_history?.summary || "Aucun compte rendu récent.";
-
-    const actions = document.createElement("div");
-    actions.className = "agent-actions";
-    actions.append(
-      createActionButton("trigger", agent.skill, "Déclencher", globalStopped),
-      createActionButton("restart", agent.skill, "Réinstaller", globalStopped),
-      createActionButton("stop", agent.skill, "Arrêter", globalStopped),
-    );
-    card.append(
-      heading,
-      roleDescription,
-      facts,
-      createModelControl(agent, snapshot?.model_catalog, globalStopped),
-      summary,
-      renderUsage("Dernier passage", agent.latest_usage),
-      renderUsage("Usage · 7 jours", agent.usage_7d),
-      actions,
-    );
-    elements.agentGrid.append(card);
-  });
-
-  renderDisabled(snapshot?.disabled_roles);
-  refreshSkillFilter(agents);
-}
-
-function renderDisabled(disabledRoles) {
-  const roles = Array.isArray(disabledRoles) ? disabledRoles : [];
-  elements.disabledList.replaceChildren();
-  setText(elements.disabledCount, roles.length);
-  roles.forEach((role) => {
-    const item = document.createElement("article");
-    const name = document.createElement("strong");
-    name.textContent = role.skill || "Rôle sans nom";
-    const reason = document.createElement("p");
-    reason.textContent = role.reason || "Ce rôle n’est pas configuré.";
-    const model = document.createElement("p");
-    model.className = "latest-model";
-    model.textContent = `Modèle résolu : ${modelLabel(null, role.configured_model)}`;
-    item.append(name, reason, model);
-    elements.disabledList.append(item);
-  });
+  renderAgentRows(
+    elements.agentGrid,
+    elements.disabledList,
+    elements.disabledCount,
+    snapshot,
+    {
+      control,
+      controlDisabled: (skill) => (
+        snapshot?.global_state === "stopped" || pendingSkills.has(skill)
+      ),
+      modelControl: (agent) => createModelControl(
+        agent,
+        snapshot?.model_catalog,
+        snapshot?.global_state === "stopped",
+      ),
+    },
+  );
+  refreshSkillFilter(Array.isArray(snapshot?.agents) ? snapshot.agents : []);
 }
 
 function refreshSkillFilter(agents) {

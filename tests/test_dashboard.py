@@ -1992,6 +1992,18 @@ class DashboardAssetContractTest(unittest.TestCase):
             for path in self.dashboard.glob("*.mjs")
         }
 
+    def test_agents_are_compact_and_details_are_progressively_disclosed(self):
+        agents = self.modules["agents.mjs"]
+        self.assertIn('className = "agent-row"', agents)
+        self.assertIn('document.createElement("details")', agents)
+        self.assertIn("Dernier passage", agents)
+        self.assertIn("Prochain passage", agents)
+        for detail in ("Modèle", "Jetons", "Coût estimé", "Fréquence", "PID"):
+            self.assertIn(detail, agents)
+        for action in ("Déclencher", "Réinstaller", "Arrêter"):
+            self.assertIn(action, agents)
+        self.assertNotIn("innerHTML", agents)
+
     def test_pilotage_modules_and_application_wiring_contract(self):
         self.assertIn("pilotage.mjs", self.modules)
         self.assertIn("detail-panel.mjs", self.modules)
@@ -2194,6 +2206,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertNotIn("innerHTML", history_source)
 
     def test_javascript_serializes_controls_per_skill(self):
+        agents = self.modules["agents.mjs"]
         self.assertIn("const pendingSkills = new Set();", self.javascript)
         self.assertRegex(
             self.javascript,
@@ -2201,12 +2214,13 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
         self.assertIn("pendingSkills.add(skill);", self.javascript)
         self.assertIn("pendingSkills.delete(skill);", self.javascript)
-        self.assertIn('button.dataset.skill = skill;', self.javascript)
+        self.assertIn('button.dataset.skill = skill;', agents)
         self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertIn(
-            "button.disabled = globalStopped || pendingSkills.has(skill);",
-            self.javascript,
+            "button.disabled = handlers.controlDisabled?.(skill) === true;",
+            agents,
         )
+        self.assertIn('snapshot?.global_state === "stopped" || pendingSkills.has(skill)', self.javascript)
         control_source = self.javascript.split(
             "async function control",
             1,
@@ -2248,6 +2262,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("text-align: left", self.styles)
 
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
+        formatters = self.modules["format.mjs"]
         for identifier in ("metric-tokens-7d", "metric-cost-7d"):
             self.assertIn(f'id="{identifier}"', self.html)
         self.assertIn('document.createElement("select")', self.javascript)
@@ -2257,10 +2272,9 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("Sous-total mesuré", self.javascript)
         self.assertIn("formatTokens", self.javascript)
         self.assertIn("formatUsd", self.javascript)
-        self.assertIn('typeof value === "string" && /^\\d+$/.test(value)', self.javascript)
-        self.assertIn("BigInt(value)", self.javascript)
-        formatter_source = self.javascript.split("function formatTokens", 1)[1].split("function usageMeasured", 1)[0]
-        self.assertNotIn("Number(value)", formatter_source)
+        self.assertIn('typeof value === "string" && /^\\d+$/.test(value)', formatters)
+        self.assertIn("BigInt(value)", formatters)
+        self.assertNotIn("Number(value)", formatters)
         self.assertNotIn("innerHTML", self.javascript)
 
     def test_model_change_is_separate_confirmed_and_session_authenticated(self):
