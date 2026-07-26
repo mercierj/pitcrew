@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local dashboard aggregation for Pitcrew scheduler, history, and GitLab data."""
+"""Local dashboard aggregation for Pitcrew scheduler, history, and forge data."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from scripts.pitcrew_preprod_review import PreprodReviewError, ReportStore
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts.pitcrew_run_store import RunStore, RunStoreError
 from scripts.pitcrew_forge_work import (
+    GitHubForgeWork,
     GitLabForgeWork,
     canonical_issue_target,
     ticket_agent_action,
@@ -79,9 +80,13 @@ class DashboardError(RuntimeError):
 
 def _forge_work_adapter(config: dict, command_runner: Callable):
     providers = config.get("providers")
-    if not isinstance(providers, dict) or providers.get("forge") != "gitlab":
+    provider = providers.get("forge") if isinstance(providers, dict) else None
+    if provider == "github":
+        return GitHubForgeWork(config, command_runner)
+    if provider == "gitlab":
+        return GitLabForgeWork(config, command_runner)
+    else:
         raise DashboardError("configured forge work adapter is unavailable")
-    return GitLabForgeWork(config, command_runner)
 
 
 def _timestamp(value: str) -> datetime:

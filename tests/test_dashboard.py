@@ -299,6 +299,49 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("gitlab", service.forge_work()["provider"])
         self.assertEqual(["collect"], calls)
 
+    def test_forge_work_selects_github_adapter_without_factory_injection(self):
+        config = runtime_config()
+        config["providers"] = {"forge": "github", "tracker": "github"}
+        config["github"] = {
+            "host": "github.com",
+            "user": "operator",
+            "owner": "acme",
+            "repository": "acme/payments",
+            "tracker": {
+                "ticket_prefix": "acme/payments#",
+                "labels": {
+                    "agent": "pitcrew-agent",
+                    "bug": "bug",
+                    "investigate": "investigate",
+                    "quick_win": "quick-win",
+                    "improvement": "improvement",
+                },
+                "states": {
+                    state: f"pitcrew-state::{state}"
+                    for state in ("todo", "processing", "review", "blocked", "done")
+                },
+            },
+        }
+        (self.runtime / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        adapter = mock.Mock()
+        adapter.collect.return_value = {
+            "provider": "github",
+            "degraded": False,
+            "error": None,
+            "groups": {},
+            "changes": [],
+        }
+
+        with mock.patch(
+            "scripts.pitcrew_dashboard.GitHubForgeWork",
+            return_value=adapter,
+        ) as github_adapter:
+            work = self.service(FakeRunner()).forge_work(force_refresh=True)
+
+        self.assertEqual("github", work["provider"])
+        github_adapter.assert_called_once()
+        adapter.collect.assert_called_once_with()
+
     def test_launch_ticket_agent_targets_validated_issue(self):
         store, dispatcher = self.coordinator()
         service = self.service(FakeRunner(), run_store=store, run_dispatcher=dispatcher)
