@@ -517,3 +517,19 @@ test("refresh keeps human actions, authenticated preprod, and GitLab independent
   assert.match(gitlab, /now - lastGitLabRefresh < GITLAB_REFRESH_MS/);
   assert.match(gitlab, /sourceStore\.load\(\s*"gitlab"/);
 });
+
+test("automatic refresh preserves the viewport without changing manual refresh", async () => {
+  const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
+  const refreshSource = appSource
+    .split("async function refresh({ manual = false, skipGitLab = false } = {}) {")[1]
+    .split("elements.refreshButton.addEventListener")[0];
+
+  assert.match(
+    refreshSource,
+    /const scrollPosition = manual \? null : \{x: window\.scrollX, y: window\.scrollY\};/,
+  );
+  assert.match(
+    refreshSource,
+    /if \(scrollPosition\) window\.scrollTo\(scrollPosition\.x, scrollPosition\.y\);/,
+  );
+});

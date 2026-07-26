@@ -1584,6 +1584,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
   if (refreshPromise) {
     return refreshPromise;
   }
+  const scrollPosition = manual ? null : {x: window.scrollX, y: window.scrollY};
   refreshPromise = (async () => {
     elements.agentGrid.setAttribute("aria-busy", "true");
     elements.refreshButton.disabled = true;
@@ -1632,6 +1633,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     } finally {
       elements.agentGrid.setAttribute("aria-busy", "false");
       elements.refreshButton.disabled = false;
+      if (scrollPosition) window.scrollTo(scrollPosition.x, scrollPosition.y);
     }
   })();
   try {
