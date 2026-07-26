@@ -295,13 +295,11 @@ const createItemCard = (entry, onOpen, {done = false, focusScope = "action"} = {
 export function renderCrewHealth(root, snapshot = {}) {
   if (!root) return;
   const agents = asArray(snapshot?.agents);
-  const onDemand = asArray(snapshot?.disabled_roles);
   const values = [
     ["Sains", agents.filter((agent) => agent?.health === "healthy").length],
     ["Alertes", agents.filter((agent) => agent?.health === "warning").length],
     ["Échecs", agents.filter((agent) => agent?.health === "failed").length],
     ["En cours", agents.filter((agent) => agent?.running).length],
-    ["À la demande", onDemand.length],
   ];
   const list = document.createElement("dl");
   values.forEach(([label, value]) => {

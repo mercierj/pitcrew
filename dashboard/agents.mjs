@@ -187,8 +187,7 @@ export function renderAgents(root, disabledRoot, disabledCount, snapshot, handle
     const line = document.createElement("p");
     line.textContent = [
       role.skill || "Rôle inconnu",
-      "À la demande",
-      `Prérequis : ${role.reason || "aucun"}`,
+      role.trigger_mode === "event" ? "À la demande" : role.reason || "Non configuré",
       `Modèle résolu : ${role.configured_model || "Indisponible"}`,
     ].join(" · ");
     return line;
