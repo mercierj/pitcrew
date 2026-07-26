@@ -867,10 +867,43 @@ class DashboardServiceTest(unittest.TestCase):
 
         self.assertEqual(first["run_id"], second["run_id"])
         self.assertEqual({first["created"], second["created"]}, {True, False})
-        self.assertEqual(2, len(dispatcher.drain_calls))
+        self.assertEqual(1, len(dispatcher.drain_calls))
         self.assertEqual(3, dispatcher.drain_calls[0][1]["implementer-run"])
         self.assertEqual([first["run_id"]], dispatcher.spawned_run_ids)
         self.assertEqual(1, len(store.list_runs("getbill", active_only=True)))
+
+    def test_ticket_launch_keeps_distinct_targets_active(self):
+        runner = FakeRunner()
+        store, dispatcher = self.coordinator()
+        service = self.service(runner, run_store=store, run_dispatcher=dispatcher)
+        targets = [
+            "https://gitlab.com/getbill1/getbill/-/issues/1",
+            "https://gitlab.com/getbill1/getbill/-/issues/2",
+        ]
+
+        def issue_for(path):
+            iid = int(path.rsplit("/", 1)[1])
+            return {
+                "iid": iid,
+                "state": "opened",
+                "labels": ["pitcrew-agent", "pitcrew-state::todo"],
+            }
+
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            side_effect=issue_for,
+        ):
+            results = [
+                service.launch_ticket_agent("implementer-run", target)
+                for target in targets
+            ]
+
+        self.assertEqual(2, len({result["run_id"] for result in results}))
+        self.assertEqual([True, True], [result["created"] for result in results])
+        active = store.list_runs("getbill", active_only=True)
+        self.assertEqual(set(targets), {run["target"] for run in active})
+        self.assertEqual(2, len(dispatcher.spawned_run_ids))
 
     def test_ticket_launch_revalidates_lifecycle(self):
         store, dispatcher = self.coordinator()
@@ -941,7 +974,48 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual(3, capacity["max_concurrent"])
         self.assertEqual(1, capacity["running"])
         self.assertEqual(1, capacity["legacy_running"])
+        self.assertTrue(snapshot["has_active"])
         self.assertEqual(2, service._claim_capacity_map()["implementer-run"])
+
+    def test_gitlab_work_represents_merged_drift_without_syncing_in_read(self):
+        issue = dict(gitlab_issues()[3])
+        issue.update(
+            {
+                "iid": 3,
+                "state": "opened",
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+                "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+            }
+        )
+        merged_mr = dict(gitlab_merge_requests()[1])
+        merged_mr.update(
+            {
+                "iid": 12,
+                "description": "Closes #3",
+                "state": "merged",
+                "merged_at": "2026-07-24T11:00:00Z",
+            }
+        )
+        service = self.service(
+            FakeRunner(
+                issue_pages=[[issue]],
+                merge_request_pages=[[merged_mr]],
+            )
+        )
+
+        with mock.patch.object(service, "_gitlab_mutation") as mutation:
+            ticket = service.gitlab_work(force_refresh=True)["groups"]["blocked"][0]
+
+        self.assertEqual(
+            {
+                "skill": "stale-sweep",
+                "target": issue["web_url"],
+                "reason": "merged_merge_request",
+            },
+            ticket["reconciliation_candidate"],
+        )
+        mutation.assert_not_called()
+        self.assertFalse(hasattr(service, "_sync_merged_issue"))
 
     def test_gitlab_work_degrades_when_run_store_is_unavailable(self):
         store, dispatcher = self.coordinator()
@@ -1296,6 +1370,7 @@ class DashboardServiceTest(unittest.TestCase):
             start_new_session=True,
         )
         self.assertEqual({"accepted": True, "pid": 2468}, triggered)
+        self.assertFalse(hasattr(service, "_trigger_target"))
         self.assertEqual(
             [
                 "python3",

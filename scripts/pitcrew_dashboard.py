@@ -60,7 +60,6 @@ MR_URL = re.compile(r"https?://[^\s<>'\"]+/-/merge_requests/\d+")
 MR_REFERENCE = re.compile(r"(?<![\w!])!(\d+)\b")
 TICKET_REFERENCE = re.compile(r"#(\d+)$")
 STATE_LABEL_PREFIX = "pitcrew-state::"
-MERGED_SYNC_MARKER = "Pitcrew sync: marked done because related MR"
 
 
 class DashboardError(RuntimeError):
@@ -828,6 +827,7 @@ class DashboardService:
             if self._live_status(skill) is not None:
                 capacity["running"] += 1
                 capacity["legacy_running"] = 1
+                snapshot["has_active"] = True
         return snapshot
 
     def _with_run_overlay(self, payload: dict) -> dict:
@@ -997,6 +997,11 @@ class DashboardService:
                 if lifecycle not in groups:
                     continue
                 related = self._related_merge_requests(issue, all_merge_requests, mr_urls)
+                reconciliation_candidate = self._merged_reconciliation_candidate(
+                    issue,
+                    related,
+                    all_merge_requests,
+                )
                 agent_action = None
                 action_spec = TICKET_AGENT_ACTIONS.get(lifecycle)
                 if action_spec is not None and isinstance(issue.get("web_url"), str):
@@ -1029,6 +1034,7 @@ class DashboardService:
                             "pitcrew-source::",
                         ),
                         "related_merge_requests": related,
+                        "reconciliation_candidate": reconciliation_candidate,
                         "active_run": None,
                         "agent_action": agent_action,
                     }
@@ -1048,67 +1054,27 @@ class DashboardService:
         self._gitlab_cached_at = current
         return self._with_run_overlay(payload)
 
-    def _sync_merged_issue(
-        self,
+    @staticmethod
+    def _merged_reconciliation_candidate(
         issue: dict,
-        lifecycle: str,
         related_urls: list[str],
         merge_requests: list[dict],
-    ) -> tuple[dict, str]:
-        merged = [
-            merge_request
-            for merge_request in merge_requests
-            if merge_request.get("state") == "merged"
+    ) -> dict | None:
+        target = issue.get("web_url")
+        if issue.get("state") != "opened" or not isinstance(target, str):
+            return None
+        if not any(
+            merge_request.get("state") == "merged"
+            and isinstance(merge_request.get("merged_at"), str)
             and merge_request.get("web_url") in related_urls
-        ]
-        if not merged:
-            return issue, lifecycle
-
-        merge_request = merged[-1]
-        mr_iid = merge_request.get("iid")
-        mr_url = merge_request.get("web_url")
-        if not isinstance(mr_iid, int) or not isinstance(mr_url, str):
-            return issue, lifecycle
-
-        encoded = quote(self.gitlab_project, safe="")
-        issue_iid = issue.get("iid")
-        if not isinstance(issue_iid, int):
-            return issue, lifecycle
-        notes = self._gitlab_document(
-            f"projects/{encoded}/issues/{issue_iid}/notes?per_page=100"
-        )
-        if not isinstance(notes, list):
-            raise DashboardError("GitLab returned invalid issue notes")
-        marker = f"{MERGED_SYNC_MARKER} !{mr_iid}"
-        marker_exists = any(
-            isinstance(note, dict)
-            and isinstance(note.get("body"), str)
-            and marker in note["body"]
-            for note in notes
-        )
-
-        labels = issue.get("labels")
-        if not isinstance(labels, list):
-            return issue, lifecycle
-        next_labels = [
-            label for label in labels
-            if not (isinstance(label, str) and label.startswith(STATE_LABEL_PREFIX))
-        ]
-        next_labels.append(f"{STATE_LABEL_PREFIX}done")
-        self._gitlab_mutation(
-            f"projects/{encoded}/issues/{issue_iid}",
-            "PUT",
-            {"labels": ",".join(next_labels)},
-        )
-        if not marker_exists:
-            self._gitlab_mutation(
-                f"projects/{encoded}/issues/{issue_iid}/notes",
-                "POST",
-                {"body": f"{marker} ({mr_url})."},
-            )
-        updated = dict(issue)
-        updated["labels"] = next_labels
-        return updated, "done"
+            for merge_request in merge_requests
+        ):
+            return None
+        return {
+            "skill": "stale-sweep",
+            "target": target,
+            "reason": "merged_merge_request",
+        }
 
     @staticmethod
     def _normalize_merge_request(merge_request: dict) -> dict:
@@ -1222,16 +1188,9 @@ class DashboardService:
         self._schedule_cache = None
 
     def _trigger(self, skill: str) -> int:
-        return self._trigger_target(skill)
-
-    def _trigger_target(self, skill: str, target: str | None = None) -> int:
-        args = [str(RUNNER), skill, self.project]
-        if target is not None:
-            args.extend(["--target", target])
-        args.append("--scheduled")
         try:
             process = subprocess.Popen(
-                args,
+                [str(RUNNER), skill, self.project, "--scheduled"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -1241,9 +1200,6 @@ class DashboardService:
                 _redacted_error(str(error), "failed to trigger agent")
             ) from error
         return process.pid
-
-    def _validate_ticket_target(self, target: str) -> int:
-        return self._canonical_ticket_target(target)[1]
 
     def launch_ticket_agent(self, skill: str, target: str) -> dict:
         with self._control_lock:
@@ -1263,10 +1219,11 @@ class DashboardService:
                     source="dashboard",
                     target=canonical,
                 )
-                self.run_dispatcher.reconcile_and_drain(
-                    project=self.project,
-                    capacities=self._claim_capacity_map(),
-                )
+                if run["created"]:
+                    self.run_dispatcher.reconcile_and_drain(
+                        project=self.project,
+                        capacities=self._claim_capacity_map(),
+                    )
                 current = self.run_store.get(run["run_id"])
             except RunStoreError as error:
                 raise DashboardError("ticket run is unavailable") from error
