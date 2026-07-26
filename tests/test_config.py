@@ -13,6 +13,7 @@ from pathlib import Path
 from scripts.pitcrew_config import (
     ConfigError,
     DIRECTORY_FLAGS,
+    EVENT_DRIVEN_ROLES,
     fix_autonomy,
     _lock_runtime_config,
     _write_exclusive_config,
@@ -39,6 +40,28 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def test_delivery_roles_are_authoritatively_classified_as_event_driven(self):
+        self.assertEqual(
+            {
+                "manager-run",
+                "implementer-run",
+                "reviewer-run",
+                "validator-run",
+                "investigate-run",
+                "unblock",
+            },
+            EVENT_DRIVEN_ROLES,
+        )
+        self.assertTrue(EVENT_DRIVEN_ROLES <= set(DEFAULT_MODELS))
+
+    def test_bugfixer_role_is_configured_with_quality_defaults(self):
+        for relative in ("profiles/getbill.json", "profiles/generic.json"):
+            profile = load_profile(ROOT / relative)
+            with self.subTest(profile=relative):
+                self.assertEqual("gpt-5.6-sol", profile["agents"]["bugfixer-run"]["model"])
+                self.assertEqual("high", profile["agents"]["bugfixer-run"]["reasoning_effort"])
+                self.assertEqual("observe", profile["agents"]["bugfixer-run"]["routing_mode"])
+
     def valid_bugfixer_policy(self):
         return {
             "sensitive_labels": [

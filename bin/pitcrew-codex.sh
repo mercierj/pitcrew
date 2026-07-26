@@ -5,7 +5,7 @@ set -euo pipefail
 umask 077
 
 readonly SKILLS=(
-  coverage-run dev-verify-run implementer-run investigate-run manager-run ops-run
+  coverage-run dev-verify-run implementer-run bugfixer-run investigate-run manager-run ops-run
   architecture-run qa-run releaser-run research-run reviewer-run stale-sweep unblock validator-run
   product-discovery-run preprod-review-run security-run
 )
@@ -14,7 +14,7 @@ readonly SKILLS=(
 # These roles call the configured forge/tracker from inside the worker, so they
 # need the network-capable sandbox. Read-only/local roles retain workspace-write.
 readonly NETWORKED_SKILLS=(
-  coverage-run dev-verify-run implementer-run investigate-run manager-run
+  coverage-run dev-verify-run implementer-run bugfixer-run investigate-run manager-run
   ops-run releaser-run reviewer-run stale-sweep unblock validator-run
 )
 
@@ -432,8 +432,9 @@ fi
 # Implementer must update the configured repository's Git metadata to create
 # isolated worktrees. The other roles retain the normal workspace boundary.
 SANDBOX_MODE="workspace-write"
-if [[ "$SKILL" == "implementer-run" ]] \
-  || { uses_provider_network "$SKILL" \
+if [[ "$SKILL" == "implementer-run" || "$SKILL" == "bugfixer-run" ]]; then
+  SANDBOX_MODE="danger-full-access"
+elif { uses_provider_network "$SKILL" \
     && { [[ "$SKILL" != "releaser-run" ]] || release_is_armed; }; }; then
   SANDBOX_MODE="danger-full-access"
 fi

@@ -97,6 +97,7 @@
     "research-run": {"model": "gpt-5.6-terra", "reasoning_effort": "medium", "routing_mode": "observe"},
     "manager-run": {"model": "gpt-5.6-luna", "reasoning_effort": "low", "routing_mode": "observe"},
     "implementer-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "routing_mode": "observe"},
+    "bugfixer-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "routing_mode": "observe"},
     "reviewer-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "routing_mode": "observe"},
     "validator-run": {"model": "gpt-5.6-terra", "reasoning_effort": "medium", "routing_mode": "observe"},
     "investigate-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "routing_mode": "observe"},

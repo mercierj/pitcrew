@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import json
 import os
 import plistlib
@@ -17,12 +18,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from scripts.pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from scripts.pitcrew_config import (
+        ConfigError,
+        EVENT_DRIVEN_ROLES,
+        load_runtime_config,
+        max_concurrent_for,
+        runtime_root,
+    )
     from scripts.pitcrew_run_dispatcher import RunDispatcher
     from scripts.pitcrew_run_store import RunStore
     from scripts.pitcrew_runtime_state import read_state, write_state
 except ModuleNotFoundError:
-    from pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from pitcrew_config import (
+        ConfigError,
+        EVENT_DRIVEN_ROLES,
+        load_runtime_config,
+        max_concurrent_for,
+        runtime_root,
+    )
     from pitcrew_run_dispatcher import RunDispatcher
     from pitcrew_run_store import RunStore
     from pitcrew_runtime_state import read_state, write_state
@@ -36,17 +49,12 @@ SCHEDULE = (
     ("security-run", 86400, True, ""),
     ("product-discovery-run", 604800, True, ""),
     ("research-run", 1800, True, ""),
-    ("manager-run", 3600, True, ""),
-    ("implementer-run", 900, True, ""),
-    ("reviewer-run", 900, True, ""),
-    ("validator-run", 900, True, ""),
-    ("investigate-run", 1800, True, ""),
+    ("bugfixer-run", 900, True, ""),
     ("stale-sweep", 21600, True, ""),
     ("qa-run", 7200, False, "qa.test_flow_repo is not configured"),
     ("coverage-run", 43200, False, "QA flow and architecture repositories are not configured"),
     ("dev-verify-run", 900, False, "live dev flow verification is not configured"),
     ("ops-run", 600, False, "repos[].health is not configured"),
-    ("unblock", 1800, True, ""),
     ("releaser-run", 900, False, "release autonomy is off for GetBill"),
 )
 
@@ -57,8 +65,36 @@ def validated_project(value: str) -> str:
     return value
 
 
-def entries() -> list[dict[str, object]]:
-    return [
+def bugfixer_eligibility(config: Mapping[str, object]) -> tuple[bool, str]:
+    if not isinstance(config.get("bugfixer"), Mapping):
+        return False, "bugfixer policy is not configured"
+    providers = config.get("providers", {})
+    pair = (
+        providers.get("forge"),
+        providers.get("tracker"),
+    ) if isinstance(providers, Mapping) else (None, None)
+    if pair not in {("github", "github"), ("gitlab", "gitlab")}:
+        return False, "native GitHub or GitLab issue tracker is not configured"
+    if not config.get("repos"):
+        return False, "no repository binding is configured"
+    return True, ""
+
+
+def entries(
+    project: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    resolved_config: Mapping[str, object] | None = None
+    if project is not None:
+        try:
+            resolved_config = load_runtime_config(project, env)
+        except ConfigError as error:
+            if str(error) not in {
+                "runtime config path must not be a symlink or missing",
+                "directory anchor must not be a symlink or missing",
+            }:
+                raise
+    result = [
         {
             "skill": skill,
             "interval_seconds": interval,
@@ -67,10 +103,24 @@ def entries() -> list[dict[str, object]]:
         }
         for skill, interval, enabled, reason in SCHEDULE
     ]
+    for entry in result:
+        if entry["skill"] == "bugfixer-run":
+            if resolved_config is None:
+                entry["enabled"] = False
+                entry["reason"] = "bugfixer policy is not configured"
+            else:
+                entry["enabled"], entry["reason"] = bugfixer_eligibility(resolved_config)
+    return result
 
 
-def enabled_entry(skill: str) -> dict[str, object]:
-    for entry in entries():
+def enabled_entry(
+    skill: str,
+    project: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    if skill in EVENT_DRIVEN_ROLES:
+        raise ValueError(f"skill is event-driven: {skill}")
+    for entry in entries(project, env):
         if entry["skill"] != skill:
             continue
         if not entry["enabled"]:
@@ -137,7 +187,7 @@ def render(
     skill: str | None = None,
 ) -> list[Path]:
     paths = []
-    selected = [enabled_entry(skill)] if skill else entries()
+    selected = [enabled_entry(skill, project, env)] if skill else entries(project, env)
     for entry in selected:
         if not entry["enabled"]:
             continue
@@ -221,7 +271,11 @@ def launchd_state(output: str) -> tuple[bool, int | None]:
     return running, int(pid_match.group(1)) if pid_match else None
 
 
-def status(project: str, skill: str | None = None) -> int:
+def status(
+    project: str,
+    skill: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> int:
     domain = f"gui/{os.getuid()}"
     try:
         global_state = read_state(project)
@@ -229,7 +283,7 @@ def status(project: str, skill: str | None = None) -> int:
         print(str(error), file=sys.stderr)
         return 2
     result = []
-    selected = [enabled_entry(skill)] if skill else entries()
+    selected = [enabled_entry(skill, project, env)] if skill else entries(project, env)
     for entry in selected:
         skill = str(entry["skill"])
         label = launchd_label(project, skill)
@@ -250,8 +304,12 @@ def status(project: str, skill: str | None = None) -> int:
     return 0
 
 
-def stop(project: str, skill: str) -> int:
-    enabled_entry(skill)
+def stop(
+    project: str,
+    skill: str,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    enabled_entry(skill, project, env)
     label = launchd_label(project, skill)
     target = f"gui/{os.getuid()}/{label}"
     result = launchctl("bootout", target, check=False)
@@ -268,7 +326,7 @@ def coordinated_components(project: str, env: dict[str, str]) -> tuple[RunStore,
     # default capacity, then apply configured overrides when present.
     capacities = {
         str(entry["skill"]): 3
-        for entry in entries()
+        for entry in entries(project, env)
         if entry["enabled"]
     }
     try:
@@ -329,7 +387,7 @@ def stop_all(
             first_failure = first_failure or 2
             print("coordinated workers could not all be cancelled", file=sys.stderr)
     domain = f"gui/{os.getuid()}"
-    for entry in entries():
+    for entry in entries(project, values):
         if not entry["enabled"]:
             continue
         label = launchd_label(project, str(entry["skill"]))
@@ -414,10 +472,11 @@ def main() -> int:
     args = parser().parse_args()
     env = dict(os.environ)
     if args.command == "list":
+        resolved_entries = entries(args.project, env)
         if args.json:
-            print(json.dumps(entries(), indent=2))
+            print(json.dumps(resolved_entries, indent=2))
         else:
-            for entry in entries():
+            for entry in resolved_entries:
                 state = "enabled" if entry["enabled"] else f"disabled: {entry['reason']}"
                 print(f"{entry['skill']}: every {entry['interval_seconds']}s ({state})")
         return 0
@@ -429,9 +488,9 @@ def main() -> int:
         if args.command == "install":
             return install(args.project, args.output_dir.expanduser(), env, args.skill)
         if args.command == "status":
-            return status(args.project, args.skill)
+            return status(args.project, args.skill, env)
         if args.command == "stop":
-            return stop(args.project, args.skill)
+            return stop(args.project, args.skill, env)
         if args.command == "stop-all":
             return stop_all(args.project, env)
         if args.command == "resume-all":

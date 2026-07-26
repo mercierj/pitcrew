@@ -54,15 +54,19 @@ class ScheduleTest(unittest.TestCase):
         for skill in (
             "architecture-run",
             "research-run",
+            "stale-sweep",
+        ):
+            self.assertTrue(schedule[skill]["enabled"], skill)
+
+        for skill in (
             "manager-run",
             "implementer-run",
             "reviewer-run",
             "validator-run",
             "investigate-run",
-            "stale-sweep",
             "unblock",
         ):
-            self.assertTrue(schedule[skill]["enabled"], skill)
+            self.assertNotIn(skill, schedule)
 
         for skill in (
             "qa-run",
@@ -75,6 +79,64 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(schedule[skill]["reason"], skill)
 
         self.assertNotIn("preprod-review-run", schedule)
+
+    def test_delivery_roles_have_no_launchagent_schedule(self):
+        scheduler = load_scheduler_module()
+        scheduled = {entry["skill"]: entry for entry in scheduler.entries()}
+        delivery_roles = {
+            "manager-run",
+            "implementer-run",
+            "reviewer-run",
+            "validator-run",
+            "investigate-run",
+            "unblock",
+        }
+
+        self.assertTrue(delivery_roles.isdisjoint(scheduled))
+        self.assertEqual(604800, scheduled["architecture-run"]["interval_seconds"])
+        self.assertEqual(21600, scheduled["stale-sweep"]["interval_seconds"])
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / "LaunchAgents"
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            rendered = self.run_scheduler(
+                "render", "--project", "getbill", "--output-dir", str(output), env=env
+            )
+            self.assertEqual(0, rendered.returncode, rendered.stderr)
+            labels = {path.stem.rsplit(".", 1)[-1] for path in output.glob("*.plist")}
+            self.assertTrue(delivery_roles.isdisjoint(labels))
+
+            installed = self.run_scheduler(
+                "install", "--project", "getbill", "--output-dir", str(output),
+                "--skill", "manager-run", env=env,
+            )
+            self.assertEqual(2, installed.returncode)
+            self.assertIn("event-driven", installed.stderr)
+
+    def test_bugfixer_schedule_requires_native_tracker_policy_and_repository_binding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            for project, profile, enabled, reason in (
+                ("getbill", "getbill", True, ""),
+                ("example", "generic", False, "bugfixer policy is not configured"),
+            ):
+                configured = subprocess.run(
+                    ["bash", str(ROOT / "bin/configure.sh"), project, "--profile", profile],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(0, configured.returncode, configured.stderr)
+                result = self.run_scheduler("list", "--project", project, "--json", env=env)
+                self.assertEqual(0, result.returncode, result.stderr)
+                entry = {item["skill"]: item for item in json.loads(result.stdout)}["bugfixer-run"]
+                self.assertEqual(900, entry["interval_seconds"])
+                self.assertEqual(enabled, entry["enabled"])
+                self.assertEqual(reason, entry["reason"])
 
     def test_preprod_review_is_never_rendered_as_a_launch_agent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -165,7 +227,7 @@ class ScheduleTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             plists = sorted(output.glob("io.getbill.pitcrew.getbill.*.plist"))
-            self.assertEqual(11, len(plists))
+            self.assertEqual(5, len(plists))
 
             architecture = output / "io.getbill.pitcrew.getbill.architecture-run.plist"
             with architecture.open("rb") as handle:
@@ -257,7 +319,7 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(payload)
             self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
             bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
-            self.assertEqual(11, len(bootouts))
+            self.assertEqual(5, len(bootouts))
 
     def test_stop_all_closes_admission_before_cancelling_and_booting_out(self):
         scheduler = load_scheduler_module()
@@ -784,7 +846,7 @@ class ScheduleTest(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             status = json.loads(result.stdout)
-            self.assertEqual(16, len(status))
+            self.assertEqual(11, len(status))
             self.assertEqual(
                 {entry["skill"] for entry in status},
                 {
@@ -792,21 +854,16 @@ class ScheduleTest(unittest.TestCase):
                     "research-run",
                     "security-run",
                     "product-discovery-run",
-                    "manager-run",
-                    "implementer-run",
-                    "reviewer-run",
-                    "validator-run",
-                    "investigate-run",
+                    "bugfixer-run",
                     "stale-sweep",
                     "qa-run",
                     "coverage-run",
                     "dev-verify-run",
                     "ops-run",
-                    "unblock",
                     "releaser-run",
                 },
             )
-            self.assertEqual(16, len(calls.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual(11, len(calls.read_text(encoding="utf-8").splitlines()))
 
     def test_launchctl_failure_scrubs_credential_formats_and_limits_stderr(self):
         cases = (

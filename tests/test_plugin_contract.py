@@ -13,6 +13,7 @@ SKILLS = {
     "coverage-run",
     "dev-verify-run",
     "implementer-run",
+    "bugfixer-run",
     "investigate-run",
     "manager-run",
     "ops-run",

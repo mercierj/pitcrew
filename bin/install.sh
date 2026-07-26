@@ -46,6 +46,7 @@ SKILLS=(
   "research-run"
   "qa-run"
   "implementer-run"
+  "bugfixer-run"
   "reviewer-run"
   "validator-run"
   "unblock"

@@ -2049,6 +2049,24 @@ class CliTest(unittest.TestCase):
             self.assertNotIn("danger-full-access", result.stdout)
             self.assertIn("/Users/jo/Prog/getbill", result.stdout)
 
+    def test_bugfixer_runner_uses_the_implementer_isolated_checkout_sandbox(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "CODEX_HOME": str(Path(temp).resolve())}
+            init = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, init.returncode, init.stderr)
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "bugfixer-run",
+                "getbill",
+                "--dry-run",
+                env=env,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("Use $pitcrew:bugfixer-run", result.stdout)
+            self.assertIn("sandbox=danger-full-access", result.stdout)
+
     def test_runner_dry_run_forwards_directed_ticket_target(self):
         with tempfile.TemporaryDirectory() as temp:
             env = {**os.environ, "CODEX_HOME": str(Path(temp).resolve())}
