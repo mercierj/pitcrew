@@ -201,13 +201,20 @@ cd /Users/jo/Prog/pitcrew
 ```
 
 Open `http://127.0.0.1:8765`; the local server runs until you stop it with
-Ctrl-C. **Pilotage** shows human decisions first and groups
-active GitLab work into `À faire`, `En cours`, `En revue`, and `Bloqué`; work
-completed today is folded below the board. **Agents** contains compact operational
-rows with expandable model, usage, schedule, and control details. **Historique**
-keeps the seven-day run log and filters. GitLab failures mark the remote source
-as degraded and retain the last successful data while local monitoring and
-controls continue to work.
+Ctrl-C. **Pilotage** shows human decisions first and groups the configured native
+forge work into `À faire`, `En cours`, `En revue`, and `Bloqué`; it follows the
+configured provider for GitHub and GitLab, and work completed today is folded
+below the board. Eligible `agent + bug + todo` work exposes **Corriger ce bug**.
+Queued and running state comes from the durable ticket coordinator, not from
+provider prose.
+
+The provider-neutral work panel reads `/api/forge-work`. A GitHub or GitLab
+failure does not break local agent status, history, or decisions: the provider panel degrades independently, retains its last successful data, and marks the remote source as degraded while local monitoring and controls continue to work.
+The /api/gitlab compatibility alias is temporary and available only for a GitLab configuration.
+
+**Agents** contains compact operational rows with expandable model, usage,
+schedule, and control details. **Historique** keeps the seven-day run log and
+filters.
 
 For an enabled agent, **Trigger** starts one bounded pass immediately (the
 per-agent lock prevents overlap), **Stop** stops its current pass and unloads its

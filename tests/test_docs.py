@@ -16,6 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocsTest(unittest.TestCase):
+    def test_provider_neutral_dashboard_degradation_is_documented(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "/api/forge-work",
+            "GitHub and GitLab",
+            "Corriger ce bug",
+            "provider panel degrades independently",
+            "/api/gitlab compatibility alias",
+        ):
+            self.assertIn(marker, readme)
+
     def test_exclusive_bugfixer_lifecycle_is_documented(self):
         combined = "\n".join(
             (ROOT / relative).read_text(encoding="utf-8")
