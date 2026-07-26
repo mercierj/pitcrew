@@ -369,6 +369,62 @@ class ScheduleTest(unittest.TestCase):
             calls,
         )
 
+    def test_resume_restarts_queued_work_without_reopening_cancelled_runs(self):
+        scheduler = load_scheduler_module()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            store = scheduler.RunStore(root / "runtime" / "runs.sqlite3")
+            cancelled = store.enqueue(
+                project="getbill",
+                skill="implementer-run",
+                source="scheduled",
+                target="cancelled",
+            )
+            store.finish(cancelled["run_id"], state="cancelled")
+            queued = store.enqueue(
+                project="getbill",
+                skill="implementer-run",
+                source="scheduled",
+                target="queued",
+            )
+            store.set_project_state("getbill", "stopped")
+            launches = []
+
+            class Process:
+                pid = 456
+
+            dispatcher = scheduler.RunDispatcher(
+                store,
+                "/runner",
+                process_factory=lambda *args, **kwargs: (
+                    launches.append((args, kwargs)) or Process()
+                ),
+                target_validator=lambda row: True,
+            )
+            scheduler.write_state = lambda project, state, env: None
+            scheduler.install = lambda project, output, env: 0
+
+            self.assertEqual(
+                0,
+                scheduler.resume_all(
+                    "getbill",
+                    root / "LaunchAgents",
+                    {"HOME": str(root)},
+                    lambda project, env: (
+                        store,
+                        dispatcher,
+                        {"implementer-run": 1},
+                    ),
+                ),
+            )
+
+            self.assertEqual(
+                "cancelled",
+                store.get(cancelled["run_id"])["state"],
+            )
+            self.assertEqual("running", store.get(queued["run_id"])["state"])
+            self.assertEqual(1, len(launches))
+
     def test_resume_restores_stopped_compatibility_flag_when_install_fails(self):
         scheduler = load_scheduler_module()
         calls = []

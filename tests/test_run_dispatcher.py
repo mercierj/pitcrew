@@ -829,6 +829,66 @@ class RunDispatcherTest(unittest.TestCase):
         self.assertEqual("queued", self.store.get(queued["run_id"])["state"])
         self.assertEqual([], self.dispatcher.cancel_running("demo", grace_seconds=0))
 
+    def test_enqueue_committed_before_stop_stays_queued_and_never_spawns_after_stop(self):
+        enqueue_holds_transaction = threading.Event()
+        stop_started = threading.Event()
+        allow_enqueue_commit = threading.Event()
+        original_control = self.store._control
+
+        def block_enqueue_with_write_lock(connection, project):
+            control = original_control(connection, project)
+            if threading.current_thread().name == "pitcrew-enqueue":
+                enqueue_holds_transaction.set()
+                self.assertTrue(allow_enqueue_commit.wait(timeout=2))
+            return control
+
+        self.store._control = block_enqueue_with_write_lock
+        admitted = []
+        errors = []
+
+        def enqueue_run():
+            try:
+                admitted.append(self.enqueue("racing-ticket"))
+            except Exception as error:
+                errors.append(error)
+
+        enqueue = threading.Thread(
+            name="pitcrew-enqueue",
+            target=enqueue_run,
+        )
+        enqueue.start()
+        self.assertTrue(enqueue_holds_transaction.wait(timeout=2))
+
+        def stop_project():
+            try:
+                stop_started.set()
+                self.store.set_project_state("demo", "stopped")
+            except Exception as error:
+                errors.append(error)
+
+        stop = threading.Thread(target=stop_project)
+        stop.start()
+        self.assertTrue(stop_started.wait(timeout=2))
+        allow_enqueue_commit.set()
+        enqueue.join(timeout=2)
+        stop.join(timeout=2)
+
+        self.assertFalse(enqueue.is_alive())
+        self.assertFalse(stop.is_alive())
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(admitted))
+        self.assertEqual("queued", self.store.get(admitted[0]["run_id"])["state"])
+        spawned = []
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
+            target_validator=lambda row: True,
+        )
+        with self.assertRaises(RunPaused):
+            dispatcher.drain("demo", {"qa-run": 1})
+        self.assertEqual([], spawned)
+
     def test_stop_between_claim_and_mark_pid_terminates_spawned_worker(self):
         run = self.enqueue("race")
         signals = []
