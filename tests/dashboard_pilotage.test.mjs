@@ -143,6 +143,31 @@ test("action cards render the bounded agent failure context instead of raw JSON"
   globalThis.document = originalDocument;
 });
 
+test("issue details present GitLab markdown as readable safe text", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    createElement: (tagName) => new Element(tagName),
+    createTextNode: (textContent) => ({textContent}),
+  };
+
+  const detail = renderItemDetail({
+    kind: "issue",
+    key: "issue:42",
+    resource: {
+      title: "Ticket",
+      description: "**Source:** research. `getbill:doc-sync`\n\n**What:** Fix [the docs](https://example.test/docs).",
+    },
+  });
+
+  assert.equal(
+    detail.body.children[0].textContent,
+    "Source: research. getbill:doc-sync What: Fix the docs.",
+  );
+  assert.equal(detail.body.children[0].textContent.includes("**"), false);
+  assert.equal(detail.body.children[0].textContent.includes("`"), false);
+  globalThis.document = originalDocument;
+});
+
 test("detail launch action sends only one request after it resolves", async () => {
   const originalDocument = globalThis.document;
   globalThis.document = {

@@ -1325,6 +1325,10 @@ footer {
 }
 
 @media (max-width: 620px) {
+  #crew-health {
+    display: none;
+  }
+
   .app-header {
     gap: 8px;
     padding-inline: 12px;

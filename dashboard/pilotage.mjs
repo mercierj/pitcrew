@@ -14,6 +14,17 @@ const normalizeContextText = (value) => (
   typeof value === "string" ? value.replace(/\s+/g, " ").trim() : ""
 );
 
+const markdownToPlainText = (value) => String(value ?? "")
+  .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
+  .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+  .replace(/`([^`]*)`/g, "$1")
+  .replace(/\*\*([^*]+)\*\*/g, "$1")
+  .replace(/__([^_]+)__/g, "$1")
+  .replace(/^#{1,6}\s+/gm, "")
+  .replace(/^\s*[-+*]\s+/gm, "")
+  .replace(/\s+/g, " ")
+  .trim();
+
 const boundedContextText = (value, limit = ACTION_CONTEXT_LIMIT) => {
   const normalized = normalizeContextText(value);
   if (normalized.length <= limit) return normalized;
@@ -302,7 +313,7 @@ export function renderItemDetail(entry, handlers = {}) {
     || resource.question;
   if (description) {
     const paragraph = document.createElement("p");
-    paragraph.textContent = description;
+    paragraph.textContent = markdownToPlainText(description);
     body.append(paragraph);
   }
 
