@@ -396,19 +396,21 @@ test("workflow cards and details expose correlated delivery context", () => {
             title: "Fiabiliser les paiements",
             updated_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
             labels: ["pitcrew-agent", "type::bug", "priority::high"],
-            related_merge_requests: [mergeRequestUrl],
+            related_change_urls: [mergeRequestUrl],
             active_run: {skill: "implementer-run", state: "running"},
             agent_action: {skill: "implementer-run", label: "Voir le détail"},
           }],
         },
-        merge_requests: [{
+        changes: [{
           canonical_url: mergeRequestUrl,
-          iid: 7,
+          number: 7,
+          reference: "!7",
+          kind: "merge_request",
           state: "opened",
           source_branch: "fix/payments",
           target_branch: "develop",
-          author_username: "jo",
-          pipeline_status: "passed",
+          author: "jo",
+          checks_status: "passing",
         }],
       },
       decisions: {
@@ -440,7 +442,7 @@ test("workflow cards and details expose correlated delivery context", () => {
   assert.match(cardText, /type::bug · priority::high · Décision requise/);
   assert.equal(cardText.includes("pitcrew-agent"), false);
   assert.match(cardText, /implementer-run · validation/);
-  assert.match(cardText, /MR !7 · opened · pipeline passed/);
+  assert.match(cardText, /!7 · opened · vérifications passing/);
 
   card.children.find((child) => child.tagName === "button").dispatchEvent(new Event("click"));
   const detail = renderItemDetail(opened);
@@ -449,7 +451,7 @@ test("workflow cards and details expose correlated delivery context", () => {
     ...(node.children || []).map(flattenText),
   ].join("");
   const detailText = flattenText(detail.body);
-  assert.match(detailText, /MR liée : !7 · fix\/payments → develop · Auteur : jo · Pipeline : passed/);
+  assert.match(detailText, /Changement lié : !7 · fix\/payments → develop · Auteur : jo · Vérifications : passing/);
   assert.match(detailText, /Agent courant : implementer-run · Phase : validation/);
   assert.match(detailText, /Dernier résumé : Paiement vérifié/);
   assert.match(detailText, /Dernière exécution : success · 26 juil. 2026/);
@@ -745,25 +747,25 @@ test("closing detail does not move focus when a detached trigger has no replacem
   delete globalThis.document;
 });
 
-test("refresh keeps human actions, authenticated preprod, and GitLab independent", async () => {
+test("refresh keeps human actions, authenticated preprod, and forge work independent", async () => {
   const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
   const refreshSource = appSource.split("async function refresh({")[1].split("elements.refreshButton.addEventListener")[0];
   const humanActions = appSource.split("async function refreshHumanActions()")[1].split("async function refreshPreprod()")[0];
-  const preprod = appSource.split("async function refreshPreprod()")[1].split("async function refreshGitLab(")[0];
-  const gitlab = appSource.split("async function refreshGitLab(")[1].split("function sourceStatus(")[0];
+  const preprod = appSource.split("async function refreshPreprod()")[1].split("async function refreshForgeWork(")[0];
+  const forge = appSource.split("async function refreshForgeWork(")[1].split("function sourceStatus(")[0];
 
-  assert.match(refreshSource, /await Promise\.all\(\[\s*refreshLocal\(\),\s*refreshHumanActions\(\),\s*refreshPreprod\(\),\s*skipGitLab \? Promise\.resolve\(\) : refreshGitLab\(\{manual\}\),/);
+  assert.match(refreshSource, /await Promise\.all\(\[\s*refreshLocal\(\),\s*refreshHumanActions\(\),\s*refreshPreprod\(\),\s*skipForge \? Promise\.resolve\(\) : refreshForgeWork\(\{manual\}\),/);
   assert.match(humanActions, /sourceStore\.load\("decisions", \(\) => api\.get\("\/api\/decisions"\)\)/);
   assert.match(humanActions, /sourceStore\.load\("proposals", \(\) => api\.get\("\/api\/proposals"\)\)/);
   assert.match(preprod, /api\.get\("\/api\/preprod-review", \{\s*headers: \{"X-Pitcrew-Session": sessionToken\}/);
-  assert.match(gitlab, /now - lastGitLabRefresh < GITLAB_REFRESH_MS/);
-  assert.match(gitlab, /sourceStore\.load\(\s*"gitlab"/);
+  assert.match(forge, /now - lastForgeRefresh < FORGE_REFRESH_MS/);
+  assert.match(forge, /sourceStore\.load\(\s*"forge"/);
 });
 
 test("automatic refresh preserves the viewport without changing manual refresh", async () => {
   const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
   const refreshSource = appSource
-    .split("async function refresh({ manual = false, skipGitLab = false } = {}) {")[1]
+    .split("async function refresh({ manual = false, skipForge = false } = {}) {")[1]
     .split("elements.refreshButton.addEventListener")[0];
 
   assert.match(
@@ -773,6 +775,18 @@ test("automatic refresh preserves the viewport without changing manual refresh",
   assert.match(
     refreshSource,
     /if \(scrollPosition\) window\.scrollTo\(scrollPosition\.x, scrollPosition\.y\);/,
+  );
+});
+
+test("autonomous-fixes toggle keeps the accepted mode while a refresh is in flight", async () => {
+  const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
+  const handler = appSource
+    .split('elements.fixAutonomyToggle?.addEventListener("change", async () => {')[1]
+    .split("elements.preprodReviewTrigger")[0];
+
+  assert.match(
+    handler,
+    /const result = await runAction\([\s\S]*?api\.action\(\{action: "set-fix-autonomy", mode\}\),[\s\S]*?sources\.snapshot = \{\.\.\.sources\.snapshot, fix_autonomy: result\.fix_autonomy\};[\s\S]*?renderOverview\(sources\.snapshot\);[\s\S]*?await refreshFresh\(\{manual: true\}\);/,
   );
 });
 

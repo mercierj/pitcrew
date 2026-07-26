@@ -1,4 +1,5 @@
 import {createNavigation} from "./navigation.mjs";
+import {refreshAfterPending} from "./refresh.mjs";
 import {createDetailPanel} from "./detail-panel.mjs";
 import {
   renderActionFeedback,
@@ -23,7 +24,8 @@ import {
 
 const ACTIVE_POLL_INTERVAL_MS = 2_000;
 const IDLE_POLL_INTERVAL_MS = 10_000;
-const GITLAB_REFRESH_MS = 60_000;
+const FORGE_REFRESH_MS = 60_000;
+const forgePath = "/api/forge-work";
 const ACTIONS = new Set(["trigger", "stop", "restart"]);
 
 const navigation = createNavigation(document.querySelector("#app-navigation"), {
@@ -67,10 +69,10 @@ const elements = {
   historyFilters: document.querySelector("#history-filters"),
   historySkill: document.querySelector("#history-skill"),
   historyOutcome: document.querySelector("#history-outcome"),
-  gitlabGroups: document.querySelector("#gitlab-groups"),
-  gitlabState: document.querySelector("#gitlab-state"),
-  mergeRequestList: document.querySelector("#merge-request-list"),
-  mergeRequestsState: document.querySelector("#merge-requests-state"),
+  forgeGroups: document.querySelector("#forge-groups"),
+  forgeState: document.querySelector("#forge-state"),
+  changeList: document.querySelector("#change-list"),
+  changesState: document.querySelector("#changes-state"),
   actionQueueCount: document.querySelector("#action-queue-count"),
   actionQueueList: document.querySelector("#action-queue-list"),
   actionQueueMore: document.querySelector("#action-queue-more"),
@@ -107,7 +109,7 @@ const sources = {
   runs: {runs: [], capacity: {}, has_active: false},
 };
 const sourceStore = createSourceStore();
-const renderGitLabWhenChanged = createStableRenderGuard();
+const renderForgeWorkWhenChanged = createStableRenderGuard();
 const coordinateHistoryRequest = createLatestRequestCoordinator();
 const detailController = createDetailPanel(
   elements.detailPanel,
@@ -145,8 +147,8 @@ const lifecycleLabels = {
 };
 
 let refreshPromise = null;
-let lastGitLabRefresh = 0;
-let latestGitLabWork = null;
+let lastForgeRefresh = 0;
+let latestForgeWork = null;
 let latestRuns = {runs: [], capacity: {}, has_active: false};
 let refreshTimer = null;
 let detailTicketView = null;
@@ -368,7 +370,7 @@ async function runPreprodReviewAction(action) {
     setText(elements.operationalStatus, "Impossible de contrôler la revue avant Preprod.");
   } finally {
     preprodReviewSubmitting = false;
-    await refreshFresh({ manual: true, skipGitLab: true });
+    await refreshFresh({ manual: true, skipForge: true });
   }
 }
 
@@ -838,11 +840,11 @@ function issueResource(entry) {
 }
 
 function currentIssueForTarget(target) {
-  const groups = latestGitLabWork?.groups;
+  const groups = latestForgeWork?.groups;
   if (!groups || typeof groups !== "object") return null;
   return Object.values(groups)
     .flatMap((issues) => Array.isArray(issues) ? issues : [])
-    .find((issue) => issue?.agent_action?.target === target || issue?.web_url === target)
+    .find((issue) => issue?.agent_action?.target === target || issue?.canonical_url === target)
     || null;
 }
 
@@ -874,19 +876,20 @@ function upsertRun(run) {
   };
 }
 
-function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
+function renderForgeWork(work = latestForgeWork, runs = latestRuns) {
   let shouldRender = false;
-  renderGitLabWhenChanged({work, runs}, () => {
+  renderForgeWorkWhenChanged({work, runs}, () => {
     shouldRender = true;
   });
   if (!shouldRender) return false;
   if (!work) return;
-  elements.gitlabGroups.replaceChildren();
-  renderMergeRequests(work);
+  elements.forgeGroups.replaceChildren();
+  renderChanges(work);
+  const providerLabel = work?.provider === "github" ? "GitHub" : work?.provider === "gitlab" ? "GitLab" : "Forge";
   if (work?.degraded) {
-    setText(elements.gitlabState, "GitLab indisponible, données locales maintenues");
+    setText(elements.forgeState, `${providerLabel} indisponible, données locales maintenues`);
   } else {
-    setText(elements.gitlabState, `Actualisé ${formatDate(work?.last_successful_refresh)}`);
+    setText(elements.forgeState, `${providerLabel} · actualisé ${formatDate(work?.last_successful_refresh)}`);
   }
   const groups = work?.groups && typeof work.groups === "object" ? work.groups : {};
   const targetRuns = runsByTarget(runs);
@@ -901,7 +904,10 @@ function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
     issues.forEach((issue) => {
       const card = document.createElement("div");
       card.className = "work-item";
-      const issueLink = safeExternalLink(issue.web_url, issue.title || `Ticket #${issue.iid || "?"}`);
+      const issueLink = safeExternalLink(
+        issue.canonical_url,
+        issue.title || `Ticket ${issue.reference || `#${issue.number || "?"}`}`,
+      );
       if (issueLink) {
         card.append(issueLink);
       } else {
@@ -913,13 +919,28 @@ function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
       metadata.textContent = [issue.route, issue.source].filter(Boolean).join(" · ") || "Sans routage";
       card.append(metadata);
 
-      const related = Array.isArray(issue.related_merge_requests) ? issue.related_merge_requests : [];
+      const related = Array.isArray(issue.related_change_urls) ? issue.related_change_urls : [];
       related.forEach((url, index) => {
-        const link = safeExternalLink(url, `MR liée ${index + 1}`);
+        const link = safeExternalLink(url, `Changement lié ${index + 1}`);
         if (link) {
           card.append(link);
         }
       });
+      if (issue.bugfix && typeof issue.bugfix === "object") {
+        const evidence = document.createElement("ul");
+        evidence.className = "bugfix-evidence";
+        const evidenceRows = [
+          ["Reproduction", issue.bugfix.reproduction],
+          ["Vérification", issue.bugfix.verification],
+          ["Blocage", issue.bugfix.blocked_reason],
+        ].filter(([, value]) => typeof value === "string" && value.trim());
+        evidenceRows.forEach(([label, value]) => {
+          const row = document.createElement("li");
+          row.textContent = `${label} : ${value}`;
+          evidence.append(row);
+        });
+        if (evidenceRows.length) card.append(evidence);
+      }
       const agentAction = issue.agent_action;
       if (agentAction && typeof agentAction === "object") {
         const actions = document.createElement("div");
@@ -929,7 +950,11 @@ function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
         button.className = "button button-primary";
         button.textContent = agentAction.label || "Lancer l’agent";
         const target = typeof agentAction.target === "string" ? agentAction.target : "";
-        const run = targetRuns.get(target) || issue.active_run;
+        const run = targetRuns.get(target)
+          || issue.active_run
+          || (["queued", "running"].includes(agentAction.run_state)
+            ? {state: agentAction.run_state, skill: agentAction.skill}
+            : null);
         const pending = pendingTicketActions.has(target);
         button.disabled = !agentAction.available || pending || run?.state === "queued" || run?.state === "running" || !target;
         button.addEventListener("click", () => launchTicketAgent(issue, button, actions));
@@ -945,7 +970,7 @@ function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
       }
       column.append(card);
     });
-    elements.gitlabGroups.append(column);
+    elements.forgeGroups.append(column);
   });
   syncDetailTicketAction();
   return true;
@@ -1015,7 +1040,7 @@ async function launchTicketAgent(issue, button, actions) {
     renderTicketActionState(button, actions, issue, runsByTarget(latestRuns).get(target));
     const run = await operation;
     upsertRun({...run, skill, target});
-    renderGitLab(latestGitLabWork, latestRuns);
+    renderForgeWork(latestForgeWork, latestRuns);
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
     return true;
   } catch {
@@ -1023,95 +1048,99 @@ async function launchTicketAgent(issue, button, actions) {
     return false;
   } finally {
     pendingTicketActions.delete(target);
-    renderGitLab(latestGitLabWork, latestRuns);
+    renderForgeWork(latestForgeWork, latestRuns);
   }
 }
 
-function renderMergeRequests(work) {
-  if (!elements.mergeRequestList) return;
-  elements.mergeRequestList.replaceChildren();
-  const mergeRequests = Array.isArray(work?.merge_requests) ? work.merge_requests : [];
-  setText(elements.mergeRequestsState, mergeRequests.length ? `${mergeRequests.length} ouverte(s)` : "Aucune MR ouverte");
-  if (!mergeRequests.length) {
+function renderChanges(work) {
+  if (!elements.changeList) return;
+  elements.changeList.replaceChildren();
+  const changes = Array.isArray(work?.changes) ? work.changes : [];
+  setText(elements.changesState, changes.length ? `${changes.length} ouvert(s)` : "Aucun changement ouvert");
+  if (!changes.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = work?.degraded ? "Données GitLab indisponibles." : "Aucune merge request ouverte.";
-    elements.mergeRequestList.append(empty);
+    empty.textContent = work?.degraded ? "Données de forge indisponibles." : "Aucun changement ouvert.";
+    elements.changeList.append(empty);
     return;
   }
-  mergeRequests.forEach((mergeRequest) => {
+  changes.forEach((change) => {
     const card = document.createElement("article");
-    card.className = "merge-request-card";
+    card.className = "change-card";
     const title = document.createElement("h4");
-    const link = safeExternalLink(mergeRequest.web_url, `${mergeRequest.title || "MR sans titre"} · !${mergeRequest.iid || "?"}`);
+    const link = safeExternalLink(
+      change.canonical_url,
+      `${change.title || "Changement sans titre"} · ${change.reference || `#${change.number || "?"}`}`,
+    );
     if (link) title.append(link);
-    else title.textContent = `${mergeRequest.title || "MR sans titre"} · !${mergeRequest.iid || "?"}`;
+    else title.textContent = `${change.title || "Changement sans titre"} · ${change.reference || `#${change.number || "?"}`}`;
     card.append(title);
 
     const branches = document.createElement("p");
-    branches.className = "merge-request-branches";
-    branches.textContent = `${mergeRequest.source_branch || "Branche source inconnue"} → ${mergeRequest.target_branch || "Branche cible inconnue"}`;
+    branches.className = "change-branches";
+    branches.textContent = `${change.source_branch || "Branche source inconnue"} → ${change.target_branch || "Branche cible inconnue"}`;
     card.append(branches);
 
     const metadata = document.createElement("p");
-    metadata.className = "merge-request-meta";
+    metadata.className = "change-meta";
     metadata.textContent = [
-      mergeRequest.author_username ? `Auteur : ${mergeRequest.author_username}` : "Auteur : inconnu",
-      `Pipeline : ${mergeRequest.pipeline_status || "absent"}`,
+      change.kind === "pull_request" ? "Pull request" : "Merge request",
+      change.author ? `Auteur : ${change.author}` : "Auteur : inconnu",
+      `Vérifications : ${change.checks_status || "inconnues"}`,
     ].join(" · ");
     card.append(metadata);
 
     const actions = document.createElement("div");
-    actions.className = "merge-request-actions";
-    if (mergeRequest.has_conflicts === true || mergeRequest.detailed_merge_status === "conflict") {
-      const conflict = document.createElement("p");
-      conflict.className = "merge-request-meta";
-      conflict.textContent = "Conflit : reprise par l’agent";
-      actions.append(conflict);
-    } else {
+    actions.className = "change-actions";
+    if (work.provider === "gitlab" && change.kind === "merge_request") {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "button button-danger";
       button.textContent = "Fusionner et supprimer la branche";
       button.disabled = mergeSubmitting;
-      button.addEventListener("click", () => mergeMergeRequest(mergeRequest, work));
+      button.addEventListener("click", () => mergeMergeRequest(change, work));
       actions.append(button);
     }
-    appendActionState(actions, `merge_request:${mergeRequest.canonical_url || mergeRequest.web_url || mergeRequest.iid}`);
-    card.append(actions);
-    elements.mergeRequestList.append(card);
+    appendActionState(actions, `${change.kind}:${change.canonical_url || change.number}`);
+    if (actions.childNodes.length) card.append(actions);
+    elements.changeList.append(card);
   });
 }
 
-async function mergeMergeRequest(mergeRequest, work) {
-  if (mergeSubmitting || typeof mergeRequest?.iid !== "number") return;
-  const sourceBranch = mergeRequest.source_branch || "la branche source";
-  if (!window.confirm(`Fusionner !${mergeRequest.iid} dans ${mergeRequest.target_branch || "la branche cible"} et supprimer ${sourceBranch} ?`)) return;
+async function mergeMergeRequest(change, work) {
+  if (
+    mergeSubmitting
+    || work?.provider !== "gitlab"
+    || change?.kind !== "merge_request"
+    || typeof change?.number !== "number"
+  ) return;
+  const sourceBranch = change.source_branch || "la branche source";
+  if (!window.confirm(`Fusionner ${change.reference} dans ${change.target_branch || "la branche cible"} et supprimer ${sourceBranch} ?`)) return;
   mergeSubmitting = true;
-  renderMergeRequests(work);
-  setText(elements.operationalStatus, `Fusion de la MR !${mergeRequest.iid} en cours.`);
+  renderChanges(work);
+  setText(elements.operationalStatus, `Fusion de la MR ${change.reference} en cours.`);
   try {
     const result = await runAction(
-      `merge_request:${mergeRequest.canonical_url || mergeRequest.web_url || mergeRequest.iid}`,
+      `${change.kind}:${change.canonical_url || change.number}`,
       {
-        pending: `Fusion de !${mergeRequest.iid}…`,
-        success: `MR !${mergeRequest.iid} fusionnée.`,
-        error: `Impossible de fusionner la MR !${mergeRequest.iid}.`,
+        pending: `Fusion de ${change.reference}…`,
+        success: `MR ${change.reference} fusionnée.`,
+        error: `Impossible de fusionner la MR ${change.reference}.`,
       },
-      () => api.action({action: "merge-merge-request", iid: mergeRequest.iid}),
+      () => api.action({action: "merge-merge-request", iid: change.number}),
     );
     setText(
       elements.operationalStatus,
       result?.partial
-        ? `MR !${mergeRequest.iid} fusionnée ; suppression de ${sourceBranch} à vérifier.`
-        : `MR !${mergeRequest.iid} fusionnée et branche ${sourceBranch} supprimée.`,
+        ? `MR ${change.reference} fusionnée ; suppression de ${sourceBranch} à vérifier.`
+        : `MR ${change.reference} fusionnée et branche ${sourceBranch} supprimée.`,
     );
     mergeSubmitting = false;
     await refresh({ manual: true });
   } catch {
-    setText(elements.operationalStatus, `Impossible de fusionner la MR !${mergeRequest.iid}.`);
+    setText(elements.operationalStatus, `Impossible de fusionner la MR ${change.reference}.`);
     mergeSubmitting = false;
-    renderMergeRequests(work);
+    renderChanges(work);
   }
 }
 
@@ -1186,7 +1215,7 @@ function actionForEntry(entry) {
       label: "Fusionner et supprimer la branche",
       className: "button button-danger",
       disabled: mergeSubmitting,
-      state: actionStates.get(`merge_request:${resource.canonical_url || resource.web_url || resource.iid}`),
+      state: actionStates.get(`${resource.kind}:${resource.canonical_url || resource.number}`),
       run: () => mergeMergeRequest(resource, sources.work),
     }];
   }
@@ -1383,7 +1412,7 @@ async function changeModel(skill, model, previous, select) {
   } finally {
     pendingSkills.delete(skill);
     syncSkillButtons(skill);
-    await refreshFresh({ manual: true, skipGitLab: true });
+    await refreshFresh({ manual: true, skipForge: true });
   }
 }
 
@@ -1439,10 +1468,7 @@ async function refreshHistory() {
 }
 
 async function refreshFresh(options = {}) {
-  if (refreshPromise) {
-    await refreshPromise;
-  }
-  return refresh(options);
+  return refreshAfterPending(refreshPromise, refresh, options);
 }
 
 async function refreshLocal() {
@@ -1519,24 +1545,26 @@ async function refreshPreprod() {
   }
 }
 
-async function refreshGitLab({manual = false, force = false} = {}) {
+async function refreshForgeWork({manual = false, force = false} = {}) {
   const now = Date.now();
-  if (!force && !manual && now - lastGitLabRefresh < GITLAB_REFRESH_MS) {
-    return sourceStore.get("gitlab");
+  if (!force && !manual && now - lastForgeRefresh < FORGE_REFRESH_MS) {
+    return sourceStore.get("forge");
   }
   const state = await sourceStore.load(
-    "gitlab",
-    () => api.get(manual || force ? "/api/gitlab?refresh=1" : "/api/gitlab"),
+    "forge",
+    () => manual || force
+      ? fetchJson(`${forgePath}?refresh=1`)
+      : fetchJson(forgePath),
     {
       validate(payload) {
-        if (payload?.degraded === true) throw new Error("GitLab indisponible");
+        if (payload?.degraded === true) throw new Error("Forge indisponible");
       },
     },
   );
   if (state.data) {
     sources.work = state.data;
-    latestGitLabWork = state.data;
-    renderGitLab(state.data, latestRuns);
+    latestForgeWork = state.data;
+    renderForgeWork(state.data, latestRuns);
   }
   if (!state.error) {
     await sourceStore.load(
@@ -1544,7 +1572,7 @@ async function refreshGitLab({manual = false, force = false} = {}) {
       () => api.post("/api/reconciliations", {}),
     );
   }
-  if (!state.error) lastGitLabRefresh = now;
+  if (!state.error) lastForgeRefresh = now;
   renderPilotageView();
   renderSourceStates();
   return state;
@@ -1585,11 +1613,11 @@ function renderSourceStates() {
   renderSourceState(elements.pilotageSourceState, [
     sourceStatus("decisions", "Décisions", refreshHumanActions),
     sourceStatus("proposals", "Propositions", refreshHumanActions),
-    sourceStatus("gitlab", "GitLab", () => refreshGitLab({manual: true})),
+    sourceStatus("forge", "GitHub · GitLab", () => refreshForgeWork({manual: true})),
     sourceStatus(
       "reconciliation",
       "Réconciliation des tickets",
-      () => refreshGitLab({manual: true}),
+      () => refreshForgeWork({manual: true}),
     ),
     sourceStatus("runs", "Exécutions", refreshLocal),
   ]);
@@ -1602,7 +1630,7 @@ function renderSourceStates() {
   ]);
 }
 
-async function refresh({ manual = false, skipGitLab = false } = {}) {
+async function refresh({ manual = false, skipForge = false } = {}) {
   if (refreshPromise) {
     return refreshPromise;
   }
@@ -1617,15 +1645,15 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         refreshLocal(),
         refreshHumanActions(),
         refreshPreprod(),
-        skipGitLab ? Promise.resolve() : refreshGitLab({manual}),
+        skipForge ? Promise.resolve() : refreshForgeWork({manual}),
       ]);
 
       const becameTerminal = hadActiveRuns && !latestRuns.has_active;
-      if (becameTerminal) lastGitLabRefresh = 0;
-      if (!skipGitLab && !manual && becameTerminal) {
-        await refreshGitLab({force: true});
+      if (becameTerminal) lastForgeRefresh = 0;
+      if (!skipForge && !manual && becameTerminal) {
+        await refreshForgeWork({force: true});
       }
-      renderGitLab(latestGitLabWork, latestRuns);
+      renderForgeWork(latestForgeWork, latestRuns);
       renderPilotageView();
       renderSourceStates();
       const hasErrors = [
@@ -1635,7 +1663,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
         "proposals",
         "preprod",
         "runs",
-        "gitlab",
+        "forge",
         "reconciliation",
       ].some((name) => sourceStore.get(name).error);
       const refreshedAt = dateFormatter.format(new Date());
@@ -1672,7 +1700,7 @@ elements.fixAutonomyToggle?.addEventListener("change", async () => {
   const mode = elements.fixAutonomyToggle.checked ? "on" : "off";
   elements.fixAutonomyToggle.disabled = true;
   try {
-    await runAction(
+    const result = await runAction(
       "fix-autonomy",
       {
         pending: "Mise à jour du mode autonome.",
@@ -1681,9 +1709,13 @@ elements.fixAutonomyToggle?.addEventListener("change", async () => {
       },
       () => api.action({action: "set-fix-autonomy", mode}),
     );
-    await refresh({manual: true});
+    if (result?.fix_autonomy === "on" || result?.fix_autonomy === "off") {
+      sources.snapshot = {...sources.snapshot, fix_autonomy: result.fix_autonomy};
+      renderOverview(sources.snapshot);
+    }
+    await refreshFresh({manual: true});
   } catch {
-    await refresh({manual: true});
+    await refreshFresh({manual: true});
   } finally {
     elements.fixAutonomyToggle.disabled = false;
   }

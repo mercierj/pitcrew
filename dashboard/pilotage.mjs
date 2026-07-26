@@ -84,14 +84,14 @@ export function enrichWorkflowEntry(entry, sources = {}) {
   const decision = decisions.find((candidate) => (
     issueUrl && canonicalUrlOf(candidate?.ticket) === issueUrl
   )) || null;
-  const mergeRequestsByUrl = new Map(
-    asArray(sources?.work?.merge_requests)
-      .map((mergeRequest) => [canonicalUrlOf(mergeRequest), mergeRequest])
+  const changesByUrl = new Map(
+    asArray(sources?.work?.changes)
+      .map((change) => [canonicalUrlOf(change), change])
       .filter(([url]) => url),
   );
-  const mergeRequests = asArray(entry?.related_merge_requests)
+  const changes = asArray(entry?.related_change_urls)
     .filter((url) => typeof url === "string")
-    .map((url) => mergeRequestsByUrl.get(url))
+    .map((url) => changesByUrl.get(url))
     .filter(Boolean);
   const activeSkill = typeof activeRun?.skill === "string"
     ? activeRun.skill
@@ -115,7 +115,7 @@ export function enrichWorkflowEntry(entry, sources = {}) {
         && label
         && !/^pitcrew(?:-|::)/i.test(label)
       )),
-      merge_requests: mergeRequests,
+      changes,
       run_status: agent?.live_status?.phase
         ? ""
         : ticketRunStatus(activeRun, capacity),
@@ -176,12 +176,12 @@ const titleOf = (entry) => {
     return resource.skill || "Agent à diagnostiquer";
   }
   if (kind === "merge-request") {
-    return `!${resource.iid ?? "?"} · ${resource.title || "Merge request sans titre"}`;
+    return `${resource.reference || `!${resource.number ?? "?"}`} · ${resource.title || "Merge request sans titre"}`;
   }
   if (kind === "proposal") {
     return resource.title || "Proposition sans titre";
   }
-  return `#${resource.iid ?? "?"} · ${resource.title || "Ticket sans titre"}`;
+  return `${resource.reference || `#${resource.number ?? resource.iid ?? "?"}`} · ${resource.title || "Ticket sans titre"}`;
 };
 
 const contextOf = (entry) => {
@@ -335,7 +335,7 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
     const card = document.createElement("article");
     card.className = "workflow-card";
     const title = document.createElement("h4");
-    title.textContent = `#${entry.iid ?? "?"} · Ticket · ${entry.title || "Ticket sans titre"}`;
+    title.textContent = `${entry.reference || `#${entry.number ?? entry.iid ?? "?"}`} · Ticket · ${entry.title || "Ticket sans titre"}`;
     const update = document.createElement("p");
     update.className = "workflow-card-meta";
     update.textContent = `Ticket · mis à jour ${formatUpdateAge(entry.updated_at)}`;
@@ -358,11 +358,11 @@ const renderWorkflowLane = (lifecycle, entries, onOpen) => {
       : phase
         ? `${responsibleSkill} · ${phase}`
         : responsibleSkill;
-    const mergeRequest = entry.delivery_context?.merge_requests?.[0];
+    const mergeRequest = entry.delivery_context?.changes?.[0];
     const merge = document.createElement("p");
     merge.className = "workflow-card-merge";
     merge.textContent = mergeRequest
-      ? `MR !${mergeRequest.iid ?? "?"} · ${mergeRequest.state || "ouverte"} · pipeline ${mergeRequest.pipeline_status || "absent"}`
+      ? `${mergeRequest.reference || "Changement"} · ${mergeRequest.state || "ouvert"} · vérifications ${mergeRequest.checks_status || "inconnues"}`
       : "";
     const action = document.createElement("button");
     action.type = "button";
@@ -464,7 +464,9 @@ export function renderItemDetail(entry, handlers = {}) {
   const body = document.createElement("div");
   body.className = "item-detail";
 
-  const description = resource.description
+  const description = resource.body
+    || resource.description
+    || resource.ticket?.body
     || resource.ticket?.description
     || resource.summary
     || resource.question;
@@ -478,7 +480,7 @@ export function renderItemDetail(entry, handlers = {}) {
     || resource.canonical_url
     || resource.ticket?.web_url
     || resource.ticket?.canonical_url;
-  const link = safeExternalLink(externalUrl, "Ouvrir dans GitLab");
+  const link = safeExternalLink(externalUrl, "Ouvrir dans la forge");
   if (link) {
     const paragraph = document.createElement("p");
     paragraph.append(link);
@@ -497,7 +499,7 @@ export function renderItemDetail(entry, handlers = {}) {
       "Branches",
       `${resource.source_branch || "inconnue"} → ${resource.target_branch || "inconnue"}`,
     );
-    appendFact(body, "Pipeline", resource.pipeline_status || "absent");
+    appendFact(body, "Vérifications", resource.checks_status || "inconnues");
   } else if (kind === "agent-failure") {
     appendFact(body, "Dernier résumé", resource.latest_history?.summary);
   } else if (kind === "issue") {
@@ -506,11 +508,14 @@ export function renderItemDetail(entry, handlers = {}) {
     const labels = asArray(resource.delivery_context?.labels).slice(0, 5);
     if (resource.delivery_context?.decision) labels.push("Décision requise");
     appendFact(body, "Labels", labels.join(" · "));
-    asArray(resource.delivery_context?.merge_requests).forEach((mergeRequest, index) => {
+    appendFact(body, "Reproduction", resource.bugfix?.reproduction);
+    appendFact(body, "Vérification", resource.bugfix?.verification);
+    appendFact(body, "Raison du blocage", resource.bugfix?.blocked_reason);
+    asArray(resource.delivery_context?.changes).forEach((mergeRequest, index) => {
       appendFact(
         body,
-        index ? `MR liée ${index + 1}` : "MR liée",
-        `!${mergeRequest.iid ?? "?"} · ${mergeRequest.source_branch || "branche inconnue"} → ${mergeRequest.target_branch || "branche inconnue"} · Auteur : ${mergeRequest.author_username || "inconnu"} · Pipeline : ${mergeRequest.pipeline_status || "absent"}`,
+        index ? `Changement lié ${index + 1}` : "Changement lié",
+        `${mergeRequest.reference || "?"} · ${mergeRequest.source_branch || "branche inconnue"} → ${mergeRequest.target_branch || "branche inconnue"} · Auteur : ${mergeRequest.author || "inconnu"} · Vérifications : ${mergeRequest.checks_status || "inconnues"}`,
       );
     });
     const activeAgent = resource.delivery_context?.active_agent;

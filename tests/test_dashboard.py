@@ -3129,9 +3129,10 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.assertIn(action, agents)
         self.assertNotIn("innerHTML", agents)
 
-    def test_merge_request_conflicts_are_not_offered_for_manual_merge(self):
-        self.assertIn("Conflit : reprise par l’agent", self.javascript)
-        self.assertIn("has_conflicts", self.javascript)
+    def test_manual_merge_is_only_offered_for_gitlab_merge_requests(self):
+        self.assertIn('work.provider === "gitlab"', self.javascript)
+        self.assertIn('change.kind === "merge_request"', self.javascript)
+        self.assertIn('action: "merge-merge-request"', self.javascript)
 
     def test_pilotage_modules_and_application_wiring_contract(self):
         self.assertIn("pilotage.mjs", self.modules)
@@ -3192,7 +3193,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             "crew-health",
         ):
             self.assertIn(f'id="{identifier}"', self.html)
-        for identifier in ("proposals", "decision-banner", "gitlab-work"):
+        for identifier in ("proposals", "decision-banner", "forge-work"):
             self.assertRegex(
                 self.html,
                 rf'<section[^>]+id="{identifier}"[^>]+\bhidden\b',
@@ -3239,8 +3240,8 @@ class DashboardAssetContractTest(unittest.TestCase):
             "live-agents",
             "agents",
             "activity",
-            "gitlab-work",
-            "merge-requests",
+            "forge-work",
+            "changes",
             "disabled-roles",
         ):
             self.assertIn(f'id="{identifier}"', self.html)
@@ -3267,7 +3268,7 @@ class DashboardAssetContractTest(unittest.TestCase):
     def test_javascript_polls_safely_and_uses_text_dom_apis(self):
         self.assertIn("const ACTIVE_POLL_INTERVAL_MS = 2_000;", self.javascript)
         self.assertIn("const IDLE_POLL_INTERVAL_MS = 10_000;", self.javascript)
-        self.assertIn("const GITLAB_REFRESH_MS = 60_000;", self.javascript)
+        self.assertIn("const FORGE_REFRESH_MS = 60_000;", self.javascript)
         self.assertIn(
             'const ACTIONS = new Set(["trigger", "stop", "restart"]);',
             self.javascript,
@@ -3293,8 +3294,8 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("Fusionner et supprimer la branche", self.javascript)
         self.assertIn('action: "merge-merge-request"', self.javascript)
         self.assertIn("window.confirm", self.javascript)
-        self.assertIn("mergeMergeRequest(mergeRequest, work)", self.javascript)
-        self.assertIn("renderMergeRequests(work)", self.javascript)
+        self.assertIn("mergeMergeRequest(change, work)", self.javascript)
+        self.assertIn("renderChanges(work)", self.javascript)
         self.assertIn("issue.agent_action", self.javascript)
         self.assertIn("ticket-agent-actions", self.javascript)
         self.assertIn('api.post("/api/ticket-runs"', self.javascript)
@@ -3315,24 +3316,24 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn('answer-decision', self.javascript)
         self.assertIn("scheduleRefresh", self.javascript)
         self.assertIn("const becameTerminal = hadActiveRuns && !latestRuns.has_active;", self.javascript)
-        self.assertIn("if (becameTerminal) lastGitLabRefresh = 0;", self.javascript)
-        self.assertIn('manual || force ? "/api/gitlab?refresh=1"', self.javascript)
-        self.assertIn("lastGitLabRefresh = now;", self.javascript)
-        gitlab_refresh = self.javascript[
-            self.javascript.index("async function refreshGitLab"):
+        self.assertIn("if (becameTerminal) lastForgeRefresh = 0;", self.javascript)
+        self.assertIn('const forgePath = "/api/forge-work";', self.javascript)
+        self.assertIn("lastForgeRefresh = now;", self.javascript)
+        forge_refresh = self.javascript[
+            self.javascript.index("async function refreshForgeWork"):
             self.javascript.index("function sourceStatus")
         ]
         self.assertIn(
             '() => api.post("/api/reconciliations", {})',
-            gitlab_refresh,
+            forge_refresh,
         )
         self.assertIn(
             'sourceStore.load(\n      "reconciliation"',
-            gitlab_refresh,
+            forge_refresh,
         )
         self.assertLess(
-            gitlab_refresh.index('() => api.post("/api/reconciliations", {})'),
-            gitlab_refresh.index("lastGitLabRefresh = now;"),
+            forge_refresh.index('() => api.post("/api/reconciliations", {})'),
+            forge_refresh.index("lastForgeRefresh = now;"),
         )
         self.assertIn("let detailTicketView = null;", self.javascript)
         self.assertIn("function syncDetailTicketAction()", self.javascript)
@@ -3346,8 +3347,8 @@ class DashboardAssetContractTest(unittest.TestCase):
             "renderOverview",
             "renderLiveAgents",
             "renderAgents",
-            "renderGitLab",
-            "renderMergeRequests",
+            "renderForgeWork",
+            "renderChanges",
             "mergeMergeRequest",
             "launchTicketAgent",
             "renderDecision",
@@ -3501,7 +3502,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             "const sourceStore = createSourceStore();",
             "async function refreshLocal",
             "async function refreshHumanActions",
-            "async function refreshGitLab",
+            "async function refreshForgeWork",
             "function renderSourceStates",
             'button.textContent = "Réessayer";',
             "const actionStates = new Map();",
@@ -3682,7 +3683,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertNotIn('"change-model"', self.javascript.split("const ACTIONS", 1)[1].split(";", 1)[0])
         self.assertIn("restoreModelSelect", self.javascript)
-        self.assertIn("await refreshFresh({ manual: true, skipGitLab: true });", self.javascript)
+        self.assertIn("await refreshFresh({ manual: true, skipForge: true });", self.javascript)
         change_source = self.javascript.split("async function changeModel", 1)[1].split("async function refreshHistory", 1)[0]
         self.assertLess(
             change_source.index("restoreModelSelect(select, previous);"),
@@ -3690,7 +3691,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
         self.assertLess(
             change_source.rindex("restoreModelSelect(select, previous);"),
-            change_source.index("await refreshFresh({ manual: true, skipGitLab: true });"),
+            change_source.index("await refreshFresh({ manual: true, skipForge: true });"),
         )
 
     def test_model_change_waits_for_an_inflight_refresh_before_a_fresh_status_fetch(self):
@@ -3714,7 +3715,7 @@ class DashboardAssetContractTest(unittest.TestCase):
             "preprod-review-history", "preprod-review-history-list",
         ):
             self.assertIn(f'id="{identifier}"', self.html)
-        self.assertLess(self.html.index('id="preprod-review"'), self.html.index('id="gitlab-work"'))
+        self.assertLess(self.html.index('id="preprod-review"'), self.html.index('id="forge-work"'))
         self.assertIn("Revue avant Preprod", self.html)
         self.assertIn("Contrôle manuel", self.html)
         self.assertIn("origin/preprod...origin/develop", self.html)
@@ -3728,7 +3729,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("sources.preprod", self.javascript)
         self.assertIn('runPreprodReviewAction("trigger-preprod-review")', self.javascript)
         self.assertIn('runPreprodReviewAction("stop-preprod-review")', self.javascript)
-        self.assertIn('await refreshFresh({ manual: true, skipGitLab: true });', self.javascript)
+        self.assertIn('await refreshFresh({ manual: true, skipForge: true });', self.javascript)
         self.assertIn("longue et coûteuse", self.javascript)
         self.assertNotIn("innerHTML", self.javascript)
         self.assertNotIn("insertAdjacentHTML", self.javascript)

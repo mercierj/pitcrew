@@ -110,8 +110,9 @@ test("buildActionQueue orders action kinds by priority and timestamps", () => {
       { skill: "zeta-run", health: "warning", updated_at: "2026-07-26T12:00:00Z", latest_history: { finished_at: "2026-07-26T10:00:00Z" } },
       { skill: "alpha-run", health: "failed", updated_at: "2026-07-26T08:00:00Z", latest_history: { finished_at: "2026-07-26T11:00:00Z" } },
     ] },
-    work: { merge_requests: [issue("opened", 3, {
+    work: { provider: "gitlab", changes: [issue("opened", 3, {
       resource_type: "merge_request",
+      kind: "merge_request",
       canonical_url: "https://gitlab.example/group/app/-/merge_requests/3",
       target_branch: "develop",
       updated_at: "2026-07-26T13:00:00Z",
@@ -135,7 +136,7 @@ test("buildActionQueue skips invalid keys and deduplicates sorted entries", () =
       { ticket_id: "duplicate", created_at: "2026-07-26T09:00:00Z" },
     ] },
     snapshot: { agents: [{ health: "warning", latest_history: { finished_at: "2026-07-26T08:00:00Z" } }] },
-    work: { merge_requests: [{ resource_type: "merge_request", updated_at: "2026-07-26T08:00:00Z" }] },
+    work: { provider: "gitlab", changes: [{ resource_type: "merge_request", kind: "merge_request", updated_at: "2026-07-26T08:00:00Z" }] },
     proposals: { proposals: [{ created_at: "2026-07-26T08:00:00Z" }] },
   });
 
@@ -151,10 +152,10 @@ test("buildActionQueue sorts valid dates before absent or invalid dates", () => 
       { skill: "alpha", health: "failed" },
       { skill: "beta", health: "warning", latest_history: { finished_at: "not-a-date" } },
     ] },
-    work: { merge_requests: [
-      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/zeta", updated_at: "2026-07-26T09:00:00Z" },
-      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/alpha" },
-      { resource_type: "merge_request", canonical_url: "https://gitlab.example/mr/beta", updated_at: "not-a-date" },
+    work: { provider: "gitlab", changes: [
+      { resource_type: "merge_request", kind: "merge_request", canonical_url: "https://gitlab.example/mr/zeta", updated_at: "2026-07-26T09:00:00Z" },
+      { resource_type: "merge_request", kind: "merge_request", canonical_url: "https://gitlab.example/mr/alpha" },
+      { resource_type: "merge_request", kind: "merge_request", canonical_url: "https://gitlab.example/mr/beta", updated_at: "not-a-date" },
     ] },
     proposals: { proposals: [
       { id: "zeta", created_at: "2026-07-26T09:00:00Z" },
@@ -175,24 +176,23 @@ test("buildActionQueue sorts valid dates before absent or invalid dates", () => 
 
 test("buildActionQueue excludes merge requests targeting protected deployment branches", () => {
   const queue = buildActionQueue({
-    work: { merge_requests: [
-      issue("opened", 1, { resource_type: "merge_request", target_branch: "prod" }),
-      issue("opened", 2, { resource_type: "merge_request", target_branch: "preprod" }),
+    work: { provider: "gitlab", changes: [
+      issue("opened", 1, { resource_type: "merge_request", kind: "merge_request", target_branch: "prod" }),
+      issue("opened", 2, { resource_type: "merge_request", kind: "merge_request", target_branch: "preprod" }),
     ] },
   });
 
   assert.deepEqual(queue, []);
 });
 
-test("buildActionQueue does not offer conflicted merge requests for manual merge", () => {
+test("buildActionQueue never offers GitHub changes for manual merge", () => {
   const queue = buildActionQueue({
-    work: { merge_requests: [
+    work: { provider: "github", changes: [
       issue("opened", 20, {
-        resource_type: "merge_request",
-        canonical_url: "https://gitlab.example/group/app/-/merge_requests/20",
+        resource_type: "change",
+        kind: "pull_request",
+        canonical_url: "https://github.example/group/app/pull/20",
         target_branch: "develop",
-        detailed_merge_status: "conflict",
-        has_conflicts: true,
       }),
     ] },
   });

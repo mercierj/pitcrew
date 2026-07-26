@@ -42,7 +42,7 @@ const workflowIssues = (work) => {
 };
 
 const matchesFilters = (issue, query, role) => {
-  const text = `${issue.iid ?? ""} ${issue.title ?? ""}`.toLocaleLowerCase("fr");
+  const text = `${issue.number ?? issue.iid ?? ""} ${issue.title ?? ""}`.toLocaleLowerCase("fr");
   const agentRole = String(issue.agent_action?.skill || issue.route || "").toLocaleLowerCase("fr");
   return (!query || text.includes(query)) && (!role || agentRole === role);
 };
@@ -93,12 +93,12 @@ export function buildActionQueue({ decisions = {}, proposals = {}, snapshot = {}
     if (!skill) continue;
     actions.push({ kind: "agent-failure", key: `agent:${skill}`, label: "Diagnostiquer", priority: 1, timestamp: agent.latest_history?.finished_at || "", resource: agent });
   }
-  for (const mergeRequest of asArray(work?.merge_requests)) {
+  for (const mergeRequest of asArray(work?.changes)) {
     if (
-      !mergeRequest
+      work?.provider !== "gitlab"
+      || !mergeRequest
+      || mergeRequest.kind !== "merge_request"
       || ["preprod", "prod"].includes(mergeRequest.target_branch)
-      || mergeRequest.has_conflicts === true
-      || mergeRequest.detailed_merge_status === "conflict"
     ) continue;
     const key = resourceKey(mergeRequest, "merge_request");
     if (!key) continue;
