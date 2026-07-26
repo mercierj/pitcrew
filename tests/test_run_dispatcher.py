@@ -516,6 +516,30 @@ class RunDispatcherTest(unittest.TestCase):
         )
         self.assertTrue(all(candidate["run_id"] == run["run_id"] for candidate in seen))
 
+    def test_bind_same_pretargeted_run_is_idempotent_without_validation(self):
+        target = "getbill1/getbill!7"
+        run = self.store.enqueue(
+            project="demo",
+            skill="reviewer-run",
+            source="scheduled",
+            target=target,
+            target_source="eligibility",
+            gate_decision="eligible",
+            gate_reason="an authored merge request requires review",
+            gate_fingerprint="sha256:abc",
+        )
+        validator = mock.Mock(side_effect=AssertionError("must not validate"))
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            target_validator=validator,
+        )
+
+        bound = dispatcher.bind_target("demo", run["run_id"], target)
+
+        self.assertEqual(target, bound["target"])
+        validator.assert_not_called()
+
     def test_bind_target_validates_gitlab_identity_and_lifecycle_before_mutating(self):
         run = self.store.enqueue(
             project="demo",

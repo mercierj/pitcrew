@@ -10,7 +10,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.pitcrew_eligibility import decide, default_provider_run, main
+from scripts.pitcrew_eligibility import (
+    decide,
+    default_provider_run,
+    main,
+    normalize_decision,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +31,55 @@ EXPECTED_KEYS = {
 
 
 class EligibilityTest(unittest.TestCase):
+    def test_normalize_decision_allows_only_complete_coherent_payloads(self):
+        fingerprint = "sha256:" + "a" * 64
+        valid = {
+            "decision": "empty",
+            "project": "getbill",
+            "skill": "reviewer-run",
+            "target_id": None,
+            "fingerprint": fingerprint,
+            "reason": "no authored merge request requires review",
+        }
+        self.assertEqual(
+            valid,
+            normalize_decision(valid, project="getbill", skill="reviewer-run"),
+        )
+
+        invalid = (
+            {"decision": "empty"},
+            {**valid, "decision": "unknown"},
+            {**valid, "project": "other"},
+            {**valid, "target_id": "unexpected"},
+            {**valid, "fingerprint": "not-a-sha256"},
+            {**valid, "reason": ""},
+            {
+                **valid,
+                "decision": "eligible",
+                "target_id": "x" * 1001,
+            },
+            {
+                **valid,
+                "decision": "eligible",
+                "target_id": "ticket\n7",
+            },
+            {
+                **valid,
+                "decision": "eligible",
+                "target_id": "",
+            },
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                normalized = normalize_decision(
+                    payload,
+                    project="getbill",
+                    skill="reviewer-run",
+                )
+                self.assertEqual("unavailable", normalized["decision"])
+                self.assertIsNone(normalized["target_id"])
+                self.assertIsNone(normalized["fingerprint"])
+                self.assertLessEqual(len(normalized["reason"]), 120)
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.runtime = Path(self.temporary.name)

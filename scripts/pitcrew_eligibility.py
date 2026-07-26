@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from urllib.parse import quote, urlencode
@@ -19,12 +20,85 @@ else:
 
 ProviderRun = Callable[[list[str]], subprocess.CompletedProcess[str]]
 MAX_GITLAB_PAGES = 100
+MAX_REASON_CHARS = 120
+MAX_TARGET_CHARS = 1000
+DECISION_KEYS = {
+    "decision",
+    "project",
+    "skill",
+    "target_id",
+    "fingerprint",
+    "reason",
+}
+FINGERPRINT_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 QUEUE_ROLES = {
     "implementer-run",
     "validator-run",
     "investigate-run",
     "unblock",
 }
+
+
+def unavailable_decision(project: str, skill: str) -> dict:
+    return {
+        "decision": "unavailable",
+        "project": project,
+        "skill": skill,
+        "target_id": None,
+        "fingerprint": None,
+        "reason": "eligibility response is unavailable",
+    }
+
+
+def normalize_decision(
+    value: object,
+    *,
+    project: str,
+    skill: str,
+) -> dict:
+    unavailable = unavailable_decision(project, skill)
+    if not isinstance(value, Mapping) or set(value) != DECISION_KEYS:
+        return unavailable
+    if value["project"] != project or value["skill"] != skill:
+        return unavailable
+
+    decision = value["decision"]
+    target_id = value["target_id"]
+    fingerprint = value["fingerprint"]
+    reason = value["reason"]
+    if (
+        decision not in {"eligible", "empty", "unavailable"}
+        or not isinstance(reason, str)
+        or not reason.strip()
+        or len(reason) > MAX_REASON_CHARS
+    ):
+        return unavailable
+
+    valid_fingerprint = (
+        isinstance(fingerprint, str)
+        and FINGERPRINT_PATTERN.fullmatch(fingerprint) is not None
+    )
+    if decision == "eligible":
+        normalized_target = (
+            " ".join(target_id.split())
+            if isinstance(target_id, str)
+            else None
+        )
+        if (
+            not isinstance(target_id, str)
+            or not normalized_target
+            or normalized_target != target_id
+            or len(target_id) > MAX_TARGET_CHARS
+            or not valid_fingerprint
+        ):
+            return unavailable
+    elif decision == "empty":
+        if target_id is not None or not valid_fingerprint:
+            return unavailable
+    elif target_id is not None or fingerprint is not None:
+        return unavailable
+
+    return dict(value)
 
 
 def result(
@@ -450,7 +524,26 @@ def main(argv: list[str] | None = None) -> int:
     check_parser = subparsers.add_parser("check")
     check_parser.add_argument("--project", required=True)
     check_parser.add_argument("--skill", required=True)
+    normalize_parser = subparsers.add_parser("normalize")
+    normalize_parser.add_argument("--project", required=True)
+    normalize_parser.add_argument("--skill", required=True)
     args = parser.parse_args(argv)
+    if args.command == "normalize":
+        try:
+            value = json.load(sys.stdin)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            value = None
+        print(
+            json.dumps(
+                normalize_decision(
+                    value,
+                    project=args.project,
+                    skill=args.skill,
+                ),
+                separators=(",", ":"),
+            )
+        )
+        return 0
     try:
         config = load_runtime_config(args.project)
         decision = decide(

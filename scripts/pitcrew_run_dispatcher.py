@@ -279,6 +279,8 @@ class RunDispatcher:
         row = self.store.get(run_id)
         if row is None or row["project"] != project:
             raise RunStateError("run does not belong to project")
+        if row["target"] == target:
+            return self.store.bind_target(run_id, target)
         candidate = dict(row)
         candidate["target"] = target
         try:
