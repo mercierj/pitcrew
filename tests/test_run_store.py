@@ -395,6 +395,29 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
+    def test_invalid_version_one_keeps_delete_journal_without_sidecars(self):
+        path = Path(self.temp.name).resolve() / "invalid-delete-v1.sqlite"
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY)")
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+            self.assertEqual(
+                "delete",
+                connection.execute("PRAGMA journal_mode").fetchone()[0],
+            )
+        path.chmod(0o600)
+
+        with self.assertRaises(RunStoreError):
+            RunStore(path)
+
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual(
+                "delete",
+                connection.execute("PRAGMA journal_mode").fetchone()[0],
+            )
+        self.assertFalse(Path(f"{path}-wal").exists())
+        self.assertFalse(Path(f"{path}-shm").exists())
+
     def test_version_one_without_state_and_source_checks_is_rejected_unchanged(self):
         path = Path(self.temp.name).resolve() / "unchecked-v1.sqlite"
         with closing(sqlite3.connect(path)) as connection:
@@ -538,6 +561,26 @@ class RunStoreTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_anchored_database_path_matches_verified_parent(self):
+        parent_fd = self.store._open_parent(create=False)
+        try:
+            anchored = self.store._anchored_database_path(
+                parent_fd,
+                self.path.name,
+            )
+            self.assertTrue(os.path.samefile(anchored, self.path))
+            self.assertEqual(
+                (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino),
+                (
+                    os.stat(anchored.parent).st_dev,
+                    os.stat(anchored.parent).st_ino,
+                ),
+            )
+            with self.assertRaisesRegex(RunStoreError, "invalid"):
+                self.store._anchored_database_path(parent_fd, "../escape")
+        finally:
+            os.close(parent_fd)
+
     def test_symlink_and_private_permissions_are_enforced(self):
         target = Path(self.temp.name).resolve() / "target.sqlite"
         self.path.unlink()
@@ -570,6 +613,39 @@ class RunStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(RunStoreError, "symlink"):
             RunStore(linked / "nested" / "runs.sqlite")
         self.assertFalse((actual / "nested").exists())
+
+    def test_parent_replaced_after_preparation_is_not_followed(self):
+        parent = Path(self.temp.name).resolve() / "race-parent"
+        displaced = Path(self.temp.name).resolve() / "race-parent-original"
+        redirected = Path(self.temp.name).resolve() / "race-target"
+        redirected.mkdir(mode=0o700)
+
+        class ParentSwapStore(RunStore):
+            def _prepare_parent(inner_self):
+                super()._prepare_parent()
+                parent.rename(displaced)
+                parent.symlink_to(redirected, target_is_directory=True)
+
+        with self.assertRaises(RunStoreError):
+            ParentSwapStore(parent / "runs.sqlite")
+        self.assertFalse((redirected / "runs.sqlite").exists())
+
+    def test_parent_replaced_before_sqlite_connect_cannot_accept_redirected_store(self):
+        parent = Path(self.temp.name).resolve() / "connect-race-parent"
+        parent.mkdir(mode=0o700)
+        displaced = Path(self.temp.name).resolve() / "connect-race-original"
+        redirected = Path(self.temp.name).resolve() / "connect-race-target"
+        redirected.mkdir(mode=0o700)
+        redirected_database = redirected / "runs.sqlite"
+
+        class ConnectRaceStore(RunStore):
+            def _before_sqlite_connect(inner_self, parent_fd, guard_fd):
+                parent.rename(displaced)
+                parent.symlink_to(redirected, target_is_directory=True)
+
+        with self.assertRaises(RunStoreError):
+            ConnectRaceStore(parent / "runs.sqlite")
+        self.assertFalse(redirected_database.exists())
 
     def test_connection_guard_rejects_database_replaced_before_sqlite_connect(self):
         path = Path(self.temp.name).resolve() / "guard.sqlite"

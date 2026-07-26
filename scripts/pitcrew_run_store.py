@@ -1,10 +1,12 @@
 """Durable SQLite queue for Pitcrew ticket runs."""
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import sqlite3
 import stat
+import sys
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
@@ -50,42 +52,126 @@ class RunStore:
 
     def _prepare_parent(self) -> None:
         """Create only missing private directories; never trust symlinked ancestors."""
-        absolute = self.path.absolute()
-        missing: list[Path] = []
-        current = Path(absolute.anchor)
-        prefix_missing = False
-        for part in absolute.parent.parts[1:]:
-            current /= part
-            if prefix_missing:
-                missing.append(current)
-                continue
-            try:
-                metadata = os.lstat(current)
-            except FileNotFoundError:
-                prefix_missing = True
-                missing.append(current)
-                continue
-            if stat.S_ISLNK(metadata.st_mode):
-                raise RunStoreError("database path contains a symlink")
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise RunStoreError("database ancestor is not a directory")
-        for directory in missing:
-            directory.mkdir(mode=0o700)
-        parent = self.path.parent.absolute()
-        metadata = os.lstat(parent)
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise RunStoreError("database parent is not a directory")
-        metadata = os.lstat(self.path.parent)
-        if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
-            raise RunStoreError("database parent must be private")
+        parent_fd = self._open_parent(create=True)
         try:
-            database = os.lstat(self.path)
+            _, name = self._database_location()
+            database = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
             return
+        except OSError as error:
+            raise RunStoreError("database operation failed") from error
+        finally:
+            os.close(parent_fd)
         if stat.S_ISLNK(database.st_mode):
             raise RunStoreError("database path must not be a symlink")
         if not stat.S_ISREG(database.st_mode):
             raise RunStoreError("database path must be a regular file")
+
+    def _database_location(self) -> tuple[Path, str]:
+        absolute = Path(os.path.abspath(self.path))
+        if not absolute.anchor or not absolute.name:
+            raise RunStoreError("database path is invalid")
+        return absolute, absolute.name
+
+    @staticmethod
+    def _open_directory(parent_fd: int, name: str) -> int:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            return os.open(name, flags, dir_fd=parent_fd)
+        except OSError as error:
+            try:
+                metadata = os.stat(
+                    name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                raise error
+            if stat.S_ISLNK(metadata.st_mode):
+                raise RunStoreError("database path contains a symlink") from error
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RunStoreError("database ancestor is not a directory") from error
+            raise error
+
+    def _open_parent(self, *, create: bool) -> int:
+        absolute, _ = self._database_location()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        current_fd: int | None = None
+        try:
+            current_fd = os.open(absolute.anchor, flags)
+            for part in absolute.parent.parts[1:]:
+                try:
+                    child_fd = self._open_directory(current_fd, part)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=current_fd)
+                    except FileExistsError:
+                        pass
+                    child_fd = self._open_directory(current_fd, part)
+                os.close(current_fd)
+                current_fd = child_fd
+            metadata = os.fstat(current_fd)
+            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise RunStoreError("database parent must be private")
+            result = current_fd
+            current_fd = None
+            return result
+        except OSError as error:
+            raise RunStoreError("database operation failed") from error
+        finally:
+            if current_fd is not None:
+                os.close(current_fd)
+
+    @staticmethod
+    def _before_sqlite_connect(parent_fd: int, guard_fd: int) -> None:
+        """Test hook invoked while both verified descriptors remain open."""
+
+    @staticmethod
+    def _anchored_database_path(parent_fd: int, name: str) -> Path:
+        if name != os.path.basename(name) or name in {"", ".", ".."}:
+            raise RunStoreError("database path is invalid")
+        try:
+            if sys.platform.startswith("linux"):
+                descriptor_path = f"/proc/self/fd/{parent_fd}"
+                parent = Path(os.readlink(descriptor_path))
+            elif sys.platform == "darwin":
+                command = getattr(fcntl, "F_GETPATH", 50)
+                if not isinstance(command, int):
+                    raise RunStoreError("stable parent path is unavailable")
+                raw_path = fcntl.fcntl(parent_fd, command, b"\0" * 1024)
+                if not isinstance(raw_path, bytes):
+                    raise RunStoreError("stable parent path is unavailable")
+                parent = Path(os.fsdecode(raw_path.split(b"\0", 1)[0]))
+            else:
+                raise RunStoreError("stable parent path is unavailable")
+            descriptor = os.fstat(parent_fd)
+            anchored = os.stat(parent, follow_symlinks=False)
+        except RunStoreError:
+            raise
+        except (OSError, ValueError) as error:
+            raise RunStoreError("stable parent path is unavailable") from error
+        if (not stat.S_ISDIR(descriptor.st_mode)
+                or not stat.S_ISDIR(anchored.st_mode)
+                or (descriptor.st_dev, descriptor.st_ino)
+                != (anchored.st_dev, anchored.st_ino)):
+            raise RunStoreError("stable parent path is unavailable")
+        return parent / name
 
     @staticmethod
     def _capacities(capacities: Mapping[str, int]) -> dict[str, int]:
@@ -107,41 +193,85 @@ class RunStore:
             return False
         return True
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, enable_wal: bool = True) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
         guard_fd: int | None = None
+        parent_fd: int | None = None
+        connected = False
         try:
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-            guard_fd = os.open(self.path, flags, 0o600)
+            absolute, name = self._database_location()
+            parent_fd = self._open_parent(create=False)
+            flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            guard_fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
             guard = os.fstat(guard_fd)
-            connection = self._connect_factory(self.path, timeout=5, isolation_level=None)
-            current = os.stat(self.path, follow_symlinks=False)
-            if (not stat.S_ISREG(guard.st_mode) or not stat.S_ISREG(current.st_mode)
-                    or stat.S_ISLNK(current.st_mode) or guard.st_dev != current.st_dev
-                    or guard.st_ino != current.st_ino or current.st_uid != os.getuid()
-                    or current.st_mode & 0o777 != 0o600):
+            self._before_sqlite_connect(parent_fd, guard_fd)
+            anchored_path = self._anchored_database_path(parent_fd, name)
+            connection = self._connect_factory(
+                anchored_path,
+                timeout=5,
+                isolation_level=None,
+            )
+            relative = os.stat(
+                name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            anchored = os.stat(anchored_path, follow_symlinks=False)
+            public = os.stat(absolute, follow_symlinks=False)
+            identities = {
+                (guard.st_dev, guard.st_ino),
+                (relative.st_dev, relative.st_ino),
+                (anchored.st_dev, anchored.st_ino),
+                (public.st_dev, public.st_ino),
+            }
+            if (not stat.S_ISREG(guard.st_mode)
+                    or not stat.S_ISREG(relative.st_mode)
+                    or not stat.S_ISREG(anchored.st_mode)
+                    or not stat.S_ISREG(public.st_mode)
+                    or len(identities) != 1
+                    or guard.st_uid != os.getuid()
+                    or relative.st_uid != os.getuid()
+                    or anchored.st_uid != os.getuid()
+                    or public.st_uid != os.getuid()
+                    or stat.S_IMODE(guard.st_mode) != 0o600
+                    or stat.S_IMODE(relative.st_mode) != 0o600
+                    or stat.S_IMODE(anchored.st_mode) != 0o600
+                    or stat.S_IMODE(public.st_mode) != 0o600):
                 raise OSError("database guard mismatch")
-            os.close(guard_fd)
-            guard_fd = None
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 5000")
-            connection.execute("PRAGMA journal_mode = WAL")
+            if enable_wal:
+                journal_mode = connection.execute(
+                    "PRAGMA journal_mode = WAL"
+                ).fetchone()[0]
+                if str(journal_mode).lower() != "wal":
+                    raise sqlite3.OperationalError("could not enable WAL")
+            connected = True
             return connection
-        except sqlite3.Error as error:
-            if connection is not None:
-                connection.close()
-            if guard_fd is not None:
-                os.close(guard_fd)
+        except RunStoreError:
+            raise
+        except Exception as error:
             raise RunStoreError("database operation failed") from error
-        except OSError as error:
-            if connection is not None:
-                connection.close()
-            if guard_fd is not None:
-                os.close(guard_fd)
-            raise RunStoreError("database operation failed") from error
+        finally:
+            if not connected and connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            for descriptor in (guard_fd, parent_fd):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
 
     def _initialize(self) -> None:
-        connection = self._connect()
+        connection = self._connect(enable_wal=False)
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -170,6 +300,11 @@ class RunStore:
             self._validate_schema(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
+            journal_mode = connection.execute(
+                "PRAGMA journal_mode = WAL"
+            ).fetchone()[0]
+            if str(journal_mode).lower() != "wal":
+                raise RunStoreError("database initialization failed")
         except (sqlite3.Error, RunStoreError) as error:
             connection.rollback()
             if isinstance(error, RunStoreError):
@@ -177,14 +312,6 @@ class RunStore:
             raise RunStoreError("database initialization failed") from error
         finally:
             connection.close()
-        try:
-            database = os.lstat(self.path)
-            if not stat.S_ISREG(database.st_mode) or stat.S_ISLNK(database.st_mode):
-                raise RunStoreError("database path must be a regular file")
-            os.chmod(self.path, 0o600)
-        except OSError as error:
-            raise RunStoreError("database initialization failed") from error
-
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
         expected_tables = {
