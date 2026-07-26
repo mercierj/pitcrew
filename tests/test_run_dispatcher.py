@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts import pitcrew_run_dispatcher as dispatcher_module
-from scripts.pitcrew_run_store import RunPaused, RunStore
+from scripts.pitcrew_run_store import RunPaused, RunStateError, RunStore, RunStoreError
 
 
 class FakeProcess:
@@ -361,6 +362,48 @@ class RunDispatcherTest(unittest.TestCase):
         self.assertEqual("cancelled", self.store.get(stale["run_id"])["state"])
         self.assertEqual([good["run_id"]], [row["run_id"] for row in result["spawned"]])
 
+    def test_drain_stops_after_the_configured_claim_budget(self):
+        class InfiniteStore:
+            def __init__(inner_self):
+                inner_self.claim_calls = 0
+
+            def claim_ready(inner_self, *, project, capacities):
+                inner_self.claim_calls += 1
+                return [{
+                    "run_id": f"run-{inner_self.claim_calls}",
+                    "project": project,
+                    "skill": "qa-run",
+                    "target": "stale",
+                }]
+
+            def finish(inner_self, run_id, *, state, **_kwargs):
+                return {"run_id": run_id, "state": state}
+
+        store = InfiniteStore()
+        dispatcher = RunDispatcher(
+            store,
+            "/runner",
+            process_factory=lambda *_args, **_kwargs: self.fail("must not spawn"),
+            target_validator=lambda _row: False,
+            max_claims_per_drain=3,
+        )
+
+        result = dispatcher.drain("demo", {"qa-run": 1})
+
+        self.assertEqual(3, store.claim_calls)
+        self.assertEqual(3, len(result["claimed"]))
+        self.assertEqual(3, len(result["cancelled"]))
+
+    def test_claim_budget_must_be_a_positive_integer(self):
+        for invalid in (0, -1, True, 1.5):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "max_claims_per_drain"):
+                    RunDispatcher(
+                        self.store,
+                        "/runner",
+                        max_claims_per_drain=invalid,
+                    )
+
     def test_spawn_error_fails_and_continues(self):
         first, second = self.enqueue("one"), self.enqueue("two")
         calls = 0
@@ -388,6 +431,118 @@ class RunDispatcherTest(unittest.TestCase):
         self.assertEqual([(123, 15), (123, 9)], signals)
         self.assertEqual("cancelled", self.store.get(running["run_id"])["state"])
         self.assertEqual(("queued", 0), (self.store.get(queued["run_id"])["state"], self.store.get(queued["run_id"])["cancel_requested"]))
+
+    def test_cancel_targets_the_wrapper_group_recorded_by_drain(self):
+        run = self.enqueue("running")
+        signals = []
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=lambda *_args, **_kwargs: FakeProcess(789),
+            target_validator=lambda _row: True,
+            killpg=lambda pid, sig: signals.append((pid, sig)),
+            sleep=lambda _seconds: None,
+        )
+
+        dispatcher.drain("demo", {"qa-run": 1})
+        self.assertEqual(789, self.store.get(run["run_id"])["pid"])
+        dispatcher.cancel_running("demo", grace_seconds=0)
+
+        self.assertEqual(
+            [(789, signal.SIGTERM), (789, signal.SIGKILL)],
+            signals,
+        )
+
+    def test_bind_target_uses_the_injected_validator_before_mutating(self):
+        run = self.store.enqueue(
+            project="demo",
+            skill="qa-run",
+            source="scheduled",
+        )
+        seen = []
+
+        def validator(candidate):
+            seen.append(candidate)
+            if candidate["target"] == "unavailable":
+                raise OSError("provider details")
+            return candidate["target"] == "eligible"
+
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            target_validator=validator,
+        )
+
+        with self.assertRaisesRegex(RunStateError, "stale or ineligible"):
+            dispatcher.bind_target("demo", run["run_id"], "stale")
+        self.assertIsNone(self.store.get(run["run_id"])["target"])
+        with self.assertRaisesRegex(RunStoreError, "validation is unavailable"):
+            dispatcher.bind_target("demo", run["run_id"], "unavailable")
+        self.assertIsNone(self.store.get(run["run_id"])["target"])
+
+        bound = dispatcher.bind_target("demo", run["run_id"], "eligible")
+
+        self.assertEqual("eligible", bound["target"])
+        self.assertEqual(
+            ["stale", "unavailable", "eligible"],
+            [candidate["target"] for candidate in seen],
+        )
+        self.assertTrue(all(candidate["run_id"] == run["run_id"] for candidate in seen))
+
+    def test_bind_target_validates_gitlab_identity_and_lifecycle_before_mutating(self):
+        run = self.store.enqueue(
+            project="demo",
+            skill="implementer-run",
+            source="scheduled",
+        )
+        provider = mock.Mock(
+            side_effect=[
+                self.provider_result(labels=["agent-label", "blocked-label"]),
+                self.provider_result(state="closed"),
+                OSError("provider details"),
+                self.provider_result(),
+            ]
+        )
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            provider_runner=provider,
+        )
+        canonical = "https://gitlab.example/crew/demo/-/issues/7"
+        invalid_targets = (
+            "https://evil.example/crew/demo/-/issues/7",
+            "https://gitlab.example/crew/other/-/issues/7",
+            canonical + "?view=full",
+            canonical + "#note_1",
+        )
+
+        with mock.patch.object(
+            dispatcher_module,
+            "load_runtime_config",
+            return_value=self.gitlab_config(),
+        ):
+            for target in invalid_targets:
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(RunStateError, "stale or ineligible"):
+                        dispatcher.bind_target("demo", run["run_id"], target)
+                    self.assertIsNone(self.store.get(run["run_id"])["target"])
+            provider.assert_not_called()
+
+            for _case in ("incompatible labels", "closed"):
+                with self.subTest(case=_case):
+                    with self.assertRaisesRegex(RunStateError, "stale or ineligible"):
+                        dispatcher.bind_target("demo", run["run_id"], canonical)
+                    self.assertIsNone(self.store.get(run["run_id"])["target"])
+
+            with self.assertRaisesRegex(RunStoreError, "validation is unavailable"):
+                dispatcher.bind_target("demo", run["run_id"], canonical)
+            self.assertIsNone(self.store.get(run["run_id"])["target"])
+
+            bound = dispatcher.bind_target("demo", run["run_id"], canonical)
+
+        self.assertEqual(canonical, bound["target"])
+        self.assertEqual(canonical, self.store.get(run["run_id"])["target"])
+        self.assertEqual(4, provider.call_count)
 
     def test_capacity_three_leaves_fourth_queued_then_starts_it(self):
         runs = [self.enqueue(str(number)) for number in range(4)]
@@ -461,6 +616,42 @@ class RunDispatcherTest(unittest.TestCase):
         output = StringIO()
         with mock.patch("sys.stdout", output): self.assertEqual(0, dispatcher_module.main(["drain", "--project", "demo"], runtime, NoSpawn))
         self.assertEqual({"reconciled", "purged", "claimed", "spawned", "cancelled", "failed"}, set(json.loads(output.getvalue())))
+
+    def test_cli_bind_target_reports_rejection_without_mutating(self):
+        class RejectTarget(RunDispatcher):
+            def __init__(self, store, runner):
+                super().__init__(
+                    store,
+                    runner,
+                    target_validator=lambda _row: False,
+                )
+
+        scheduled = self.store.enqueue(
+            project="demo",
+            skill="qa-run",
+            source="scheduled",
+        )
+        runtime = lambda project, skill=None: (self.store, {"qa-run": 1})
+        error = StringIO()
+
+        with mock.patch("sys.stderr", error):
+            result = dispatcher_module.main(
+                [
+                    "bind-target",
+                    "--project", "demo",
+                    "--run-id", scheduled["run_id"],
+                    "--target", "stale",
+                ],
+                runtime,
+                RejectTarget,
+            )
+
+        self.assertEqual(2, result)
+        self.assertEqual(
+            "pitcrew dispatcher: target is stale or ineligible\n",
+            error.getvalue(),
+        )
+        self.assertIsNone(self.store.get(scheduled["run_id"])["target"])
 
     def test_cli_errors_are_safe(self):
         runtime = lambda project, skill=None: (_ for _ in ()).throw(ValueError("global stop is active"))

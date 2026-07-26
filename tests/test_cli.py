@@ -20,6 +20,96 @@ LOCKED_METADATA_ARGS = [
 
 
 class CoordinatedLockedExecTest(unittest.TestCase):
+    def test_child_session_and_forwarding_match_coordinated_mode(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            class Store:
+                def __init__(self, _path): pass
+                def get(self, run_id):
+                    return {
+                        "run_id": run_id,
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "pid": 654,
+                    }
+                def mark_pid(self, *_args):
+                    raise AssertionError("wrapper pid is already recorded")
+                def heartbeat(self, *_args): pass
+                def finish(self, *_args, **_kwargs): pass
+
+            class Child:
+                pid = 654
+                stdout = None
+
+                def __init__(self):
+                    self.running = True
+
+                def poll(self):
+                    return None if self.running else 0
+
+                def wait(self, timeout=None):
+                    self.running = False
+                    return 0
+
+            for coordinated in (False, True):
+                with self.subTest(coordinated=coordinated), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    child = Child()
+                    popen = mock.Mock(return_value=child)
+                    killpg = mock.Mock()
+                    handlers = {}
+
+                    def install(signum, handler):
+                        if callable(handler):
+                            handlers[signum] = handler
+                        return signal.SIG_DFL
+
+                    def drain(*_args, **_kwargs):
+                        handlers[signal.SIGTERM](signal.SIGTERM, None)
+                        child.running = False
+
+                    args = [
+                        "locked",
+                        "--lock-file", str(root / "lock"),
+                        "--project", "demo",
+                        "--skill", "qa-run",
+                        "--model", "test",
+                        *LOCKED_METADATA_ARGS,
+                        "--summary-file", str(root / "summary"),
+                        "--history-file", str(root / "history"),
+                    ]
+                    if coordinated:
+                        args.extend([
+                            "--run-db", str(root / "runs.sqlite"),
+                            "--run-id", "run-1",
+                        ])
+                    args.extend(["--", "true"])
+                    with (
+                        mock.patch.object(sys, "argv", args),
+                        mock.patch.object(helper, "RunStore", Store),
+                        mock.patch.object(helper, "HistoryStore"),
+                        mock.patch.object(helper.subprocess, "Popen", popen),
+                        mock.patch.object(helper, "drain_child_output", side_effect=drain),
+                        mock.patch.object(helper.os, "killpg", killpg),
+                        mock.patch.object(helper.signal, "signal", side_effect=install),
+                    ):
+                        self.assertEqual(0, helper.main())
+
+                    self.assertIs(
+                        popen.call_args.kwargs["start_new_session"],
+                        not coordinated,
+                    )
+                    if coordinated:
+                        killpg.assert_not_called()
+                    else:
+                        killpg.assert_called_once_with(654, signal.SIGTERM)
+        finally:
+            sys.path.remove(scripts_path)
+
     def test_coordinated_spawn_failure_with_store_failure_is_safe(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)

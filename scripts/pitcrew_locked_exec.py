@@ -420,7 +420,7 @@ def main() -> int:
                 encoding="utf-8",
                 errors="replace",
                 pass_fds=(descriptor,),
-                start_new_session=True,
+                start_new_session=coordinated_store is None,
             )
         except OSError:
             clear_live_status(args.live_file)
@@ -452,12 +452,20 @@ def main() -> int:
             print("pitcrew lock: failed to launch command", file=sys.stderr)
             return 127
 
-        def forward(signum: int, _frame: object) -> None:
-            if child.poll() is None:
-                try:
+        def signal_child(signum: int) -> None:
+            if child.poll() is not None:
+                return
+            try:
+                if coordinated_store is None:
                     os.killpg(child.pid, signum)
-                except OSError:
-                    pass
+                else:
+                    os.kill(child.pid, signum)
+            except OSError:
+                pass
+
+        def forward(signum: int, _frame: object) -> None:
+            if coordinated_store is None:
+                signal_child(signum)
 
         previous = {
             signum: signal.signal(signum, forward)
@@ -470,13 +478,10 @@ def main() -> int:
             try:
                 usage = drain_child_output(child, heartbeat if coordinated_store is not None else None, args.heartbeat_seconds)
             except RunStoreError:
-                if child.poll() is None:
-                    try: os.killpg(child.pid, signal.SIGTERM)
-                    except OSError: pass
+                signal_child(signal.SIGTERM)
                 try: child.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    try: os.killpg(child.pid, signal.SIGKILL)
-                    except OSError: pass
+                    signal_child(signal.SIGKILL)
                     child.wait()
                 if coordinated_store is not None:
                     try: coordinated_store.finish(args.run_id, state="failed", error_code="store_unavailable", error_message="run store is unavailable")

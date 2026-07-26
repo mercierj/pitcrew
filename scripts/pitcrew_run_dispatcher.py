@@ -26,6 +26,7 @@ except ImportError:
 
 PROVIDER_TIMEOUT_SECONDS = 15
 MAX_PROVIDER_ERROR_CHARS = 4096
+MAX_CLAIMS_PER_DRAIN = 100
 HTTP_STATUS_SUFFIX = re.compile(r"\(HTTP ([1-5][0-9]{2})\)\s*\Z")
 
 
@@ -169,8 +170,16 @@ class RunDispatcher:
     def __init__(self, store: RunStore, runner: str, process_factory: Callable[..., Any] = subprocess.Popen,
                  target_validator: Callable[[dict[str, Any]], bool] | None = None,
                  killpg: Callable[[int, int], None] = os.killpg, sleep: Callable[[float], None] = time.sleep,
-                 provider_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None):
+                 provider_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+                 max_claims_per_drain: int = MAX_CLAIMS_PER_DRAIN):
+        if (
+            not isinstance(max_claims_per_drain, int)
+            or isinstance(max_claims_per_drain, bool)
+            or max_claims_per_drain <= 0
+        ):
+            raise ValueError("max_claims_per_drain must be a positive integer")
         self.store, self.runner, self.process_factory = store, runner, process_factory
+        self.max_claims_per_drain = max_claims_per_drain
         if target_validator is None:
             provider_run = provider_runner if provider_runner is not None else default_provider_run
             target_validator = lambda row: validate_queued_target(row, provider_run)
@@ -179,7 +188,7 @@ class RunDispatcher:
     def drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, list[dict[str, Any]]]:
         claimed: list[dict[str, Any]] = []
         spawned: list[dict[str, Any]] = []; cancelled: list[dict[str, Any]] = []; failed: list[dict[str, Any]] = []
-        while True:
+        for _claim_number in range(self.max_claims_per_drain):
             ready = self.store.claim_ready(project=project, capacities=capacities)
             if not ready:
                 break
@@ -259,6 +268,14 @@ class RunDispatcher:
         row = self.store.get(run_id)
         if row is None or row["project"] != project:
             raise RunStateError("run does not belong to project")
+        candidate = dict(row)
+        candidate["target"] = target
+        try:
+            valid = bool(self.target_validator(candidate))
+        except Exception as error:
+            raise RunStoreError("target validation is unavailable") from error
+        if not valid:
+            raise RunStateError("target is stale or ineligible")
         return self.store.bind_target(run_id, target)
 
 
