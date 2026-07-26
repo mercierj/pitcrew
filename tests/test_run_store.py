@@ -265,6 +265,75 @@ class RunStoreTest(unittest.TestCase):
         for message in ("", 1, "x" * 2049):
             with self.assertRaises(RunStoreError): self.store.finish(claimed["run_id"], state="failed", error_message=message)
 
+    def test_enqueue_round_trips_strict_gate_metadata(self):
+        run = self.store.enqueue(
+            project="demo",
+            skill="reviewer-run",
+            source="scheduled",
+            target="crew/demo!7",
+            target_source="eligibility",
+            gate_decision="eligible",
+            gate_reason="an authored merge request requires review",
+            gate_fingerprint="sha256:abc",
+        )
+
+        stored = self.store.get(run["run_id"])
+        self.assertEqual("eligibility", stored["target_source"])
+        self.assertEqual("eligible", stored["gate_decision"])
+        self.assertEqual(
+            "an authored merge request requires review",
+            stored["gate_reason"],
+        )
+        self.assertEqual("sha256:abc", stored["gate_fingerprint"])
+
+        for target_source in ("", "automatic", 1):
+            with self.subTest(target_source=target_source):
+                with self.assertRaisesRegex(RunStoreError, "target_source"):
+                    self.store.enqueue(
+                        project="demo",
+                        skill="reviewer-run",
+                        source="scheduled",
+                        target="crew/demo!8",
+                        target_source=target_source,
+                    )
+
+    def test_gate_metadata_requires_a_valid_consistent_decision(self):
+        cases = (
+            {
+                "target": None,
+                "target_source": "eligibility",
+                "gate_decision": "eligible",
+                "gate_reason": "eligible",
+            },
+            {
+                "target": "crew/demo!7",
+                "target_source": "eligibility",
+                "gate_decision": "unavailable",
+                "gate_reason": "provider failed",
+            },
+            {
+                "target": None,
+                "target_source": None,
+                "gate_decision": "invented",
+                "gate_reason": "bad",
+            },
+            {
+                "target": None,
+                "target_source": None,
+                "gate_decision": "unavailable",
+                "gate_reason": "",
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                with self.assertRaises(RunStoreError):
+                    self.store.enqueue(
+                        project="demo",
+                        skill="reviewer-run",
+                        source="scheduled",
+                        **case,
+                    )
+
     def test_update_phase_changes_only_a_running_run_phase(self):
         self.assertTrue(callable(getattr(self.store, "update_phase", None)))
         run = self.enqueue("T-phase")
@@ -477,6 +546,69 @@ class RunStoreTest(unittest.TestCase):
                 connection.execute("PRAGMA user_version").fetchone()[0],
             )
 
+    def test_legacy_version_one_adds_nullable_gate_columns(self):
+        path = Path(self.temp.name).resolve() / "legacy-v1.sqlite"
+        with closing(sqlite3.connect(path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE runs (
+                    run_id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL,
+                    skill TEXT NOT NULL,
+                    source TEXT NOT NULL
+                        CHECK(source IN ('dashboard','scheduled','reconcile')),
+                    target TEXT,
+                    dedupe_key TEXT NOT NULL,
+                    state TEXT NOT NULL
+                        CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
+                    queue_sequence INTEGER NOT NULL,
+                    pid INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    heartbeat_at TEXT,
+                    finished_at TEXT,
+                    phase TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT,
+                    error_message TEXT,
+                    predecessor_run_id TEXT
+                );
+                CREATE TABLE project_controls (
+                    project TEXT PRIMARY KEY,
+                    state TEXT NOT NULL CHECK(state IN ('running','stopped')),
+                    generation INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE UNIQUE INDEX active_run_dedupe
+                ON runs(project, dedupe_key)
+                WHERE state IN ('queued','running');
+                CREATE INDEX queue_by_project_skill
+                ON runs(project, skill, state, queue_sequence);
+                INSERT INTO runs(
+                    run_id, project, skill, source, target, dedupe_key,
+                    state, queue_sequence, created_at, phase
+                ) VALUES(
+                    'legacy-run', 'demo', 'qa-run', 'scheduled', NULL,
+                    'scheduled:qa-run', 'queued', 1,
+                    '2026-07-26T12:00:00Z', 'En attente'
+                );
+                PRAGMA user_version = 1;
+                """
+            )
+        path.chmod(0o600)
+
+        migrated = RunStore(path)
+
+        row = migrated.get("legacy-run")
+        self.assertIsNone(row["target_source"])
+        self.assertIsNone(row["gate_decision"])
+        self.assertIsNone(row["gate_reason"])
+        self.assertIsNone(row["gate_fingerprint"])
+        with closing(sqlite3.connect(path)) as connection:
+            self.assertEqual(
+                1,
+                connection.execute("PRAGMA user_version").fetchone()[0],
+            )
+
     def test_schema_constants_tables_and_indexes_match_version_one(self):
         self.assertEqual(("queued", "running"), ACTIVE_STATES)
         self.assertEqual(("succeeded", "failed", "cancelled"), TERMINAL_STATES)
@@ -492,6 +624,8 @@ class RunStoreTest(unittest.TestCase):
                     "created_at", "started_at", "heartbeat_at", "finished_at",
                     "phase", "cancel_requested", "error_code", "error_message",
                     "predecessor_run_id",
+                    "target_source", "gate_decision", "gate_reason",
+                    "gate_fingerprint",
                 ],
                 [row[1] for row in connection.execute("PRAGMA table_info(runs)")],
             )

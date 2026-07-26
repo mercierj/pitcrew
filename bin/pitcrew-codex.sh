@@ -209,7 +209,8 @@ if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]]; then
       <<<"$PREFLIGHT")" || {
       fail_pre_model "preflight response is invalid"
     }
-    record_gate cooldown "$PREFLIGHT_REASON" noop >/dev/null
+    record_gate cooldown "$PREFLIGHT_REASON" noop "$TARGET" \
+      "$GATE_FINGERPRINT" >/dev/null
     printf '%s\n' "$PREFLIGHT" | python3 -c '
 import json, sys
 value = json.load(sys.stdin)
@@ -473,6 +474,9 @@ if "$LOCKED_RUN"; then
   fi
   if [[ -n "$TARGET" ]]; then
     LOCKED_ARGS+=(--target-id "$TARGET")
+  fi
+  if [[ -n "$GATE_FINGERPRINT" ]]; then
+    LOCKED_ARGS+=(--fingerprint "$GATE_FINGERPRINT")
   fi
   if "$SCHEDULED"; then
     LOCKED_ARGS+=(--require-structured-result)

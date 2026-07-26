@@ -194,7 +194,11 @@ class RunDispatcher:
                 break
             claimed.extend(ready)
             for row in ready:
-                if row["target"] is not None and self.target_validator is not None:
+                if (
+                    row["target"] is not None
+                    and row.get("target_source") != "eligibility"
+                    and self.target_validator is not None
+                ):
                     try:
                         valid = bool(self.target_validator(row))
                     except Exception:
@@ -205,6 +209,13 @@ class RunDispatcher:
                         continue
                 args = [self.runner, row["skill"], project]
                 if row["target"] is not None: args += ["--target", row["target"]]
+                if row.get("target_source") is not None:
+                    args += ["--target-source", row["target_source"]]
+                if row.get("gate_decision") is not None:
+                    args += ["--gate-decision", row["gate_decision"]]
+                    args += ["--gate-reason", row["gate_reason"]]
+                if row.get("gate_fingerprint") is not None:
+                    args += ["--gate-fingerprint", row["gate_fingerprint"]]
                 args += ["--scheduled", "--coordinated-run", row["run_id"]]
                 try:
                     process = self.process_factory(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -304,6 +315,16 @@ def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | No
     parser = SafeArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     enqueue = commands.add_parser("enqueue"); enqueue.add_argument("--project", required=True); enqueue.add_argument("--skill", required=True); enqueue.add_argument("--target")
+    enqueue.add_argument(
+        "--target-source",
+        choices=("directed", "eligibility"),
+    )
+    enqueue.add_argument(
+        "--gate-decision",
+        choices=("directed", "eligible", "unavailable"),
+    )
+    enqueue.add_argument("--gate-reason")
+    enqueue.add_argument("--gate-fingerprint")
     bind = commands.add_parser("bind-target"); bind.add_argument("--project", required=True); bind.add_argument("--run-id", required=True); bind.add_argument("--target", required=True)
     drain = commands.add_parser("drain"); drain.add_argument("--project", required=True)
     try:
@@ -311,7 +332,21 @@ def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | No
         store, capacities = runtime_factory(args.project, getattr(args, "skill", None))
         dispatcher = dispatcher_factory(store, str(Path(__file__).resolve().parents[1] / "bin" / "pitcrew-codex.sh"))
         if args.command == "enqueue":
-            row = store.enqueue(project=args.project, skill=args.skill, source="scheduled", target=args.target)
+            if (
+                (args.target_source is not None and args.target is None)
+                or (args.gate_decision is None) != (args.gate_reason is None)
+            ):
+                raise ValueError("invalid arguments")
+            row = store.enqueue(
+                project=args.project,
+                skill=args.skill,
+                source="scheduled",
+                target=args.target,
+                target_source=args.target_source,
+                gate_decision=args.gate_decision,
+                gate_reason=args.gate_reason,
+                gate_fingerprint=args.gate_fingerprint,
+            )
             dispatcher.reconcile_and_drain(args.project, capacities)
             latest = store.get(row["run_id"]) or row
             print(json.dumps({"run_id": latest["run_id"], "state": latest["state"],

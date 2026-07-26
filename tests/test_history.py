@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.pitcrew_history import HistoryStore, classify_record
+from scripts.pitcrew_history import HistoryStore, append_gate_record, classify_record
 
 SCRIPTS_PATH = str(Path(__file__).resolve().parents[1] / "scripts")
 sys.path.insert(0, SCRIPTS_PATH)
@@ -36,6 +36,43 @@ def _append_in_process(path: str, record: dict, now: str) -> None:
 
 
 class HistoryStoreTest(unittest.TestCase):
+    def test_append_gate_record_marks_model_not_invoked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "history.jsonl"
+
+            append_gate_record(
+                path,
+                project="getbill",
+                skill="reviewer-run",
+                decision="empty",
+                reason="no authored open merge request requires review",
+                outcome="noop",
+                target_id=None,
+                fingerprint="sha256:abc",
+            )
+
+            record = HistoryStore(path).read()[0]
+            self.assertEqual("noop", record["outcome"])
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("empty", record["gate_decision"])
+            self.assertEqual("sha256:abc", record["fingerprint"])
+            self.assertNotIn("model", record)
+            self.assertNotIn("usage", record)
+
+    def test_append_gate_record_rejects_model_outcome(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "pre-model outcome"):
+                append_gate_record(
+                    Path(temp) / "history.jsonl",
+                    project="getbill",
+                    skill="reviewer-run",
+                    decision="empty",
+                    reason="no eligible item",
+                    outcome="success",
+                    target_id=None,
+                    fingerprint=None,
+                )
+
     def test_history_retains_only_records_from_last_seven_days(self):
         with tempfile.TemporaryDirectory() as temp:
             store = HistoryStore(Path(temp) / "history.jsonl", retention_days=7)
@@ -561,6 +598,8 @@ class LockedExecHistoryTest(unittest.TestCase):
                 "directed",
                 "--gate-reason",
                 "human supplied directed target",
+                "--fingerprint",
+                "sha256:abc",
                 "--require-structured-result",
             )
 
@@ -585,6 +624,7 @@ class LockedExecHistoryTest(unittest.TestCase):
             self.assertEqual(
                 "human supplied directed target", record["gate_reason"]
             )
+            self.assertEqual("sha256:abc", record["fingerprint"])
 
     def test_locked_helper_rejects_incomplete_or_mistyped_strict_results(self):
         valid = {

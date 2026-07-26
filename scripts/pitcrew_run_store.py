@@ -20,6 +20,8 @@ RETENTION = timedelta(days=7)
 STALE_HEARTBEAT = timedelta(seconds=30)
 SCHEMA_VERSION = 1
 _SOURCES = {"dashboard", "scheduled", "reconcile"}
+_TARGET_SOURCES = {"directed", "eligibility"}
+_GATE_DECISIONS = {"directed", "eligible", "unavailable"}
 
 
 class RunStoreError(ValueError):
@@ -314,7 +316,10 @@ class RunStore:
                     queue_sequence INTEGER NOT NULL, pid INTEGER,
                     created_at TEXT NOT NULL, started_at TEXT, heartbeat_at TEXT, finished_at TEXT,
                     phase TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    error_code TEXT, error_message TEXT, predecessor_run_id TEXT
+                    error_code TEXT, error_message TEXT, predecessor_run_id TEXT,
+                    target_source TEXT CHECK(target_source IN ('directed','eligibility')),
+                    gate_decision TEXT CHECK(gate_decision IN ('directed','eligible','unavailable')),
+                    gate_reason TEXT, gate_fingerprint TEXT
                 )""",
                 """CREATE TABLE IF NOT EXISTS project_controls (
                     project TEXT PRIMARY KEY,
@@ -325,6 +330,26 @@ class RunStore:
                 "CREATE INDEX IF NOT EXISTS queue_by_project_skill ON runs(project, skill, state, queue_sequence)",
             ):
                 connection.execute(statement)
+            run_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(runs)")
+            }
+            migrations = {
+                "target_source": (
+                    "TEXT CHECK(target_source IN ('directed','eligibility'))"
+                ),
+                "gate_decision": (
+                    "TEXT CHECK(gate_decision IN "
+                    "('directed','eligible','unavailable'))"
+                ),
+                "gate_reason": "TEXT",
+                "gate_fingerprint": "TEXT",
+            }
+            for column, definition in migrations.items():
+                if column not in run_columns:
+                    connection.execute(
+                        f"ALTER TABLE runs ADD COLUMN {column} {definition}"
+                    )
             self._validate_schema(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
@@ -362,6 +387,10 @@ class RunStore:
                 ("error_code", "TEXT", 0, 0, None),
                 ("error_message", "TEXT", 0, 0, None),
                 ("predecessor_run_id", "TEXT", 0, 0, None),
+                ("target_source", "TEXT", 0, 0, None),
+                ("gate_decision", "TEXT", 0, 0, None),
+                ("gate_reason", "TEXT", 0, 0, None),
+                ("gate_fingerprint", "TEXT", 0, 0, None),
             ),
             "project_controls": (
                 ("project", "TEXT", 0, 1, None),
@@ -385,6 +414,11 @@ class RunStore:
 
         expected_checks = {
             ("runs", "source"): ("dashboard", "scheduled", "reconcile"),
+            ("runs", "target_source"): ("directed", "eligibility"),
+            (
+                "runs",
+                "gate_decision",
+            ): ("directed", "eligible", "unavailable"),
             ("runs", "state"): ALL_STATES,
             ("project_controls", "state"): ("running", "stopped"),
         }
@@ -520,16 +554,88 @@ class RunStore:
     def _control(self, connection: sqlite3.Connection, project: str) -> sqlite3.Row | None:
         return connection.execute("SELECT * FROM project_controls WHERE project = ?", (project,)).fetchone()
 
-    def enqueue(self, *, project: str, skill: str, source: str, target: str | None = None,
-                predecessor_run_id: str | None = None) -> dict[str, Any]:
-        return self._enqueue(project, skill, source, target, predecessor_run_id, 0)
+    def enqueue(
+        self,
+        *,
+        project: str,
+        skill: str,
+        source: str,
+        target: str | None = None,
+        predecessor_run_id: str | None = None,
+        target_source: str | None = None,
+        gate_decision: str | None = None,
+        gate_reason: str | None = None,
+        gate_fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        return self._enqueue(
+            project,
+            skill,
+            source,
+            target,
+            predecessor_run_id,
+            target_source,
+            gate_decision,
+            gate_reason,
+            gate_fingerprint,
+            0,
+        )
 
-    def _enqueue(self, project: str, skill: str, source: str, target: str | None,
-                 predecessor_run_id: str | None, attempt: int) -> dict[str, Any]:
+    def _enqueue(
+        self,
+        project: str,
+        skill: str,
+        source: str,
+        target: str | None,
+        predecessor_run_id: str | None,
+        target_source: str | None,
+        gate_decision: str | None,
+        gate_reason: str | None,
+        gate_fingerprint: str | None,
+        attempt: int,
+    ) -> dict[str, Any]:
         project, skill = self._public(project, "project"), self._public(skill, "skill")
         if not isinstance(source, str) or source not in _SOURCES:
             raise RunStoreError("source is invalid")
         if target is not None: target = self._public(target, "target", 1000)
+        if target_source is not None and (
+            not isinstance(target_source, str)
+            or target_source not in _TARGET_SOURCES
+        ):
+            raise RunStoreError("target_source is invalid")
+        if gate_decision is not None and (
+            not isinstance(gate_decision, str)
+            or gate_decision not in _GATE_DECISIONS
+        ):
+            raise RunStoreError("gate_decision is invalid")
+        if gate_reason is not None:
+            gate_reason = self._public(gate_reason, "gate_reason", 2048)
+        if gate_fingerprint is not None:
+            gate_fingerprint = self._public(
+                gate_fingerprint,
+                "gate_fingerprint",
+                1000,
+            )
+        if gate_decision is None:
+            if gate_reason is not None or gate_fingerprint is not None:
+                raise RunStoreError("gate metadata is inconsistent")
+        elif gate_reason is None:
+            raise RunStoreError("gate metadata is inconsistent")
+        if target_source == "eligibility" and (
+            target is None or gate_decision != "eligible"
+        ):
+            raise RunStoreError("gate metadata is inconsistent")
+        if target_source == "directed" and (
+            target is None or gate_decision != "directed"
+        ):
+            raise RunStoreError("gate metadata is inconsistent")
+        if gate_decision == "eligible" and target_source != "eligibility":
+            raise RunStoreError("gate metadata is inconsistent")
+        if gate_decision == "directed" and target_source != "directed":
+            raise RunStoreError("gate metadata is inconsistent")
+        if gate_decision == "unavailable" and (
+            target is not None or target_source is not None
+        ):
+            raise RunStoreError("gate metadata is inconsistent")
         if predecessor_run_id is not None: predecessor_run_id = self._public(predecessor_run_id, "predecessor_run_id", 64)
         key = f"ticket:{target}" if target is not None else f"scheduled:{skill}"
         connection = self._connect()
@@ -542,7 +648,28 @@ class RunStore:
                 connection.commit(); return self._row(existing, False)  # type: ignore[return-value]
             sequence = connection.execute("SELECT COALESCE(MAX(queue_sequence), 0) + 1 FROM runs WHERE project=?", (project,)).fetchone()[0]
             run_id, timestamp = str(uuid.uuid4()), self._timestamp()
-            connection.execute("INSERT INTO runs(run_id,project,skill,source,target,dedupe_key,state,queue_sequence,created_at,phase,predecessor_run_id) VALUES(?,?,?,?,?,?, 'queued',?,?, 'En attente',?)", (run_id, project, skill, source, target, key, sequence, timestamp, predecessor_run_id))
+            connection.execute(
+                "INSERT INTO runs("
+                "run_id,project,skill,source,target,target_source,"
+                "gate_decision,gate_reason,gate_fingerprint,dedupe_key,state,"
+                "queue_sequence,created_at,phase,predecessor_run_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?, 'queued',?,?, 'En attente',?)",
+                (
+                    run_id,
+                    project,
+                    skill,
+                    source,
+                    target,
+                    target_source,
+                    gate_decision,
+                    gate_reason,
+                    gate_fingerprint,
+                    key,
+                    sequence,
+                    timestamp,
+                    predecessor_run_id,
+                ),
+            )
             row = connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
             connection.commit(); return self._row(row, True)  # type: ignore[return-value]
         except sqlite3.IntegrityError as error:
@@ -554,7 +681,18 @@ class RunStore:
             # Retry the entire admission in a fresh transaction: the winner may
             # have become terminal before we reacquire the write lock.
             connection.close()
-            return self._enqueue(project, skill, source, target, predecessor_run_id, attempt + 1)
+            return self._enqueue(
+                project,
+                skill,
+                source,
+                target,
+                predecessor_run_id,
+                target_source,
+                gate_decision,
+                gate_reason,
+                gate_fingerprint,
+                attempt + 1,
+            )
         except sqlite3.Error as error:
             connection.rollback(); raise RunStoreError("database operation failed") from error
         finally: connection.close()

@@ -277,3 +277,60 @@ def classify_record(record: dict | None) -> str:
     if any(pattern.search(reason_text) for pattern in ACTIONABLE_NOOP_PATTERNS):
         return "warning"
     return "healthy"
+
+
+def utc_now() -> str:
+    return (
+        datetime.now(UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def append_gate_record(
+    history_path: Path,
+    *,
+    project: str,
+    skill: str,
+    decision: str,
+    reason: str,
+    outcome: str,
+    target_id: str | None,
+    fingerprint: str | None,
+) -> dict:
+    if outcome not in {"noop", "failed"}:
+        raise ValueError("pre-model outcome must be noop or failed")
+    timestamp = utc_now()
+    summary = {
+        "status": outcome,
+        "reason": reason,
+        "project": project,
+        "skill": skill,
+        "target_id": target_id,
+        "did_work": False,
+        "work_kind": "none",
+        "quality_outcome": "not-applicable",
+        "next_action": "retry after the configured interval",
+    }
+    record = {
+        "project": project,
+        "skill": skill,
+        "model_invoked": False,
+        "started_at": timestamp,
+        "finished_at": timestamp,
+        "duration_ms": 0,
+        "outcome": outcome,
+        "exit_code": 0 if outcome == "noop" else 2,
+        "summary": json.dumps(summary, separators=(",", ":")),
+        "did_work": False,
+        "work_kind": "none",
+        "quality_outcome": "not-applicable",
+        "gate_decision": decision,
+        "gate_reason": reason,
+    }
+    if target_id:
+        record["target_id"] = target_id
+    if fingerprint:
+        record["fingerprint"] = fingerprint
+    HistoryStore(history_path).append(record)
+    return summary

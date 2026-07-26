@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import signal
 import subprocess
 import sys
@@ -668,7 +669,13 @@ class CliTest(unittest.TestCase):
             fake_codex.chmod(0o755)
             env["CODEX_BIN"] = str(fake_codex)
             result = self.run_cli(
-                "bin/pitcrew-codex.sh", "reviewer-run", "getbill", "--scheduled", env=env
+                "bin/pitcrew-codex.sh",
+                "reviewer-run",
+                "getbill",
+                "--target",
+                "getbill1/getbill#7",
+                "--scheduled",
+                env=env,
             )
             self.assertEqual(0, result.returncode, result.stderr)
             payload = json.loads(result.stdout)
@@ -682,6 +689,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertFalse(record["model_invoked"])
             self.assertEqual("cooldown", record["gate_decision"])
+            self.assertEqual("getbill1/getbill#7", record["target_id"])
 
     def test_authentication_failure_opens_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -955,6 +963,7 @@ class CliTest(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertTrue(record["model_invoked"])
             self.assertEqual("unavailable", record["gate_decision"])
+            self.assertNotIn("fingerprint", record)
 
     def test_scheduled_eligible_target_keeps_provenance_through_dispatcher(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -993,6 +1002,15 @@ class CliTest(unittest.TestCase):
                 encoding="utf-8"
             ).splitlines()
             self.assertEqual(1, len(calls))
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            self.wait_for_path(history)
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            expected = "sha256:" + hashlib.sha256(
+                b'[{"iid":7}]'
+            ).hexdigest()
+            self.assertEqual(expected, record["fingerprint"])
 
     def test_scheduled_directed_target_bypasses_eligibility_collection(self):
         with tempfile.TemporaryDirectory() as temp:

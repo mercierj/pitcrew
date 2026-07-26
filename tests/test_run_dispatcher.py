@@ -82,6 +82,33 @@ class RunDispatcherTest(unittest.TestCase):
                           "stderr": __import__("subprocess").DEVNULL, "start_new_session": True}, self.calls[0][1])
         self.assertEqual(321, self.store.get(run["run_id"])["pid"])
 
+    def test_eligibility_metadata_survives_enqueue_and_worker_spawn(self):
+        run = self.store.enqueue(
+            project="demo",
+            skill="qa-run",
+            source="scheduled",
+            target="ABC-eligibility",
+            target_source="eligibility",
+            gate_decision="eligible",
+            gate_reason="first eligible target",
+            gate_fingerprint="sha256:abc",
+        )
+
+        self.dispatcher.drain("demo", {"qa-run": 1})
+
+        self.assertEqual(
+            [
+                "/runner", "qa-run", "demo",
+                "--target", "ABC-eligibility",
+                "--target-source", "eligibility",
+                "--gate-decision", "eligible",
+                "--gate-reason", "first eligible target",
+                "--gate-fingerprint", "sha256:abc",
+                "--scheduled", "--coordinated-run", run["run_id"],
+            ],
+            self.calls[0][0],
+        )
+
     def test_cli_default_validator_checks_gitlab_before_spawn(self):
         provider = mock.Mock(return_value=self.provider_result())
         spawned = []
@@ -652,6 +679,54 @@ class RunDispatcherTest(unittest.TestCase):
             error.getvalue(),
         )
         self.assertIsNone(self.store.get(scheduled["run_id"])["target"])
+
+    def test_cli_enqueue_accepts_only_consistent_gate_metadata(self):
+        class NoSpawn(RunDispatcher):
+            def __init__(self, store, runner):
+                super().__init__(
+                    store,
+                    runner,
+                    process_factory=lambda *a, **k: FakeProcess(),
+                    target_validator=lambda row: True,
+                )
+
+        runtime = lambda project, skill=None: (self.store, {"qa-run": 1})
+        output = StringIO()
+        with mock.patch("sys.stdout", output):
+            result = dispatcher_module.main(
+                [
+                    "enqueue",
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--target", "ABC-1",
+                    "--target-source", "eligibility",
+                    "--gate-decision", "eligible",
+                    "--gate-reason", "first eligible target",
+                    "--gate-fingerprint", "sha256:abc",
+                ],
+                runtime,
+                NoSpawn,
+            )
+        self.assertEqual(0, result)
+        stored = self.store.get(json.loads(output.getvalue())["run_id"])
+        self.assertEqual("eligibility", stored["target_source"])
+
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            result = dispatcher_module.main(
+                [
+                    "enqueue",
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--target-source", "eligibility",
+                    "--gate-decision", "eligible",
+                    "--gate-reason", "missing target",
+                ],
+                runtime,
+                NoSpawn,
+            )
+        self.assertEqual(2, result)
+        self.assertEqual("pitcrew dispatcher: invalid arguments\n", error.getvalue())
 
     def test_cli_errors_are_safe(self):
         runtime = lambda project, skill=None: (_ for _ in ()).throw(ValueError("global stop is active"))

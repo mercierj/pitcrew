@@ -10,6 +10,11 @@ import os
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from scripts.pitcrew_history import append_gate_record
+else:
+    from pitcrew_history import append_gate_record
+
 
 DEFAULT_COOLDOWN_SECONDS = 1800
 
@@ -158,12 +163,35 @@ def main() -> int:
     noop_parser.add_argument("--skill", required=True)
     noop_parser.add_argument("--reason", required=True)
     noop_parser.add_argument("--at")
+    gate_parser = subparsers.add_parser("record-gate")
+    gate_parser.add_argument("--project", required=True)
+    gate_parser.add_argument("--skill", required=True)
+    gate_parser.add_argument("--decision", required=True)
+    gate_parser.add_argument("--reason", required=True)
+    gate_parser.add_argument(
+        "--outcome",
+        choices=("noop", "failed"),
+        default="noop",
+    )
+    gate_parser.add_argument("--target-id")
+    gate_parser.add_argument("--fingerprint")
     args = parser.parse_args()
     try:
         if args.command == "check":
             result = check(args.project, args.skill)
         elif args.command == "record-provider-failure":
             result = record_failure(args.project, args.reason, args.at)
+        elif args.command == "record-gate":
+            result = append_gate_record(
+                runtime_root() / args.project / "history.jsonl",
+                project=args.project,
+                skill=args.skill,
+                decision=args.decision,
+                reason=args.reason,
+                outcome=args.outcome,
+                target_id=args.target_id,
+                fingerprint=args.fingerprint,
+            )
         else:
             result = record_noop(args.project, args.skill, args.reason, args.at)
     except (OSError, ValueError, KeyError) as error:

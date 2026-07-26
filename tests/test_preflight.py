@@ -76,6 +76,30 @@ class PreflightTest(unittest.TestCase):
             self.assertEqual("noop", json.loads(blocked.stdout)["decision"])
             self.assertEqual("run", json.loads(allowed.stdout)["decision"])
 
+    def test_record_gate_writes_no_model_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = {**os.environ, "CODEX_HOME": temp}
+
+            result = self.run_helper(
+                "record-gate",
+                "--project", "getbill",
+                "--skill", "reviewer-run",
+                "--decision", "empty",
+                "--reason", "no eligible item",
+                "--fingerprint", "sha256:abc",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("noop", json.loads(result.stdout)["status"])
+            history = Path(temp) / "pitcrew/getbill/history.jsonl"
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("empty", record["gate_decision"])
+            self.assertEqual("sha256:abc", record["fingerprint"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,6 +71,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--target-id")
     result.add_argument("--gate-decision")
     result.add_argument("--gate-reason")
+    result.add_argument("--fingerprint")
     result.add_argument("--require-structured-result", action="store_true")
     result.add_argument("--summary-file", required=True, type=Path)
     result.add_argument("--history-file", required=True, type=Path)
@@ -156,6 +157,7 @@ def invocation_metadata(args: argparse.Namespace, model_invoked: bool) -> dict:
         ("target_id", "target_id"),
         ("gate_decision", "gate_decision"),
         ("gate_reason", "gate_reason"),
+        ("fingerprint", "fingerprint"),
     ):
         value = getattr(args, argument)
         if value is not None:
