@@ -178,6 +178,34 @@ def structured_metadata(result: dict | None) -> dict:
     return metadata
 
 
+def coordinated_run_is_launchable(
+    args: argparse.Namespace,
+    row: dict | None,
+) -> bool:
+    row_pid = row.get("pid") if row is not None else None
+    pid_is_owned = (
+        row_pid is None
+        or row_pid == os.getpid()
+        or (
+            row_pid == os.getppid()
+            and os.getpgrp() == row_pid
+        )
+    )
+    return bool(
+        row is not None
+        and row.get("project") == args.project
+        and row.get("skill") == args.skill
+        and row.get("state") == "running"
+        and (row.get("target") or None) == (args.target_id or None)
+        and row.get("gate_decision") == args.gate_decision
+        and row.get("gate_reason") == args.gate_reason
+        and row.get("gate_fingerprint") == args.fingerprint
+        # The dispatcher records the parent shell only when it is the exact
+        # leader of this coordinated process group.
+        and pid_is_owned
+    )
+
+
 def write_fallback_summary(path: Path, exit_code: int | None) -> None:
     """Leave an inspectable result when the bounded child produced no summary."""
     try:
@@ -388,6 +416,27 @@ def main() -> int:
             )
             return 0
 
+        if coordinated_store is not None:
+            try:
+                coordinated_run = coordinated_store.get(args.run_id)
+                if not coordinated_run_is_launchable(args, coordinated_run):
+                    print(
+                        "pitcrew lock: coordinated run is unavailable",
+                        file=sys.stderr,
+                    )
+                    return 2
+                if coordinated_run["pid"] is None:
+                    coordinated_store.mark_pid(args.run_id, os.getpid())
+            except RunStateError:
+                print(
+                    "pitcrew lock: coordinated run is unavailable",
+                    file=sys.stderr,
+                )
+                return 2
+            except RunStoreError:
+                print("pitcrew lock: run store is unavailable", file=sys.stderr)
+                return 2
+
         started_monotonic = time.monotonic_ns()
         write_live_status(
             args.live_file,
@@ -402,17 +451,6 @@ def main() -> int:
             },
         )
         try:
-            if coordinated_store is not None:
-                try:
-                    if coordinated_run is not None and coordinated_run["pid"] is None:
-                        coordinated_store.mark_pid(args.run_id, os.getpid())
-                except RunStateError:
-                    clear_live_status(args.live_file)
-                    return 0
-                except RunStoreError:
-                    clear_live_status(args.live_file)
-                    print("pitcrew lock: run store is unavailable", file=sys.stderr)
-                    return 2
             args.summary_file.unlink(missing_ok=True)
             os.set_inheritable(descriptor, True)
             child = subprocess.Popen(

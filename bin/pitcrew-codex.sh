@@ -90,6 +90,8 @@ while (($#)); do
   shift
 done
 
+unset PITCREW_RUN_ID
+
 if [[ "$SKILL" == "preprod-review-run" ]] && { "$SCHEDULED" || [[ -n "$COORDINATED_RUN" || -n "$TARGET" ]]; }; then
   echo "pitcrew-codex: preprod-review-run is manual-only; scheduled, coordinated, and directed execution are refused" >&2
   exit 2
@@ -232,6 +234,11 @@ print(json.dumps(value, separators=(",", ":")))
       check --project "$PROJECT" --skill "$SKILL")" || {
       fail_pre_model "eligibility probe is unavailable"
     }
+    ELIGIBILITY="$(printf '%s' "$ELIGIBILITY" | \
+      python3 "$REPO_ROOT/scripts/pitcrew_eligibility.py" \
+        normalize --project "$PROJECT" --skill "$SKILL")" || {
+      fail_pre_model "eligibility response is invalid"
+    }
     GATE_DECISION="$(python3 -c \
       'import json,sys; print(json.load(sys.stdin)["decision"])' \
       <<<"$ELIGIBILITY")" || {
@@ -360,7 +367,7 @@ ROUTING_MODE="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" routing-mode --pr
   fail_pre_model "routing resolution is unavailable"
 CANDIDATE_MODEL="$MODEL"
 ROUTING_REASON="baseline retained during observation"
-if [[ -z "$GATE_DECISION" ]]; then
+if [[ -z "$GATE_DECISION" && -z "$COORDINATED_RUN" ]]; then
   GATE_DECISION="not-checked"
   GATE_REASON="scheduled eligibility not checked"
 fi
@@ -463,8 +470,6 @@ if "$LOCKED_RUN"; then
     --routing-mode "$ROUTING_MODE"
     --candidate-model "$CANDIDATE_MODEL"
     --routing-reason "$ROUTING_REASON"
-    --gate-decision "$GATE_DECISION"
-    --gate-reason "$GATE_REASON"
     --summary-file "$SUMMARY_FILE"
     --live-file "$LIVE_FILE"
     --history-file "$HISTORY_FILE"
@@ -474,6 +479,9 @@ if "$LOCKED_RUN"; then
   fi
   if [[ -n "$TARGET" ]]; then
     LOCKED_ARGS+=(--target-id "$TARGET")
+  fi
+  if [[ -n "$GATE_DECISION" ]]; then
+    LOCKED_ARGS+=(--gate-decision "$GATE_DECISION" --gate-reason "$GATE_REASON")
   fi
   if [[ -n "$GATE_FINGERPRINT" ]]; then
     LOCKED_ARGS+=(--fingerprint "$GATE_FINGERPRINT")

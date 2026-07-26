@@ -35,7 +35,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         "project": "demo",
                         "skill": "qa-run",
                         "state": "running",
-                        "pid": 654,
+                        "pid": os.getpid(),
                     }
                 def mark_pid(self, *_args):
                     raise AssertionError("wrapper pid is already recorded")
@@ -111,6 +111,237 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         finally:
             sys.path.remove(scripts_path)
 
+    def test_coordinated_revalidates_after_lock_before_launch(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            terminal = False
+
+            class Store:
+                def __init__(self, _path):
+                    pass
+
+                def get(self, run_id):
+                    return {
+                        "run_id": run_id,
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "cancelled" if terminal else "running",
+                        "target": "one",
+                        "gate_decision": "directed",
+                        "gate_reason": "selected",
+                        "gate_fingerprint": "sha256:test",
+                        "pid": os.getpid(),
+                    }
+
+                def mark_pid(self, *_args):
+                    raise AssertionError("terminal run must not be marked")
+
+                def finish(self, *_args, **_kwargs):
+                    pass
+
+            def acquire(*_args):
+                nonlocal terminal
+                terminal = True
+
+            class Child:
+                pid = 123
+                stdout = None
+
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                summary = root / "summary"
+                summary.write_text("preserve", encoding="utf-8")
+                live = root / "live"
+                popen = mock.Mock(return_value=Child())
+                args = [
+                    "locked",
+                    "--lock-file", str(root / "lock"),
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--model", "test",
+                    *LOCKED_METADATA_ARGS,
+                    "--target-id", "one",
+                    "--gate-decision", "directed",
+                    "--gate-reason", "selected",
+                    "--fingerprint", "sha256:test",
+                    "--summary-file", str(summary),
+                    "--history-file", str(root / "history"),
+                    "--live-file", str(live),
+                    "--run-db", str(root / "runs.sqlite"),
+                    "--run-id", "run-1",
+                    "--", "true",
+                ]
+                stderr = __import__("io").StringIO()
+                with (
+                    mock.patch.object(sys, "argv", args),
+                    mock.patch.object(helper, "RunStore", Store),
+                    mock.patch.object(helper.fcntl, "flock", side_effect=acquire),
+                    mock.patch.object(helper.subprocess, "Popen", popen),
+                    mock.patch("sys.stderr", stderr),
+                ):
+                    self.assertEqual(2, helper.main())
+
+                self.assertIn("coordinated run is unavailable", stderr.getvalue())
+                popen.assert_not_called()
+                self.assertEqual("preserve", summary.read_text(encoding="utf-8"))
+                self.assertFalse(live.exists())
+        finally:
+            sys.path.remove(scripts_path)
+
+    def test_coordinated_revalidation_rejects_metadata_and_pid_mismatches(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            base_row = {
+                "run_id": "run-1",
+                "project": "demo",
+                "skill": "qa-run",
+                "state": "running",
+                "target": "one",
+                "gate_decision": "directed",
+                "gate_reason": "selected",
+                "gate_fingerprint": "sha256:test",
+                "pid": os.getpid(),
+            }
+            mismatches = {
+                "project": "other",
+                "skill": "reviewer-run",
+                "target": "two",
+                "gate_decision": "eligible",
+                "gate_reason": "other",
+                "gate_fingerprint": "sha256:other",
+                "pid": 4242,
+            }
+            for field, value in mismatches.items():
+                with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    row = {**base_row, field: value}
+
+                    class Store:
+                        def __init__(self, _path):
+                            pass
+
+                        def get(self, _run_id):
+                            return row
+
+                        def finish(self, *_args, **_kwargs):
+                            pass
+
+                    class Child:
+                        pid = 123
+                        stdout = None
+
+                        def poll(self):
+                            return 0
+
+                        def wait(self, timeout=None):
+                            return 0
+
+                    popen = mock.Mock(return_value=Child())
+                    args = [
+                        "locked",
+                        "--lock-file", str(root / "lock"),
+                        "--project", "demo",
+                        "--skill", "qa-run",
+                        "--model", "test",
+                        *LOCKED_METADATA_ARGS,
+                        "--target-id", "one",
+                        "--gate-decision", "directed",
+                        "--gate-reason", "selected",
+                        "--fingerprint", "sha256:test",
+                        "--summary-file", str(root / "summary"),
+                        "--history-file", str(root / "history"),
+                        "--run-db", str(root / "runs.sqlite"),
+                        "--run-id", "run-1",
+                        "--", "true",
+                    ]
+                    with (
+                        mock.patch.object(sys, "argv", args),
+                        mock.patch.object(helper, "RunStore", Store),
+                        mock.patch.object(helper.subprocess, "Popen", popen),
+                        mock.patch.object(helper.os, "getppid", return_value=4242),
+                        mock.patch.object(helper.os, "getpgrp", return_value=4343),
+                    ):
+                        self.assertEqual(2, helper.main())
+                    popen.assert_not_called()
+        finally:
+            sys.path.remove(scripts_path)
+
+    def test_coordinated_accepts_parent_process_group_owner(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            class Store:
+                def __init__(self, _path):
+                    pass
+
+                def get(self, run_id):
+                    return {
+                        "run_id": run_id,
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "target": None,
+                        "gate_decision": None,
+                        "gate_reason": None,
+                        "gate_fingerprint": None,
+                        "pid": 4242,
+                    }
+
+                def finish(self, *_args, **_kwargs):
+                    pass
+
+            class Child:
+                pid = 123
+                stdout = None
+
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                popen = mock.Mock(return_value=Child())
+                args = [
+                    "locked",
+                    "--lock-file", str(root / "lock"),
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--model", "test",
+                    *LOCKED_METADATA_ARGS,
+                    "--summary-file", str(root / "summary"),
+                    "--history-file", str(root / "history"),
+                    "--run-db", str(root / "runs.sqlite"),
+                    "--run-id", "run-1",
+                    "--", "true",
+                ]
+                with (
+                    mock.patch.object(sys, "argv", args),
+                    mock.patch.object(helper, "RunStore", Store),
+                    mock.patch.object(helper.subprocess, "Popen", popen),
+                    mock.patch.object(helper.os, "getppid", return_value=4242),
+                    mock.patch.object(helper.os, "getpgrp", return_value=4242),
+                ):
+                    self.assertEqual(0, helper.main())
+                popen.assert_called_once()
+        finally:
+            sys.path.remove(scripts_path)
+
     def test_coordinated_spawn_failure_with_store_failure_is_safe(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)
@@ -152,11 +383,20 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         finally:
             sys.path.remove(scripts_path)
     def helper(self, root, run, command, *extra):
+        metadata = []
+        for option, field in (
+            ("--target-id", "target"),
+            ("--gate-decision", "gate_decision"),
+            ("--gate-reason", "gate_reason"),
+            ("--fingerprint", "gate_fingerprint"),
+        ):
+            if run.get(field) is not None:
+                metadata.extend((option, run[field]))
         return subprocess.run([
             sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "run.lock"),
             "--project", "demo", "--skill", "qa-run", "--model", "test", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"),
             "--history-file", str(root / "history"), "--run-db", str(root / "private" / "runs.sqlite"),
-            "--run-id", run["run_id"], *extra, "--", *command], cwd=ROOT, text=True, capture_output=True, check=False)
+            "--run-id", run["run_id"], *metadata, *extra, "--", *command], cwd=ROOT, text=True, capture_output=True, check=False)
 
     def test_coordinated_success_finishes_run_and_clears_live(self):
         from scripts.pitcrew_run_store import RunStore
@@ -184,14 +424,15 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             self.assertEqual(127, self.helper(root, missing, ["/missing-executable"]).returncode)
             self.assertEqual(("failed", "spawn_failed"), (store.get(missing["run_id"])["state"], store.get(missing["run_id"])["error_code"]))
 
-    def test_coordinated_does_not_replace_dispatcher_pid(self):
+    def test_coordinated_rejects_parent_outside_its_process_group(self):
         from scripts.pitcrew_run_store import RunStore
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one")
-            store.claim_ready(project="demo", capacities={"qa-run": 1}); store.mark_pid(run["run_id"], 4321)
-            self.assertEqual(0, self.helper(root, run, [sys.executable, "-c", "raise SystemExit(0)"]).returncode)
-            self.assertEqual(4321, store.get(run["run_id"])["pid"])
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            store.mark_pid(run["run_id"], os.getpid())
+            self.assertEqual(2, self.helper(root, run, [sys.executable, "-c", "raise SystemExit(0)"]).returncode)
+            self.assertEqual(os.getpid(), store.get(run["run_id"])["pid"])
 
     def test_coordinated_flag_pairing_and_heartbeat_are_validated(self):
         helper = ROOT / "scripts/pitcrew_locked_exec.py"
@@ -205,7 +446,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
+            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--target-id", "one", "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
             process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 2
             while not live.exists() and time.monotonic() < deadline: time.sleep(.01)
@@ -222,9 +463,38 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             self.assertNotEqual(0, self.helper(root, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"]).returncode)
             self.assertEqual("command_failed", store.get(run["run_id"])["error_code"])
             race = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
+            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--target-id", "two", "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
             time.sleep(.05); store.finish(race["run_id"], state="cancelled"); process.communicate(timeout=2)
             self.assertEqual("cancelled", store.get(race["run_id"])["state"])
+
+    def test_coordinated_second_invocation_after_terminal_never_launches(self):
+        from scripts.pitcrew_run_store import RunStore
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            store = RunStore(root / "private" / "runs.sqlite")
+            run = store.enqueue(
+                project="demo",
+                skill="qa-run",
+                source="scheduled",
+                target="one",
+            )
+            store.claim_ready(project="demo", capacities={"qa-run": 1})
+            store.finish(run["run_id"], state="cancelled")
+            marker = root / "child-started"
+
+            result = self.helper(
+                root,
+                run,
+                [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                ],
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("coordinated run is unavailable", result.stderr)
+            self.assertFalse(marker.exists())
 
     def test_same_run_lock_is_noop_while_distinct_locks_overlap(self):
         from scripts.pitcrew_run_store import RunStore
@@ -234,11 +504,11 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             store.claim_ready(project="demo", capacities={"qa-run": 2})
             common = ["--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--run-db", str(root / "private" / "runs.sqlite")]
             command = [sys.executable, "-c", "import time; time.sleep(.25)"]
-            first = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--", *command], cwd=ROOT, stdout=subprocess.PIPE, text=True)
+            first = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--target-id", "one", "--", *command], cwd=ROOT, stdout=subprocess.PIPE, text=True)
             time.sleep(.05)
-            duplicate = subprocess.run([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--", *command], cwd=ROOT, text=True, capture_output=True)
+            duplicate = subprocess.run([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--target-id", "one", "--", *command], cwd=ROOT, text=True, capture_output=True)
             self.assertEqual("noop", json.loads(duplicate.stdout)["status"]); self.assertEqual("running", store.get(one["run_id"])["state"])
-            second = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "two.lock"), *common, "--run-id", two["run_id"], "--", *command], cwd=ROOT)
+            second = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "two.lock"), *common, "--run-id", two["run_id"], "--target-id", "two", "--", *command], cwd=ROOT)
             first.communicate(timeout=2); second.communicate(timeout=2)
             self.assertEqual(0, first.returncode); self.assertEqual(0, second.returncode)
 
@@ -251,7 +521,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             store.claim_ready(project="demo", capacities={"qa-run": 1})
             live, pidfile, backup = root / "live", root / "child.pid", db.with_name("runs.backup.sqlite")
             child = f"from pathlib import Path; import os,time; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(10)"
-            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
+            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--target-id", "one", "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
             process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 deadline = time.monotonic() + 2
@@ -502,15 +772,29 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
             args_path = root / "codex-args"
+            run_id_path = root / "run-id"
             fake_codex = root / "fake-codex"
-            fake_codex.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n", encoding="utf-8")
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n"
+                "printf '%s' \"${PITCREW_RUN_ID-unset}\" > \"$FAKE_RUN_ID\"\n",
+                encoding="utf-8",
+            )
             fake_codex.chmod(0o755)
-            env = {**os.environ, "CODEX_HOME": str(root), "FAKE_CODEX_ARGS": str(args_path), "CODEX_BIN": str(fake_codex)}
+            env = {
+                **os.environ,
+                "CODEX_HOME": str(root),
+                "FAKE_CODEX_ARGS": str(args_path),
+                "FAKE_RUN_ID": str(run_id_path),
+                "CODEX_BIN": str(fake_codex),
+                "PITCREW_RUN_ID": "hostile-inherited-run",
+            }
             configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
             self.assertEqual(0, configured.returncode, configured.stderr)
             result = self.run_cli("bin/pitcrew-codex.sh", "preprod-review-run", "getbill", env=env)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn('-c\nmodel_reasoning_effort="xhigh"', args_path.read_text(encoding="utf-8"))
+            self.assertEqual("unset", run_id_path.read_text(encoding="utf-8"))
 
     def test_preprod_review_manual_run_never_calls_preflight_or_dispatcher(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -637,6 +921,56 @@ class CliTest(unittest.TestCase):
             )
             self.assertFalse(record["model_invoked"])
             self.assertEqual("stopped", record["gate_decision"])
+
+    def test_scheduled_enqueue_does_not_inherit_run_id(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "PITCREW_RUN_ID": "hostile-inherited-run",
+            }
+            configured = self.run_cli(
+                "bin/configure.sh",
+                "getbill",
+                "--profile",
+                "getbill",
+                env=env,
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            captured = root / "enqueue-run-id"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$*\" == *'pitcrew_run_dispatcher.py enqueue'* ]]; then\n"
+                "  printf '%s' \"${PITCREW_RUN_ID-unset}\" > \"$FAKE_RUN_ID\"\n"
+                "fi\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            env.update(
+                {
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_RUN_ID": str(captured),
+                    "REAL_PYTHON": sys.executable,
+                    "CODEX_BIN": "/usr/bin/true",
+                }
+            )
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "implementer-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("unset", captured.read_text(encoding="utf-8"))
 
     def test_runner_refuses_to_start_during_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -964,6 +1298,70 @@ class CliTest(unittest.TestCase):
             self.assertTrue(record["model_invoked"])
             self.assertEqual("unavailable", record["gate_decision"])
             self.assertNotIn("fingerprint", record)
+
+    def test_scheduled_invalid_successful_eligibility_is_fail_open(self):
+        cases = (
+            "{not-json",
+            '{"decision":"empty"}',
+            json.dumps(
+                {
+                    "decision": "unknown",
+                    "project": "getbill",
+                    "skill": "reviewer-run",
+                    "target_id": None,
+                    "fingerprint": None,
+                    "reason": "unknown decision",
+                }
+            ),
+        )
+        for payload in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                env = self.configured_scheduled_env(
+                    root,
+                    skill="reviewer-run",
+                )
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                fake_python = fake_bin / "python3"
+                fake_python.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "if [[ \"$1\" == *'/pitcrew_eligibility.py' && "
+                    "\"$2\" == 'check' ]]; then\n"
+                    "  printf '%s' \"$FAKE_ELIGIBILITY_PAYLOAD\"\n"
+                    "  exit 0\n"
+                    "fi\n"
+                    "exec \"$REAL_PYTHON\" \"$@\"\n",
+                    encoding="utf-8",
+                )
+                fake_python.chmod(0o755)
+                env.update(
+                    {
+                        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                        "REAL_PYTHON": sys.executable,
+                        "FAKE_ELIGIBILITY_PAYLOAD": payload,
+                    }
+                )
+
+                result = self.run_cli(
+                    "bin/pitcrew-codex.sh",
+                    "reviewer-run",
+                    "getbill",
+                    "--scheduled",
+                    env=env,
+                )
+
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.wait_for_path(Path(env["FAKE_CODEX_MARKER"]))
+                history = root / ".codex/pitcrew/getbill/history.jsonl"
+                self.wait_for_path(history)
+                record = json.loads(
+                    history.read_text(encoding="utf-8").splitlines()[-1]
+                )
+                self.assertTrue(record["model_invoked"])
+                self.assertEqual("unavailable", record["gate_decision"])
+                self.assertNotIn("target_id", record)
+                self.assertNotIn("fingerprint", record)
 
     def test_scheduled_eligible_target_keeps_provenance_through_dispatcher(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1502,7 +1900,12 @@ class CliTest(unittest.TestCase):
         from scripts.pitcrew_run_store import RunStore
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
-            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "PITCREW_RUN_ID": "hostile-inherited-run",
+            }
             configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
             self.assertEqual(0, configured.returncode, configured.stderr)
             fake_codex = root / "fake-codex"
