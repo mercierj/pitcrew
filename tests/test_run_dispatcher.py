@@ -59,7 +59,7 @@ class RunDispatcherTest(unittest.TestCase):
             },
         }
 
-    def provider_result(self, *, iid=7, state="opened", labels=None, returncode=0, stdout=None):
+    def provider_result(self, *, iid=7, state="opened", labels=None, returncode=0, stdout=None, stderr=None):
         payload = {
             "iid": iid,
             "state": state,
@@ -69,7 +69,7 @@ class RunDispatcherTest(unittest.TestCase):
             [],
             returncode,
             stdout=json.dumps(payload) if stdout is None else stdout,
-            stderr="provider secret must not be exposed",
+            stderr="provider secret must not be exposed" if stderr is None else stderr,
         )
 
     def test_drain_spawns_exact_target_arguments_and_marks_pid(self):
@@ -182,6 +182,64 @@ class RunDispatcherTest(unittest.TestCase):
                     (self.store.get(run["run_id"])["state"], self.store.get(run["run_id"])["error_code"]),
                 )
         self.assertEqual([], calls)
+
+    def test_default_validator_classifies_provider_404_as_stale(self):
+        provider = mock.Mock(
+            return_value=self.provider_result(
+                returncode=1,
+                stderr="glab: API request failed (HTTP 404)\n",
+            )
+        )
+        calls = []
+        run = self.store.enqueue(
+            project="demo",
+            skill="implementer-run",
+            source="scheduled",
+            target="https://gitlab.example/crew/demo/-/issues/7",
+        )
+        with mock.patch.object(
+            dispatcher_module,
+            "load_runtime_config",
+            return_value=self.gitlab_config(),
+        ):
+            RunDispatcher(
+                self.store,
+                "/runner",
+                process_factory=lambda *args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+                provider_runner=provider,
+            ).drain("demo", {"implementer-run": 1})
+        self.assertEqual([], calls)
+        self.assertEqual(
+            ("cancelled", "stale_target"),
+            (self.store.get(run["run_id"])["state"], self.store.get(run["run_id"])["error_code"]),
+        )
+
+    def test_default_validator_keeps_provider_500_as_validation_failure(self):
+        secret = "provider-secret-value"
+        provider = mock.Mock(
+            return_value=self.provider_result(
+                returncode=1,
+                stderr=f"glab: {secret} (HTTP 500)\n",
+            )
+        )
+        run = self.store.enqueue(
+            project="demo",
+            skill="implementer-run",
+            source="scheduled",
+            target="https://gitlab.example/crew/demo/-/issues/7",
+        )
+        with mock.patch.object(
+            dispatcher_module,
+            "load_runtime_config",
+            return_value=self.gitlab_config(),
+        ):
+            RunDispatcher(self.store, "/runner", provider_runner=provider).drain(
+                "demo",
+                {"implementer-run": 1},
+            )
+        row = self.store.get(run["run_id"])
+        self.assertEqual(("failed", "validation_failed"), (row["state"], row["error_code"]))
+        self.assertNotIn(secret, row["error_message"])
 
     def test_default_validator_rejects_unknown_roles_without_provider_call(self):
         provider = mock.Mock()

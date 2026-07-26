@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -24,6 +25,8 @@ except ImportError:
 
 
 PROVIDER_TIMEOUT_SECONDS = 15
+MAX_PROVIDER_ERROR_CHARS = 4096
+HTTP_STATUS_SUFFIX = re.compile(r"\(HTTP ([1-5][0-9]{2})\)\s*\Z")
 
 
 class TargetValidationUnavailable(Exception):
@@ -41,6 +44,14 @@ def default_provider_run(command: list[str]) -> subprocess.CompletedProcess[str]
         check=False,
         timeout=PROVIDER_TIMEOUT_SECONDS,
     )
+
+
+def _provider_http_status(completed: subprocess.CompletedProcess[str]) -> int | None:
+    stderr = completed.stderr
+    if not isinstance(stderr, str) or len(stderr) > MAX_PROVIDER_ERROR_CHARS:
+        return None
+    match = HTTP_STATUS_SUFFIX.search(stderr)
+    return int(match.group(1)) if match is not None else None
 
 
 def _required_labels(skill: str, tracker: Mapping[str, Any]) -> tuple[frozenset[str], ...] | None:
@@ -127,6 +138,8 @@ def validate_queued_target(
     except (OSError, subprocess.TimeoutExpired) as error:
         raise TargetValidationUnavailable("target validation is unavailable") from error
     if completed.returncode != 0:
+        if _provider_http_status(completed) == 404:
+            return False
         raise TargetValidationUnavailable("target validation is unavailable")
     try:
         issue = json.loads(completed.stdout)
