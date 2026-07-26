@@ -23,7 +23,11 @@ from scripts.pitcrew_config import (
     validate,
     write_project,
 )
-from scripts.pitcrew_models import DEFAULT_MODELS
+from scripts.pitcrew_models import (
+    DEFAULT_MODELS,
+    DEFAULT_REASONING_EFFORTS,
+    resolve_routing_mode,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,16 +60,14 @@ class ConfigTest(unittest.TestCase):
             for role, model in DEFAULT_MODELS.items():
                 with self.subTest(profile=relative, role=role):
                     self.assertEqual(model, profile["agents"][role]["model"])
-            self.assertEqual(
-                "high", profile["agents"]["architecture-run"]["reasoning_effort"]
-            )
+                    self.assertEqual(
+                        DEFAULT_REASONING_EFFORTS[role],
+                        profile["agents"][role]["reasoning_effort"],
+                    )
+                    self.assertEqual("observe", profile["agents"][role]["routing_mode"])
             self.assertEqual(
                 {"base_ref": "origin/preprod", "compare_ref": "origin/develop", "history_limit": 10},
                 profile["preprod_review"],
-            )
-            self.assertEqual(
-                {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
-                profile["agents"]["preprod-review-run"],
             )
             validate(profile)
 
@@ -83,12 +85,23 @@ class ConfigTest(unittest.TestCase):
                 candidate["preprod_review"].update(update)
                 with self.assertRaisesRegex(ConfigError, message):
                     validate(candidate)
-        for field, value in (("model", "gpt-5.6-terra"), ("reasoning_effort", "high")):
+        for field, value in (
+            ("model", "gpt-5.6-terra"),
+            ("reasoning_effort", "high"),
+            ("routing_mode", "fixed"),
+        ):
             with self.subTest(field=field):
                 candidate = json.loads(json.dumps(profile))
                 candidate["agents"]["preprod-review-run"][field] = value
                 with self.assertRaisesRegex(ConfigError, f"agents.preprod-review-run.{field}"):
                     validate(candidate)
+
+    def test_legacy_preprod_review_agent_defaults_routing_mode_to_observe(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        del profile["agents"]["preprod-review-run"]["routing_mode"]
+
+        validate(profile)
+        self.assertEqual("observe", resolve_routing_mode(profile, "preprod-review-run"))
 
     def test_update_runtime_model_replaces_only_requested_agent_and_preserves_content(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -239,8 +252,22 @@ class ConfigTest(unittest.TestCase):
             self.assertFalse(second.is_alive(), "second update thread did not terminate")
             self.assertEqual([], errors, "concurrent update raised an exception")
             agents = json.loads(destination.read_text(encoding="utf-8"))["agents"]
-            self.assertEqual({"model": "gpt-5.6-luna"}, agents["research-run"])
-            self.assertEqual({"model": "gpt-5.6-sol"}, agents["qa-run"])
+            self.assertEqual(
+                {
+                    "model": "gpt-5.6-luna",
+                    "reasoning_effort": "medium",
+                    "routing_mode": "observe",
+                },
+                agents["research-run"],
+            )
+            self.assertEqual(
+                {
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "medium",
+                    "routing_mode": "observe",
+                },
+                agents["qa-run"],
+            )
 
     def test_runtime_config_lock_closes_descriptor_when_setup_fails(self):
         with tempfile.TemporaryDirectory() as temp:

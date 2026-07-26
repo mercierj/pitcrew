@@ -276,11 +276,14 @@ def validate(config: Mapping[str, Any]) -> None:
             if not isinstance(routing_mode, str) or routing_mode not in ROUTING_MODES:
                 raise ConfigError(f"agents.{skill}.routing_mode is unsupported")
         if skill == "preprod-review-run":
-            expected = {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
-            if dict(entry) != expected:
-                if entry.get("model") != expected["model"]:
-                    raise ConfigError("agents.preprod-review-run.model must be gpt-5.6-sol")
-                raise ConfigError("agents.preprod-review-run.reasoning_effort must be xhigh")
+            if entry.get("model") != "gpt-5.6-sol":
+                raise ConfigError("agents.preprod-review-run.model must be gpt-5.6-sol")
+            if entry.get("reasoning_effort") != "xhigh":
+                raise ConfigError(
+                    "agents.preprod-review-run.reasoning_effort must be xhigh"
+                )
+            if entry.get("routing_mode", "observe") != "observe":
+                raise ConfigError("agents.preprod-review-run.routing_mode must be observe")
 
 
 def write_project(

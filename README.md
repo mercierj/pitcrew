@@ -198,6 +198,19 @@ The dashboard shows each agent's configured `gpt-5.6-sol`, `gpt-5.6-terra`, or
 amount is API-equivalent metering rather than a subscription charge. See the
 [model catalogue, controls, and pricing assumptions](references/SCHEDULED-TASKS.md).
 
+### Scheduled token controls
+
+Each `agents.<role>` entry pins `model`, `reasoning_effort`, and `routing_mode`.
+Scheduled runs therefore do not inherit the operator's global reasoning setting.
+
+Before Codex starts, queue-backed roles run a read-only eligibility probe. Only a
+confirmed `empty` decision suppresses Codex. Provider errors, malformed
+responses, and roles without a deterministic Phase A probe return `unavailable`
+and preserve the existing workflow launch.
+
+`routing_mode: observe` records routing evidence but does not change the
+configured execution model.
+
 ## State and providers
 
 The generic lifecycle is:
