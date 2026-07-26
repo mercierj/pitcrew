@@ -8,13 +8,15 @@ description: Use when scanning one configured repository for high-confidence arc
 Read `references/CODEX-RUNTIME.md`, then resolve and validate exactly one project configuration.
 Read `references/PROVIDERS.md`; this role makes no provider call. Read every applicable target-repository
 `AGENTS.md` before acting. If the active profile is GetBill, also read `references/profiles/getbill.md`
-and the required architecture references before scanning. On any invalid configuration, scope, or permission,
+and each eligible architecture reference before scanning. On any invalid configuration, scope, or permission,
 return the structured no-op from `references/CODEX-RUNTIME.md` and stop.
 
 ### GetBill preflight
 
 Read applicable `AGENTS.md` and the selected architecture reference. Preserve all WIP and do local,
 read-only analysis only. Never read, display, or source a secret file; do not take prod or preprod actions.
+When the selected reference is modified, untracked, ignored, generated, or unavailable, skip it and continue
+with eligible tracked source inputs.
 
 This is one bounded, deterministic architecture pass. No code, ticket, or remote action.
 
@@ -23,9 +25,10 @@ This is one bounded, deterministic architecture pass. No code, ticket, or remote
 Use the configured repository path as a read-only source. Before reading any candidate, inspect its Git
 tracking and ignore status. Exclude modified, untracked, ignored, generated, dependency, secret, and
 customer-data files. Do not create a worktree merely because a checkout is dirty. Never quote discovered
-personal data in state or output.
+personal data in state or output. Skip every ineligible path individually; unrelated WIP must not abort a pass.
 
-Load curated architecture references only after the same tracked-file check. Read the runtime state at
+Load curated architecture references only after the same tracked-file check. A dirty or missing optional reference must not abort the pass:
+continue with eligible tracked source inputs. Read the runtime state at
 `$STATE_DIR/architecture-state.json`; use no other state path. The state has one cell named
 `architecture:$REPO_NAME` for every configured repository.
 

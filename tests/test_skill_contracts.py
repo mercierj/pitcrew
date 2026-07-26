@@ -460,6 +460,10 @@ class ReferenceContractTest(unittest.TestCase):
                 self.assertIn("fingerprints", text)
                 self.assertIn("Git tree fingerprint", text)
             if name == "architecture-run":
+                self.assertIn(
+                    "A dirty or missing optional reference must not abort the pass",
+                    text,
+                )
                 for marker in (
                     "architecture-state.json",
                     "architecture:$REPO_NAME",
