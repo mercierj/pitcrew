@@ -146,6 +146,17 @@ if (row["target"] or "") != target or row["state"] != "running":
   fi
 fi
 MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")"
+REASONING_EFFORT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" reasoning --project "$PROJECT" --skill "$SKILL")"
+ROUTING_MODE="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" routing-mode --project "$PROJECT" --skill "$SKILL")"
+CANDIDATE_MODEL="$MODEL"
+ROUTING_REASON="baseline retained during observation"
+if [[ -n "$TARGET" ]]; then
+  GATE_DECISION="directed"
+  GATE_REASON="human supplied directed target"
+else
+  GATE_DECISION="not-checked"
+  GATE_REASON="scheduled eligibility not checked"
+fi
 REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
 [[ -n "$REPO" && -d "$REPO" ]] || {
   echo "pitcrew-codex: configured repository is unavailable: $REPO" >&2
@@ -164,7 +175,7 @@ if "$SCHEDULED" && [[ "$SKILL" == "unblock" ]]; then
 fi
 
 if "$DRY_RUN"; then
-  printf '%s\n' "cd=$REPO" "model=$MODEL" "prompt=$PROMPT"
+  printf '%s\n' "cd=$REPO" "model=$MODEL" "reasoning_effort=${REASONING_EFFORT:-inherited}" "routing_mode=$ROUTING_MODE" "prompt=$PROMPT"
   exit 0
 fi
 
@@ -177,6 +188,9 @@ CODEX_ARGS=(
   --model "$MODEL"
   --json
 )
+if [[ -n "$REASONING_EFFORT" ]]; then
+  CODEX_ARGS+=( -c "model_reasoning_effort=\"$REASONING_EFFORT\"" )
+fi
 
 # Implementer must update the configured repository's Git metadata to create
 # isolated worktrees. The other roles retain the normal workspace boundary.
@@ -230,12 +244,24 @@ if "$SCHEDULED"; then
     --project "$PROJECT"
     --skill "$SKILL"
     --model "$MODEL"
+    --reasoning-effort "$REASONING_EFFORT"
+    --routing-mode "$ROUTING_MODE"
+    --candidate-model "$CANDIDATE_MODEL"
+    --routing-reason "$ROUTING_REASON"
+    --gate-decision "$GATE_DECISION"
+    --gate-reason "$GATE_REASON"
     --summary-file "$SUMMARY_FILE"
     --live-file "$LIVE_FILE"
     --history-file "$HISTORY_FILE"
   )
   if [[ -n "$COORDINATED_RUN" ]]; then
     LOCKED_ARGS+=(--run-db "$RUN_DB" --run-id "$COORDINATED_RUN")
+  fi
+  if [[ -n "$TARGET" ]]; then
+    LOCKED_ARGS+=(--target-id "$TARGET")
+  fi
+  if "$SCHEDULED"; then
+    LOCKED_ARGS+=(--require-structured-result)
   fi
   LOCKED_ARGS+=(-- "${CODEX_BIN:-codex}" "${CODEX_ARGS[@]}")
   if [[ -n "$COORDINATED_RUN" ]]; then

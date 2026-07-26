@@ -35,6 +35,18 @@ USAGE_FIELDS = (
     "output_tokens",
     "total_tokens",
 )
+OPTIONAL_STRING_FIELDS = (
+    "routing_reason",
+    "target_id",
+    "work_kind",
+    "quality_outcome",
+    "gate_decision",
+    "gate_reason",
+    "fingerprint",
+)
+OPTIONAL_BOOLEAN_FIELDS = ("model_invoked", "did_work")
+VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+VALID_ROUTING_MODES = {"fixed", "observe"}
 BENIGN_NOOP_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -103,6 +115,21 @@ def _validate_record(record: object) -> dict:
     ):
         normalized.pop("model", None)
         normalized.pop("usage", None)
+    for field in OPTIONAL_STRING_FIELDS:
+        if field in normalized and (
+            not isinstance(normalized[field], str) or not normalized[field]
+        ):
+            normalized.pop(field)
+    for field in OPTIONAL_BOOLEAN_FIELDS:
+        if field in normalized and not isinstance(normalized[field], bool):
+            normalized.pop(field)
+    if normalized.get("reasoning_effort") not in VALID_REASONING_EFFORTS:
+        normalized.pop("reasoning_effort", None)
+    if normalized.get("routing_mode") not in VALID_ROUTING_MODES:
+        normalized.pop("routing_mode", None)
+    candidate_model = normalized.get("candidate_model")
+    if candidate_model not in MODEL_CATALOG:
+        normalized.pop("candidate_model", None)
     usage = normalized.get("usage")
     if not isinstance(usage, dict) or set(usage) != set(USAGE_FIELDS):
         normalized.pop("usage", None)

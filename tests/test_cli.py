@@ -11,6 +11,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCKED_METADATA_ARGS = [
+    "--reasoning-effort",
+    "medium",
+    "--routing-mode",
+    "observe",
+]
 
 
 class CoordinatedLockedExecTest(unittest.TestCase):
@@ -27,7 +33,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 history = mock.Mock()
-                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", "missing"]
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", "missing"]
                 stderr = __import__("io").StringIO()
                 with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch.object(helper.subprocess, "Popen", side_effect=OSError()), mock.patch("sys.stderr", stderr):
                     self.assertEqual(2, helper.main())
@@ -48,7 +54,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 history = mock.Mock(); stderr = __import__("io").StringIO()
-                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", sys.executable, "-c", "pass"]
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", sys.executable, "-c", "pass"]
                 with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch("sys.stderr", stderr):
                     self.assertEqual(2, helper.main())
                 self.assertIn("run store is unavailable", stderr.getvalue()); history.append.assert_called()
@@ -57,7 +63,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
     def helper(self, root, run, command, *extra):
         return subprocess.run([
             sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "run.lock"),
-            "--project", "demo", "--skill", "qa-run", "--model", "test", "--summary-file", str(root / "summary"),
+            "--project", "demo", "--skill", "qa-run", "--model", "test", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"),
             "--history-file", str(root / "history"), "--run-db", str(root / "private" / "runs.sqlite"),
             "--run-id", run["run_id"], *extra, "--", *command], cwd=ROOT, text=True, capture_output=True, check=False)
 
@@ -98,7 +104,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
 
     def test_coordinated_flag_pairing_and_heartbeat_are_validated(self):
         helper = ROOT / "scripts/pitcrew_locked_exec.py"
-        base = [sys.executable, str(helper), "--lock-file", "/tmp/x", "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", "/tmp/a", "--history-file", "/tmp/b"]
+        base = [sys.executable, str(helper), "--lock-file", "/tmp/x", "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", "/tmp/a", "--history-file", "/tmp/b"]
         self.assertEqual(2, subprocess.run([*base, "--run-id", "x", "--", "true"], cwd=ROOT, capture_output=True).returncode)
         self.assertEqual(2, subprocess.run([*base, "--run-db", "/tmp/runs.sqlite", "--", "true"], cwd=ROOT, capture_output=True).returncode)
         self.assertEqual(2, subprocess.run([*base, "--heartbeat-seconds", "0", "--", "true"], cwd=ROOT, capture_output=True).returncode)
@@ -108,7 +114,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
+            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
             process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             deadline = time.monotonic() + 2
             while not live.exists() and time.monotonic() < deadline: time.sleep(.01)
@@ -125,7 +131,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             self.assertNotEqual(0, self.helper(root, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"]).returncode)
             self.assertEqual("command_failed", store.get(run["run_id"])["error_code"])
             race = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
+            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
             time.sleep(.05); store.finish(race["run_id"], state="cancelled"); process.communicate(timeout=2)
             self.assertEqual("cancelled", store.get(race["run_id"])["state"])
 
@@ -135,7 +141,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             one = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); two = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two")
             store.claim_ready(project="demo", capacities={"qa-run": 2})
-            common = ["--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--run-db", str(root / "private" / "runs.sqlite")]
+            common = ["--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--run-db", str(root / "private" / "runs.sqlite")]
             command = [sys.executable, "-c", "import time; time.sleep(.25)"]
             first = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--", *command], cwd=ROOT, stdout=subprocess.PIPE, text=True)
             time.sleep(.05)
@@ -154,7 +160,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             store.claim_ready(project="demo", capacities={"qa-run": 1})
             live, pidfile, backup = root / "live", root / "child.pid", db.with_name("runs.backup.sqlite")
             child = f"from pathlib import Path; import os,time; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(10)"
-            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
+            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
             process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 deadline = time.monotonic() + 2
@@ -181,7 +187,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); pids = root / "pids"
             code = f"import subprocess,sys,os,time; from pathlib import Path; c=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)']); Path({str(pids)!r}).write_text(f'{{os.getpid()}} {{c.pid}}'); time.sleep(10)"
-            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--", sys.executable, "-c", code]
+            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--", sys.executable, "-c", code]
             helper = subprocess.Popen(command, cwd=ROOT)
             try:
                 deadline = time.monotonic() + 2
@@ -250,7 +256,7 @@ class CliTest(unittest.TestCase):
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
                 "  if [ \"$previous\" = '--output-last-message' ]; then\n"
-                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"completed\",\"project\":\"getbill\",\"skill\":\"research-run\",\"target_id\":null,\"did_work\":true,\"work_kind\":\"research\",\"quality_outcome\":\"validated\",\"next_action\":\"review results\"}' > \"$argument\"\n"
+                "    printf '%s\\n' '{\"status\":\"noop\",\"reason\":\"nothing eligible\",\"project\":\"getbill\",\"skill\":\"research-run\",\"target_id\":null,\"did_work\":false,\"work_kind\":\"none\",\"quality_outcome\":\"not-applicable\",\"next_action\":\"wait\"}' > \"$argument\"\n"
                 "  fi\n"
                 "  previous=\"$argument\"\n"
                 "done\n",
@@ -283,6 +289,20 @@ class CliTest(unittest.TestCase):
             self.assertEqual(1, args.count("--output-schema"))
             schema_index = args.index("--output-schema")
             self.assertEqual(str(ROOT / "references/run-result.schema.json"), args[schema_index + 1])
+            history = [
+                json.loads(line)
+                for line in (runtime_dir / "history.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            latest = history[-1]
+            self.assertEqual("noop", latest["outcome"])
+            self.assertTrue(latest["model_invoked"])
+            self.assertEqual("medium", latest["reasoning_effort"])
+            self.assertEqual("observe", latest["routing_mode"])
+            self.assertFalse(latest["did_work"])
+            self.assertEqual("none", latest["work_kind"])
+            self.assertEqual("not-applicable", latest["quality_outcome"])
 
             unscheduled = self.run_cli(
                 "bin/pitcrew-codex.sh", "research-run", "getbill", env=env
@@ -566,7 +586,7 @@ class CliTest(unittest.TestCase):
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
                 "  if [ \"$previous\" = '--output-last-message' ]; then\n"
-                "    printf '%s\\n' 'bounded summary' > \"$argument\"\n"
+                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"completed\",\"project\":\"getbill\",\"skill\":\"research-run\",\"target_id\":null,\"did_work\":true,\"work_kind\":\"research\",\"quality_outcome\":\"validated\",\"next_action\":\"review results\"}' > \"$argument\"\n"
                 "  fi\n"
                 "  previous=\"$argument\"\n"
                 "done\n",
@@ -609,7 +629,7 @@ class CliTest(unittest.TestCase):
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
                 "  if [ \"$previous\" = '--output-last-message' ]; then\n"
-                "    printf '%s\\n' 'bounded summary' > \"$argument\"\n"
+                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"completed\",\"project\":\"getbill\",\"skill\":\"research-run\",\"target_id\":null,\"did_work\":true,\"work_kind\":\"research\",\"quality_outcome\":\"validated\",\"next_action\":\"review results\"}' > \"$argument\"\n"
                 "  fi\n"
                 "  previous=\"$argument\"\n"
                 "done\n"
@@ -699,7 +719,13 @@ class CliTest(unittest.TestCase):
             latest = history[-1]
             self.assertEqual("research-run", latest["skill"])
             self.assertEqual("success", latest["outcome"])
-            self.assertEqual("bounded summary", latest["summary"])
+            self.assertEqual(
+                '{"status":"success","reason":"completed","project":"getbill",'
+                '"skill":"research-run","target_id":null,"did_work":true,'
+                '"work_kind":"research","quality_outcome":"validated",'
+                '"next_action":"review results"}',
+                latest["summary"],
+            )
             self.assertGreaterEqual(latest["duration_ms"], 0)
             self.assertEqual(
                 {
@@ -1045,6 +1071,7 @@ class CliTest(unittest.TestCase):
                     "research-run",
                     "--model",
                     "gpt-5.6-terra",
+                    *LOCKED_METADATA_ARGS,
                     "--summary-file",
                     str(root / "first-summary.txt"),
                     "--history-file",
@@ -1076,6 +1103,7 @@ class CliTest(unittest.TestCase):
                         "research-run",
                         "--model",
                         "gpt-5.6-terra",
+                        *LOCKED_METADATA_ARGS,
                         "--summary-file",
                         str(root / "second-summary.txt"),
                         "--history-file",
@@ -1116,7 +1144,7 @@ class CliTest(unittest.TestCase):
                     [
                         sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
                         "--project", "getbill", "--skill", "research-run",
-                        "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                        "--model", "gpt-5.6-terra", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary.txt"),
                         "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
                     ],
                     cwd=ROOT,
@@ -1150,6 +1178,7 @@ class CliTest(unittest.TestCase):
                     "--project", "getbill",
                     "--skill", "implementer-run",
                     "--model", "gpt-5.6-sol",
+                    *LOCKED_METADATA_ARGS,
                     "--summary-file", str(summary),
                     "--history-file", str(root / "history.jsonl"),
                     "--live-file", str(live),
@@ -1183,7 +1212,7 @@ class CliTest(unittest.TestCase):
                 [
                     sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
                     "--project", "getbill", "--skill", "research-run",
-                    "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                    "--model", "gpt-5.6-terra", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary.txt"),
                     "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
                 ],
                 cwd=ROOT,
@@ -1211,7 +1240,7 @@ class CliTest(unittest.TestCase):
                 [
                     sys.executable, str(helper), "--lock-file", str(root / "role.lock"),
                     "--project", "getbill", "--skill", "research-run",
-                    "--model", "gpt-5.6-terra", "--summary-file", str(root / "summary.txt"),
+                    "--model", "gpt-5.6-terra", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary.txt"),
                     "--history-file", str(root / "history.jsonl"), "--", sys.executable, str(child),
                 ],
                 cwd=ROOT,

@@ -22,6 +22,7 @@ from pitcrew_run_store import RunStateError, RunStore, RunStoreError
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
 NO_SUMMARY = "No bounded final summary was produced."
+STRUCTURED_STATUSES = {"success", "noop", "blocked", "failed"}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -30,6 +31,22 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--project", required=True)
     result.add_argument("--skill", required=True)
     result.add_argument("--model", required=True)
+    result.add_argument(
+        "--reasoning-effort",
+        required=True,
+        choices=("low", "medium", "high", "xhigh"),
+    )
+    result.add_argument(
+        "--routing-mode",
+        required=True,
+        choices=("fixed", "observe"),
+    )
+    result.add_argument("--candidate-model")
+    result.add_argument("--routing-reason")
+    result.add_argument("--target-id")
+    result.add_argument("--gate-decision")
+    result.add_argument("--gate-reason")
+    result.add_argument("--require-structured-result", action="store_true")
     result.add_argument("--summary-file", required=True, type=Path)
     result.add_argument("--history-file", required=True, type=Path)
     result.add_argument("--live-file", type=Path)
@@ -52,6 +69,66 @@ def read_summary(path: Path) -> str:
         return NO_SUMMARY
     decoded = contents.decode("utf-8", errors="replace").strip()
     return decoded or NO_SUMMARY
+
+
+def parse_structured_result(summary: str) -> dict | None:
+    try:
+        value = json.loads(summary)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("status") not in STRUCTURED_STATUSES:
+        return None
+    return value
+
+
+def normalized_outcome(
+    return_code: int,
+    structured_result: dict | None,
+    *,
+    required: bool,
+) -> str:
+    if return_code < 0:
+        return "interrupted"
+    if return_code != 0:
+        return "failed"
+    if structured_result is None:
+        return "failed" if required else "success"
+    if structured_result["status"] in {"noop", "blocked"}:
+        return "noop"
+    return structured_result["status"]
+
+
+def invocation_metadata(args: argparse.Namespace, model_invoked: bool) -> dict:
+    record = {
+        "model": args.model,
+        "model_invoked": model_invoked,
+        "reasoning_effort": args.reasoning_effort,
+        "routing_mode": args.routing_mode,
+    }
+    for argument, field in (
+        ("candidate_model", "candidate_model"),
+        ("routing_reason", "routing_reason"),
+        ("target_id", "target_id"),
+        ("gate_decision", "gate_decision"),
+        ("gate_reason", "gate_reason"),
+    ):
+        value = getattr(args, argument)
+        if value is not None:
+            record[field] = value
+    return record
+
+
+def structured_metadata(result: dict | None) -> dict:
+    if result is None:
+        return {}
+    metadata = {}
+    for field in ("target_id", "work_kind", "quality_outcome"):
+        value = result.get(field)
+        if isinstance(value, str) and value:
+            metadata[field] = value
+    if isinstance(result.get("did_work"), bool):
+        metadata["did_work"] = result["did_work"]
+    return metadata
 
 
 def write_fallback_summary(path: Path, exit_code: int | None) -> None:
@@ -241,7 +318,7 @@ def main() -> int:
                 {
                     "project": args.project,
                     "skill": args.skill,
-                    "model": args.model,
+                    **invocation_metadata(args, False),
                     "started_at": started_at,
                     "finished_at": utc_now(),
                     "duration_ms": 0,
@@ -308,14 +385,14 @@ def main() -> int:
                 except RunStateError:
                     pass
                 except RunStoreError:
-                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, "model": args.model, "started_at": started_at, "finished_at": utc_now(), "duration_ms": 0, "outcome": "failed", "exit_code": None, "summary": NO_SUMMARY})
+                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, **invocation_metadata(args, True), "started_at": started_at, "finished_at": utc_now(), "duration_ms": 0, "outcome": "failed", "exit_code": None, "summary": NO_SUMMARY})
                     print("pitcrew lock: run store is unavailable", file=sys.stderr)
                     return 2
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,
                     "skill": args.skill,
-                    "model": args.model,
+                    **invocation_metadata(args, True),
                     "started_at": started_at,
                     "finished_at": utc_now(),
                     "duration_ms": (
@@ -367,17 +444,18 @@ def main() -> int:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
 
-        if return_code == 0:
-            outcome = "success"
-        elif return_code < 0:
-            outcome = "interrupted"
-        else:
-            outcome = "failed"
+        summary = read_summary(args.summary_file)
+        structured_result = parse_structured_result(summary)
+        outcome = normalized_outcome(
+            return_code,
+            structured_result,
+            required=args.require_structured_result,
+        )
         try:
             write_fallback_summary(args.summary_file, return_code)
             if coordinated_store is not None:
                 try:
-                    if return_code == 0:
+                    if outcome in {"success", "noop"}:
                         coordinated_store.finish(args.run_id, state="succeeded")
                     else:
                         coordinated_store.finish(args.run_id, state="failed", error_code="command_failed", error_message="worker command did not complete")
@@ -385,14 +463,14 @@ def main() -> int:
                     pass
                 except RunStoreError:
                     clear_live_status(args.live_file)
-                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, "model": args.model, "started_at": started_at, "finished_at": utc_now(), "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000, "outcome": "failed", "exit_code": return_code, "summary": read_summary(args.summary_file)})
+                    HistoryStore(args.history_file).append({"project": args.project, "skill": args.skill, **invocation_metadata(args, True), "started_at": started_at, "finished_at": utc_now(), "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000, "outcome": "failed", "exit_code": return_code, "summary": read_summary(args.summary_file), **structured_metadata(structured_result)})
                     print("pitcrew lock: run store is unavailable", file=sys.stderr)
                     return 2
             HistoryStore(args.history_file).append(
                 {
                     "project": args.project,
                     "skill": args.skill,
-                    "model": args.model,
+                    **invocation_metadata(args, True),
                     "started_at": started_at,
                     "finished_at": utc_now(),
                     "duration_ms": (time.monotonic_ns() - started_monotonic) // 1_000_000,
@@ -400,6 +478,7 @@ def main() -> int:
                     "exit_code": return_code,
                     "summary": read_summary(args.summary_file),
                     **({"usage": usage} if usage is not None else {}),
+                    **structured_metadata(structured_result),
                 }
             )
         finally:
