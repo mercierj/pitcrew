@@ -202,6 +202,88 @@ class CoordinatedLockedExecTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
+    def test_scheduled_run_result_schema_has_strict_contract(self):
+        schema = json.loads(
+            (ROOT / "references/run-result.schema.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual("https://json-schema.org/draft/2020-12/schema", schema["$schema"])
+        self.assertEqual("object", schema["type"])
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            {
+                "status", "reason", "project", "skill", "target_id", "did_work",
+                "work_kind", "quality_outcome", "next_action",
+            },
+            set(schema["required"]),
+        )
+        self.assertEqual(
+            ["success", "noop", "blocked", "failed"],
+            schema["properties"]["status"]["enum"],
+        )
+        self.assertEqual(
+            ["string", "null"], schema["properties"]["target_id"]["type"]
+        )
+        self.assertEqual("boolean", schema["properties"]["did_work"]["type"])
+        self.assertEqual(
+            [
+                "none", "implementation", "review", "validation", "investigation",
+                "triage", "research", "security", "product", "operations", "release",
+                "cleanup",
+            ],
+            schema["properties"]["work_kind"]["enum"],
+        )
+
+    def test_runner_passes_schema_only_to_scheduled_codex_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            args_path = root / "codex-args"
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"completed\",\"project\":\"getbill\",\"skill\":\"research-run\",\"target_id\":null,\"did_work\":true,\"work_kind\":\"research\",\"quality_outcome\":\"validated\",\"next_action\":\"review results\"}' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "CODEX_HOME": str(root / ".codex"),
+                "CODEX_BIN": str(fake_codex),
+                "FAKE_CODEX_ARGS": str(args_path),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            from scripts.pitcrew_run_store import RunStore
+            runtime_dir = root / ".codex/pitcrew/getbill"
+            runtime_dir.chmod(0o700)
+            run_store = RunStore(runtime_dir / "runs.sqlite3")
+            run = run_store.enqueue(project="getbill", skill="research-run", source="scheduled")
+            run_store.claim_ready(project="getbill", capacities={"research-run": 1})
+
+            scheduled = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", "--scheduled",
+                "--coordinated-run", run["run_id"], env=env
+            )
+            self.assertEqual(0, scheduled.returncode, scheduled.stderr)
+            args = args_path.read_text(encoding="utf-8").splitlines()
+            schema_index = args.index("--output-schema")
+            self.assertEqual(str(ROOT / "references/run-result.schema.json"), args[schema_index + 1])
+
+            unscheduled = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", env=env
+            )
+            self.assertEqual(0, unscheduled.returncode, unscheduled.stderr)
+            self.assertNotIn("--output-schema", args_path.read_text(encoding="utf-8").splitlines())
+
     def test_model_command_prints_default_and_runtime_override(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()

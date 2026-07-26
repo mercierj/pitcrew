@@ -215,6 +215,9 @@ if "$SCHEDULED"; then
     --color never
     --output-last-message "$SUMMARY_FILE"
   )
+  if "$SCHEDULED"; then
+    CODEX_ARGS+=(--output-schema "$REPO_ROOT/references/run-result.schema.json")
+  fi
 fi
 
 CODEX_ARGS+=("$PROMPT")
