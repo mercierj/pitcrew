@@ -110,7 +110,16 @@ function agentRow(agent, handlers) {
   );
   header.append(
     identity,
-    fact("État local", agent.running ? "En cours" : agent.loaded ? "Planifié" : "Arrêté"),
+    fact(
+      "État local",
+      agent.running
+        ? "En cours"
+        : eventDriven
+          ? "Prêt sur ticket"
+          : agent.loaded
+            ? "Planifié"
+            : "Arrêté",
+    ),
     fact("Dernier passage", formatDate(agent.latest_history?.finished_at)),
     fact("Prochain passage", formatDate(agent.estimated_next_pass)),
   );
@@ -137,23 +146,24 @@ function agentRow(agent, handlers) {
   const latestSummaryText = document.createElement("span");
   latestSummaryText.textContent = agent.latest_history?.summary || "Aucun compte rendu récent.";
   latestSummary.append(latestSummaryLabel, latestSummaryText);
-  const controls = document.createElement("div");
-  controls.className = "agent-controls";
-  controls.append(
-    actionButton("Déclencher", "trigger", agent.skill, handlers),
-    ...(agent.restartable === false ? [] : [
+  const scheduleControls = [];
+  if (!eventDriven) {
+    const controls = document.createElement("div");
+    controls.className = "agent-controls";
+    controls.append(
+      actionButton("Déclencher", "trigger", agent.skill, handlers),
       actionButton("Réinstaller", "restart", agent.skill, handlers),
-    ]),
-    actionButton("Arrêter", "stop", agent.skill, handlers, true),
-  );
+      actionButton("Arrêter", "stop", agent.skill, handlers, true),
+    );
+    scheduleControls.push(handlers.modelControl(agent), controls);
+  }
   details.append(
     summary,
     detailGrid,
-    handlers.modelControl(agent),
+    ...scheduleControls,
     latestSummary,
     usageSection("Dernier passage", agent.latest_usage),
     usageSection("Usage · 7 jours", agent.usage_7d),
-    controls,
   );
   row.append(header, details);
   return row;

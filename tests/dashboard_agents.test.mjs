@@ -200,8 +200,12 @@ test("renderAgents identifies event-driven roles without cadence or schedule con
 
   const rowText = normalizedText(root);
   assert.match(rowText, /Déclenchement Événement ou ticket/u);
+  assert.match(rowText, /État local Prêt sur ticket/u);
   assert.doesNotMatch(rowText, /Fréquence/u);
+  assert.doesNotMatch(rowText, /Déclencher/u);
+  assert.doesNotMatch(rowText, /Arrêter/u);
   assert.doesNotMatch(rowText, /Réinstaller/u);
+  assert.doesNotMatch(rowText, /Changer le modèle/u);
 });
 
 test("renderAgents keeps an opened agent diagnostic open across polling", () => {

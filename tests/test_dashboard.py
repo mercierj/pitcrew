@@ -16,6 +16,7 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
+from scripts.pitcrew_config import EVENT_DRIVEN_ROLES
 from scripts.pitcrew_dashboard import DashboardError, DashboardService
 from scripts.pitcrew_run_store import RunStore, RunStoreError
 
@@ -635,8 +636,13 @@ class DashboardServiceTest(unittest.TestCase):
 
     def test_snapshot_marks_delivery_roles_as_event_driven_without_a_schedule(self):
         self.write_history()
+        periodic_schedule = [
+            entry
+            for entry in schedule_status()
+            if entry["skill"] not in EVENT_DRIVEN_ROLES
+        ]
 
-        snapshot = self.service(FakeRunner()).snapshot()
+        snapshot = self.service(FakeRunner(schedule=periodic_schedule)).snapshot()
         roles = {
             role["skill"]
             for role in (*snapshot["agents"], *snapshot["disabled_roles"])

@@ -701,6 +701,28 @@ class DashboardService:
 
     def snapshot(self) -> dict:
         schedule = self._schedule_entries(force_refresh=True)
+        scheduled_skills = {
+            entry.get("skill")
+            for entry in schedule
+            if isinstance(entry, dict)
+        }
+        configured_agents = self.config.get("agents")
+        event_entries = [
+            {
+                "skill": skill,
+                "interval_seconds": 0,
+                "enabled": True,
+                "reason": "",
+                "label": None,
+                "loaded": True,
+                "running": False,
+                "pid": None,
+            }
+            for skill in sorted(EVENT_DRIVEN_ROLES)
+            if isinstance(configured_agents, dict)
+            and skill in configured_agents
+            and skill not in scheduled_skills
+        ]
         records = self.history(None, None)
         latest_by_skill: dict[str, dict] = {}
         records_by_skill: dict[str, list[dict]] = {}
@@ -710,7 +732,7 @@ class DashboardService:
 
         agents = []
         disabled_roles = []
-        for entry in schedule:
+        for entry in [*schedule, *event_entries]:
             skill = entry["skill"]
             event_driven = skill in EVENT_DRIVEN_ROLES
             latest = latest_by_skill.get(skill)
