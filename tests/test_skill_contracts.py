@@ -122,6 +122,31 @@ class ReferenceContractTest(unittest.TestCase):
             implementer,
         )
 
+    def test_bugfixer_is_exclusive_evidence_first_and_human_gated(self):
+        self.assert_markers(
+            "skills/bugfixer-run/SKILL.md",
+            "references/CHANGE-DELIVERY.md",
+            'label="$AGENT_LABEL"',
+            'state="$STATE_TODO"',
+            "$BUG_LABEL",
+            "$INVESTIGATE_LABEL",
+            "bind-target",
+            "valid red reproduction",
+            "before modifying production code",
+            "same reproduction must turn green",
+            "pitcrew:bugfix:red:v1",
+            "pitcrew:bugfix:green:v1",
+            "pitcrew:bugfix:ready:v1",
+            "pitcrew:bugfix:blocked:v1",
+            "two fix attempts",
+            "reviewer signed off on the current head SHA",
+            "validator passed the current head SHA",
+            "human `go`",
+            "required CI checks are green",
+            "CLOSE_LIFECYCLE",
+            "structured no-op",
+        )
+
     def test_directed_targets_accept_native_github_issues(self):
         self.assert_markers(
             "references/DIRECTED-TARGET.md",
