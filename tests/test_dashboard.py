@@ -1886,21 +1886,20 @@ class DashboardHttpTest(unittest.TestCase):
                 )
                 self.assertEqual(400, status)
 
-    def test_post_launch_ticket_agent_requires_session_and_exact_request(self):
+    def test_ticket_runs_api_requires_session_and_exact_request(self):
         body = json.dumps({
-            "action": "launch-ticket-agent",
             "skill": "implementer-run",
             "target": "https://gitlab.com/getbill1/getbill/-/issues/1",
         }).encode()
         status, _, _ = self.request(
-            "POST", "/api/actions", body, {"Content-Type": "application/json"}
+            "POST", "/api/ticket-runs", body, {"Content-Type": "application/json"}
         )
         self.assertEqual(403, status)
         self.assertEqual([], self.service.calls)
 
         status, _, payload = self.request(
             "POST",
-            "/api/actions",
+            "/api/ticket-runs",
             body,
             {
                 "Content-Type": "application/json",
@@ -1908,21 +1907,25 @@ class DashboardHttpTest(unittest.TestCase):
             },
         )
         self.assertEqual(202, status)
-        self.assertEqual("implementer-run", json.loads(payload)["skill"])
+        self.assertEqual("queued", json.loads(payload)["state"])
         self.assertEqual(
             [("launch_ticket_agent", "implementer-run", "https://gitlab.com/getbill1/getbill/-/issues/1")],
             self.service.calls,
         )
 
         for invalid in (
-            {"action": "launch-ticket-agent", "skill": "implementer-run"},
-            {"action": "launch-ticket-agent", "skill": "implementer-run", "target": ""},
-            {"action": "launch-ticket-agent", "skill": "implementer-run", "target": "x", "extra": "x"},
+            {"skill": "implementer-run"},
+            {"skill": "implementer-run", "target": ""},
+            {"skill": " ", "target": "x"},
+            {"skill": "implementer-run", "target": " \t "},
+            {"skill": "implementer-run", "target": "x", "extra": "x"},
+            {"skill": 3, "target": "x"},
+            {"skill": "implementer-run", "target": 3},
         ):
             with self.subTest(invalid=invalid):
                 status, _, _ = self.request(
                     "POST",
-                    "/api/actions",
+                    "/api/ticket-runs",
                     json.dumps(invalid).encode(),
                     {
                         "Content-Type": "application/json",
@@ -1930,6 +1933,61 @@ class DashboardHttpTest(unittest.TestCase):
                     },
                 )
                 self.assertEqual(400, status)
+
+        status, _, _ = self.request(
+            "POST", "/api/ticket-runs", body,
+            {"Content-Type": "text/plain", "X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(400, status)
+        status, _, _ = self.request(
+            "POST", "/api/ticket-runs", b"x" * 8193,
+            {"Content-Type": "application/json", "X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(413, status)
+
+        status, _, payload = self.request(
+            "POST", "/api/ticket-runs", body,
+            {"Content-Type": "application/json", "X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(202, status)
+        self.assertEqual("run-1", json.loads(payload)["run_id"])
+        self.assertEqual(2, self.service.calls.count(("launch_ticket_agent", "implementer-run", "https://gitlab.com/getbill1/getbill/-/issues/1")))
+
+    def test_ticket_runs_api_maps_rejected_and_unavailable_service(self):
+        headers = {"Content-Type": "application/json", "X-Pitcrew-Session": self.token}
+        rejected = json.dumps({"skill": "unknown", "target": "https://gitlab.com/getbill1/getbill/-/issues/1"}).encode()
+        status, _, _ = self.request("POST", "/api/ticket-runs", rejected, headers)
+        self.assertEqual(403, status)
+        with mock.patch.object(self.service, "launch_ticket_agent", side_effect=RuntimeError("down")):
+            status, _, _ = self.request("POST", "/api/ticket-runs", rejected.replace(b"unknown", b"implementer-run"), headers)
+        self.assertEqual(500, status)
+
+    def test_runs_api_returns_durable_snapshot(self):
+        status, _, _ = self.request("GET", "/api/runs")
+        self.assertEqual(403, status)
+        self.assertEqual([], self.service.calls)
+        status, _, _ = self.request(
+            "GET", "/api/runs?x=1", headers={"X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(403, status)
+        self.assertEqual([], self.service.calls)
+        status, _, payload = self.request(
+            "GET", "/api/runs", headers={"X-Pitcrew-Session": self.token},
+        )
+
+        self.assertEqual(200, status)
+        self.assertEqual("getbill", json.loads(payload)["project"])
+        self.assertEqual([("runs_snapshot",)], self.service.calls)
+
+    def test_ticket_runs_api_rejects_query_without_service_call(self):
+        status, _, _ = self.request(
+            "POST", "/api/ticket-runs?x=1",
+            json.dumps({"skill": "implementer-run", "target": "https://gitlab.com/getbill1/getbill/-/issues/1"}).encode(),
+            {"Content-Type": "application/json", "X-Pitcrew-Session": self.token},
+        )
+
+        self.assertEqual(404, status)
+        self.assertEqual([], self.service.calls)
 
     def test_favicon_probe_returns_empty_no_content(self):
         status, headers, payload = self.request("GET", "/favicon.ico")
