@@ -39,6 +39,7 @@ ASSET_ROUTES = {
     "/assets/history.mjs": ("history.mjs", "text/javascript; charset=utf-8"),
     "/assets/navigation.mjs": ("navigation.mjs", "text/javascript; charset=utf-8"),
     "/assets/pilotage.mjs": ("pilotage.mjs", "text/javascript; charset=utf-8"),
+    "/assets/refresh.mjs": ("refresh.mjs", "text/javascript; charset=utf-8"),
     "/assets/source-store.mjs": ("source-store.mjs", "text/javascript; charset=utf-8"),
     "/assets/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/assets/view-model.mjs": ("view-model.mjs", "text/javascript; charset=utf-8"),
@@ -188,7 +189,19 @@ def create_server(
                 outcome = query.get("outcome", [None])[0]
                 self._service_json(lambda: service.history(skill, outcome))
                 return
+            if parsed.path == "/api/forge-work":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                force_refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
+                self._service_json(
+                    lambda: service.forge_work(force_refresh=force_refresh)
+                )
+                return
             if parsed.path == "/api/gitlab":
+                config = getattr(service, "config", {})
+                providers = config.get("providers") if isinstance(config, dict) else None
+                if not isinstance(providers, dict) or providers.get("forge") != "gitlab":
+                    self._send_json(404, {"error": "not found"})
+                    return
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 force_refresh = query.get("refresh", ["0"])[0] in {"1", "true"}
                 self._service_json(

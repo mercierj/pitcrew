@@ -2100,6 +2100,7 @@ class FakeDashboardService:
     def __init__(self):
         self.calls = []
         self.accepted_controls = []
+        self.config = {"providers": {"forge": "gitlab"}}
 
     def snapshot(self):
         self.calls.append(("snapshot",))
@@ -2112,6 +2113,14 @@ class FakeDashboardService:
     def gitlab_work(self, force_refresh=False):
         self.calls.append(("gitlab", force_refresh))
         return {"degraded": False, "groups": {}}
+
+    def forge_work(self, force_refresh=False):
+        self.calls.append(("forge_work", force_refresh))
+        return {
+            "provider": self.config["providers"]["forge"],
+            "degraded": False,
+            "groups": {},
+        }
 
     def runs_snapshot(self):
         self.calls.append(("runs_snapshot",))
@@ -2289,6 +2298,36 @@ class DashboardHttpTest(unittest.TestCase):
             self.service.calls,
         )
         self.assertNotIn(self.token.encode(), payload)
+
+    def test_api_forge_work_returns_normalized_work(self):
+        status, headers, payload = self.request("GET", "/api/forge-work?refresh=1")
+
+        self.assertEqual(200, status)
+        self.assert_security_headers(headers)
+        self.assertEqual("gitlab", json.loads(payload)["provider"])
+        self.assertEqual([("forge_work", True)], self.service.calls)
+
+    def test_api_gitlab_is_compatibility_alias_only_for_gitlab(self):
+        status, headers, _ = self.request("GET", "/api/gitlab?refresh=1")
+
+        self.assertEqual(200, status)
+        self.assert_security_headers(headers)
+        self.assertEqual([("gitlab", True)], self.service.calls)
+
+        self.service.calls.clear()
+        self.service.config = {"providers": {"forge": "github"}}
+
+        status, headers, payload = self.request("GET", "/api/gitlab?refresh=1")
+        self.assertIn(status, {404, 409})
+        self.assert_security_headers(headers)
+        self.assertEqual({"error": "not found"}, json.loads(payload))
+        self.assertEqual([], self.service.calls)
+
+        status, headers, payload = self.request("GET", "/api/forge-work?refresh=1")
+        self.assertEqual(200, status)
+        self.assert_security_headers(headers)
+        self.assertEqual("github", json.loads(payload)["provider"])
+        self.assertEqual([("forge_work", True)], self.service.calls)
 
     def test_api_decisions_returns_pending_data(self):
         status, _, payload = self.request("GET", "/api/decisions")
