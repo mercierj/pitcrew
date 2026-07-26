@@ -87,13 +87,14 @@ def _required_labels(
         "reviewer-run": (frozenset((agent, review)),),
         "investigate-run": (frozenset((agent, investigate, todo)),),
         "unblock": (frozenset((agent, blocked)),),
-        "stale-sweep": (frozenset((agent, done)),),
+        "stale-sweep": (
+            frozenset((agent, todo)),
+            frozenset((agent, processing)),
+            frozenset((agent, review)),
+            frozenset((agent, blocked)),
+            frozenset((agent, done)),
+        ),
     }
-    if skill == "stale-sweep" and source == "reconcile":
-        return tuple(
-            frozenset((agent, state))
-            for state in (todo, processing, review, blocked, done)
-        )
     return roles.get(skill)
 
 

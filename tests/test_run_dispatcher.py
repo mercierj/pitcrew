@@ -596,6 +596,49 @@ class RunDispatcherTest(unittest.TestCase):
 
                 self.assertEqual(canonical, bound["target"])
 
+    def test_scheduled_stale_sweep_binds_every_open_agent_lifecycle_state(self):
+        for issue_iid, lifecycle in enumerate((
+            "todo-label",
+            "processing-label",
+            "review-label",
+            "blocked-label",
+            "done-label",
+        ), start=12):
+            with self.subTest(lifecycle=lifecycle):
+                canonical = (
+                    "https://gitlab.example/crew/demo/-/issues/"
+                    f"{issue_iid}"
+                )
+                run = self.store.enqueue(
+                    project="demo",
+                    skill="stale-sweep",
+                    source="scheduled",
+                )
+                provider = mock.Mock(
+                    return_value=self.provider_result(
+                        iid=issue_iid,
+                        labels=["agent-label", lifecycle],
+                    )
+                )
+                dispatcher = RunDispatcher(
+                    self.store,
+                    "/runner",
+                    provider_runner=provider,
+                )
+
+                with mock.patch.object(
+                    dispatcher_module,
+                    "load_runtime_config",
+                    return_value=self.gitlab_config(),
+                ):
+                    bound = dispatcher.bind_target(
+                        "demo",
+                        run["run_id"],
+                        canonical,
+                    )
+
+                self.assertEqual(canonical, bound["target"])
+
     def test_bind_same_pretargeted_run_is_idempotent_without_validation(self):
         target = "getbill1/getbill!7"
         run = self.store.enqueue(
