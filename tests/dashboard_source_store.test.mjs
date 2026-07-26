@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {createSourceStore} from "../dashboard/source-store.mjs";
+import {
+  createSourceStore,
+  createStableRenderGuard,
+} from "../dashboard/source-store.mjs";
 
 function deferred() {
   let resolve;
@@ -92,4 +95,42 @@ test("request ordering is independent for each source name", async () => {
   assert.deepEqual((await currentHistoryLoad).data, ["current"]);
   assert.deepEqual((await oldHistoryLoad).data, ["current"]);
   assert.equal(store.get("history").error, null);
+});
+
+test("a degraded payload keeps the last healthy payload as stale", async () => {
+  let now = 1_000;
+  const store = createSourceStore(() => now);
+  await store.load("gitlab", async () => ({degraded: false, groups: {todo: [1]}}));
+
+  now = 2_000;
+  const degraded = await store.load(
+    "gitlab",
+    async () => ({degraded: true, groups: {}}),
+    {
+      validate(payload) {
+        if (payload?.degraded === true) throw new Error("GitLab indisponible");
+      },
+    },
+  );
+
+  assert.deepEqual(degraded.data, {degraded: false, groups: {todo: [1]}});
+  assert.equal(degraded.stale, true);
+  assert.equal(degraded.lastSuccess, 1_000);
+  assert.equal(degraded.error, "GitLab indisponible");
+});
+
+test("stable render guard avoids a second DOM replacement for equal state", () => {
+  const guardedRender = createStableRenderGuard();
+  const root = {
+    replacements: [],
+    replaceChildren(value) {
+      this.replacements.push(value);
+    },
+  };
+  const render = (value) => root.replaceChildren(value.groups.todo[0]);
+
+  assert.equal(guardedRender({groups: {todo: [1]}}, render), true);
+  assert.equal(guardedRender({groups: {todo: [1]}}, render), false);
+  assert.equal(guardedRender({groups: {todo: [2]}}, render), true);
+  assert.deepEqual(root.replacements, [1, 2]);
 });

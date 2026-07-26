@@ -240,6 +240,14 @@ const actionDescriptors = (entry, handlers) => {
   return asArray(actions).filter((action) => action && typeof action === "object");
 };
 
+export function renderActionFeedback(root, state) {
+  if (!root) return;
+  root.className = state
+    ? `action-state action-state-${state.kind}`
+    : "action-state";
+  root.textContent = state?.message || state?.text || "";
+}
+
 export function renderItemDetail(entry, handlers = {}) {
   const resource = resourceOf(entry) || {};
   const kind = kindOf(entry, resource);

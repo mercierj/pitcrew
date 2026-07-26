@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 
 import {createDetailPanel} from "../dashboard/detail-panel.mjs";
-import {preserveFocus, renderItemDetail} from "../dashboard/pilotage.mjs";
+import {
+  preserveFocus,
+  renderActionFeedback,
+  renderItemDetail,
+} from "../dashboard/pilotage.mjs";
 
 class Focusable extends EventTarget {
   constructor() {
@@ -135,6 +139,18 @@ test("ordinary detail actions remain repeatable", async () => {
   assert.equal(button.disabled, false);
   assert.equal(button.textContent, "Approuver");
   globalThis.document = originalDocument;
+});
+
+test("action feedback renders success and error states with safe DOM text", () => {
+  const root = new Element("p");
+
+  renderActionFeedback(root, {kind: "success", message: "Action acceptée."});
+  assert.equal(root.className, "action-state action-state-success");
+  assert.equal(root.textContent, "Action acceptée.");
+
+  renderActionFeedback(root, {kind: "error", message: "Action refusée."});
+  assert.equal(root.className, "action-state action-state-error");
+  assert.equal(root.textContent, "Action refusée.");
 });
 
 test("polling render preserves a focused control by its stable key", () => {

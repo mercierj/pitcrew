@@ -2723,6 +2723,26 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.assertIn("() => api.action({action})", source)
             self.assertLess(source.index(f'"{key}"'), source.index("api.action({action})"))
 
+    def test_global_and_preprod_feedback_is_visible_and_reapplied_after_refresh(self):
+        for identifier in ("global-action-status", "preprod-review-action-status"):
+            self.assertRegex(
+                self.html,
+                rf'id="{identifier}"[^>]+aria-live="polite"',
+            )
+
+        self.assertIn("renderActionFeedback", self.javascript)
+        self.assertIn("renderResourceActionState(key)", self.javascript)
+        overview = self.javascript.split(
+            "function renderOverview",
+            1,
+        )[1].split("function formatElapsed", 1)[0]
+        preprod = self.javascript.split(
+            "function renderPreprodReview",
+            1,
+        )[1].split("async function runPreprodReviewAction", 1)[0]
+        self.assertIn('renderResourceActionState("global:crew")', overview)
+        self.assertIn('renderResourceActionState("preprod:review")', preprod)
+
     def test_javascript_serializes_controls_per_skill(self):
         agents = self.modules["agents.mjs"]
         self.assertIn("const pendingSkills = new Set();", self.javascript)

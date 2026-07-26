@@ -1,8 +1,16 @@
 import {createNavigation} from "./navigation.mjs";
 import {createDetailPanel} from "./detail-panel.mjs";
-import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
+import {
+  renderActionFeedback,
+  renderActionList,
+  renderItemDetail,
+  renderPilotage,
+} from "./pilotage.mjs";
 import {createApi} from "./api.mjs";
-import {createSourceStore} from "./source-store.mjs";
+import {
+  createSourceStore,
+  createStableRenderGuard,
+} from "./source-store.mjs";
 import {renderAgents as renderAgentRows} from "./agents.mjs";
 import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
 import {
@@ -32,6 +40,7 @@ const elements = {
   globalStopButton: document.querySelector("#global-stop-button"),
   globalResumeButton: document.querySelector("#global-resume-button"),
   globalState: document.querySelector("#global-state"),
+  globalActionStatus: document.querySelector("#global-action-status"),
   operationalStatus: document.querySelector("#operational-status"),
   pilotageSourceState: document.querySelector("#pilotage-source-state"),
   agentsSourceState: document.querySelector("#agents-source-state"),
@@ -44,6 +53,7 @@ const elements = {
   preprodReviewReport: document.querySelector("#preprod-review-report"),
   preprodReviewTrigger: document.querySelector("#preprod-review-trigger"),
   preprodReviewStop: document.querySelector("#preprod-review-stop"),
+  preprodReviewActionStatus: document.querySelector("#preprod-review-action-status"),
   preprodReviewHistory: document.querySelector("#preprod-review-history-list"),
   globalBanner: document.querySelector("#global-banner"),
   overviewUsageNote: document.querySelector("#overview-usage-note"),
@@ -86,6 +96,7 @@ const elements = {
 
 const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, preprod: {}, work: {}};
 const sourceStore = createSourceStore();
+const renderGitLabWhenChanged = createStableRenderGuard();
 const coordinateHistoryRequest = createLatestRequestCoordinator();
 const detailController = createDetailPanel(
   elements.detailPanel,
@@ -135,11 +146,18 @@ function setText(element, value) {
 }
 
 function setActionState(key, kind, message) {
-  actionStates.set(key, {kind, message, text: message});
-  if (elements.detailActionStatus) {
-    elements.detailActionStatus.className = `action-state action-state-${kind}`;
-    elements.detailActionStatus.textContent = message;
-  }
+  const state = {kind, message, text: message};
+  actionStates.set(key, state);
+  renderActionFeedback(elements.detailActionStatus, state);
+  renderResourceActionState(key);
+}
+
+function renderResourceActionState(key) {
+  const targets = {
+    "global:crew": elements.globalActionStatus,
+    "preprod:review": elements.preprodReviewActionStatus,
+  };
+  renderActionFeedback(targets[key], actionStates.get(key));
 }
 
 async function runAction(key, messages, operation) {
@@ -221,6 +239,7 @@ function renderPreprodReview(review) {
     elements.preprodReviewStop.hidden = !running;
     elements.preprodReviewStop.disabled = preprodReviewSubmitting;
   }
+  renderResourceActionState("preprod:review");
 
   const reportRoot = elements.preprodReviewReport;
   if (!reportRoot) return;
@@ -480,6 +499,7 @@ function renderOverview(snapshot) {
     elements.globalBanner.classList.add("banner-success");
     setText(elements.globalBanner, "Les automatisations locales ne signalent aucun incident.");
   }
+  renderResourceActionState("global:crew");
 }
 
 function formatElapsed(value) {
@@ -810,6 +830,11 @@ function upsertRun(run) {
 }
 
 function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
+  let shouldRender = false;
+  renderGitLabWhenChanged({work, runs}, () => {
+    shouldRender = true;
+  });
+  if (!shouldRender) return false;
   if (!work) return;
   elements.gitlabGroups.replaceChildren();
   renderMergeRequests(work);
@@ -878,6 +903,7 @@ function renderGitLab(work = latestGitLabWork, runs = latestRuns) {
     elements.gitlabGroups.append(column);
   });
   syncDetailTicketAction();
+  return true;
 }
 
 function renderTicketActionState(button, actions, issue, run) {
@@ -1444,6 +1470,11 @@ async function refreshGitLab({manual = false, force = false} = {}) {
   const state = await sourceStore.load(
     "gitlab",
     () => api.get(manual || force ? "/api/gitlab?refresh=1" : "/api/gitlab"),
+    {
+      validate(payload) {
+        if (payload?.degraded === true) throw new Error("GitLab indisponible");
+      },
+    },
   );
   if (state.data) {
     sources.work = state.data;

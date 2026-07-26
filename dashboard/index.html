@@ -21,6 +21,7 @@
         <span id="global-state" class="global-state">État global : en fonctionnement</span>
         <button id="global-stop-button" class="button button-danger" type="button">Tout arrêter</button>
         <button id="global-resume-button" class="button button-primary" type="button" hidden>Réactiver les agents</button>
+        <p id="global-action-status" class="action-state" aria-live="polite"></p>
       </div>
     </div>
   </header>
@@ -132,6 +133,7 @@
             <button id="preprod-review-trigger" class="button button-primary" type="button">Lancer la revue complète</button>
             <button id="preprod-review-stop" class="button button-danger" type="button" hidden>Arrêter la revue</button>
           </div>
+          <p id="preprod-review-action-status" class="action-state" aria-live="polite"></p>
           <div id="preprod-review-report" class="preprod-review-report" aria-live="polite"></div>
           <section id="preprod-review-history" aria-labelledby="preprod-review-history-title">
             <h3 id="preprod-review-history-title">Historique des revues</h3>
