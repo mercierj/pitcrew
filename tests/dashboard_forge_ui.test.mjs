@@ -8,28 +8,22 @@ const [html, javascript, styles] = await Promise.all([
   readFile(new URL("../dashboard/styles.css", import.meta.url), "utf8"),
 ]);
 
-test("dashboard exposes provider-neutral forge work regions", () => {
+test("dashboard keeps forge data in the Workflow kanban only", () => {
   for (const id of ["forge-work", "forge-groups", "change-list", "changes-title"]) {
-    assert.match(html, new RegExp(`id="${id}"`));
+    assert.doesNotMatch(html, new RegExp(`id="${id}"`));
   }
-  for (const legacy of ["gitlab-work", "gitlab-groups", "merge-request-list"]) {
-    assert.doesNotMatch(html, new RegExp(`id="${legacy}"`));
-  }
-  assert.match(html, /Travail GitHub · GitLab/);
-  assert.match(javascript, /elements\.forgeWork\.hidden = false/);
+  assert.doesNotMatch(html, /Travail GitHub · GitLab/);
+  assert.match(javascript, /const forgePath = "\/api\/forge-work"/);
+  assert.match(javascript, /sources\.work = state\.data/);
+  assert.match(javascript, /renderPilotageView\(\);/);
 });
 
-test("dashboard renders normalized issues, changes, evidence and durable run state", () => {
+test("dashboard keeps normalized forge work feeding the Workflow kanban", () => {
   for (const token of [
     "fetchJson(forgePath)",
-    "renderForgeWork",
-    "related_change_urls",
-    "issue.bugfix.reproduction",
-    "issue.bugfix.verification",
-    "issue.bugfix.blocked_reason",
-    "change.reference",
-    "change.kind",
-    "agentAction.run_state",
+    "renderPilotageView",
+    "sources.work = state.data",
+    "latestForgeWork = state.data",
   ]) {
     assert.match(javascript, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
@@ -39,19 +33,14 @@ test("dashboard renders normalized issues, changes, evidence and durable run sta
   assert.match(javascript, /const forgePath = "\/api\/forge-work"/);
 });
 
-test("provider-neutral changes retain GitLab manual merge only as a capability", () => {
-  assert.match(javascript, /change\.kind === "merge_request"/);
-  assert.match(javascript, /work\.provider === "gitlab"/);
-  assert.match(javascript, /action: "merge-merge-request"/);
-  for (const selector of [
-    ".changes-panel",
-    ".change-list",
-    ".change-card",
-    ".change-branches",
-    ".change-meta",
-    ".change-actions",
+test("dashboard has no duplicate forge renderer or change cards", () => {
+  for (const token of [
+    "renderForgeWork",
+    "renderChanges",
+    "changes-panel",
+    "change-list",
+    "change-card",
   ]) {
-    assert.match(styles, new RegExp(selector.replace(".", "\\.")));
+    assert.doesNotMatch(`${javascript}\n${styles}`, new RegExp(token));
   }
-  assert.doesNotMatch(styles, /\.merge-request-(?:list|card|branches|meta|actions)/);
 });

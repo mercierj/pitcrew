@@ -321,13 +321,6 @@ section {
 .proposal-meta { color: var(--muted); font-size: .85rem; font-weight: 700; }
 .proposal-detail { padding: 8px 0; }
 .proposal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.changes-panel { margin: 18px 0 24px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
-.change-list { display: grid; gap: 12px; }
-.change-card { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-raised, var(--surface)); }
-.change-card h4 { margin: 0 0 8px; }
-.change-branches { margin: 0 0 6px; font-weight: 800; overflow-wrap: anywhere; }
-.change-meta { margin: 0; color: var(--muted); font-size: .88rem; }
-.change-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .bugfix-evidence { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: .88rem; }
 
 .decision-ticket,

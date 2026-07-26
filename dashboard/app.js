@@ -10,10 +10,7 @@ import {
   describeFailedAgents,
 } from "./pilotage.mjs";
 import {createApi} from "./api.mjs";
-import {
-  createSourceStore,
-  createStableRenderGuard,
-} from "./source-store.mjs";
+import {createSourceStore} from "./source-store.mjs";
 import {renderAgents as renderAgentRows} from "./agents.mjs";
 import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
 import {
@@ -70,11 +67,6 @@ const elements = {
   historyFilters: document.querySelector("#history-filters"),
   historySkill: document.querySelector("#history-skill"),
   historyOutcome: document.querySelector("#history-outcome"),
-  forgeWork: document.querySelector("#forge-work"),
-  forgeGroups: document.querySelector("#forge-groups"),
-  forgeState: document.querySelector("#forge-state"),
-  changeList: document.querySelector("#change-list"),
-  changesState: document.querySelector("#changes-state"),
   actionQueueCount: document.querySelector("#action-queue-count"),
   actionQueueList: document.querySelector("#action-queue-list"),
   actionQueueMore: document.querySelector("#action-queue-more"),
@@ -111,7 +103,6 @@ const sources = {
   runs: {runs: [], capacity: {}, has_active: false},
 };
 const sourceStore = createSourceStore();
-const renderForgeWorkWhenChanged = createStableRenderGuard();
 const coordinateHistoryRequest = createLatestRequestCoordinator();
 const detailController = createDetailPanel(
   elements.detailPanel,
@@ -138,14 +129,6 @@ const healthLabels = {
   failed: "Échec",
   stopped: "Arrêté",
   unknown: "Inconnu",
-};
-
-const lifecycleLabels = {
-  todo: "À faire",
-  processing: "En cours",
-  review: "En revue",
-  blocked: "Bloqué",
-  done: "Terminé",
 };
 
 let refreshPromise = null;
@@ -878,107 +861,6 @@ function upsertRun(run) {
   };
 }
 
-function renderForgeWork(work = latestForgeWork, runs = latestRuns) {
-  let shouldRender = false;
-  renderForgeWorkWhenChanged({work, runs}, () => {
-    shouldRender = true;
-  });
-  if (!shouldRender) return false;
-  if (!work) return;
-  elements.forgeWork.hidden = false;
-  elements.forgeGroups.replaceChildren();
-  renderChanges(work);
-  const providerLabel = work?.provider === "github" ? "GitHub" : work?.provider === "gitlab" ? "GitLab" : "Forge";
-  if (work?.degraded) {
-    setText(elements.forgeState, `${providerLabel} indisponible, données locales maintenues`);
-  } else {
-    setText(elements.forgeState, `${providerLabel} · actualisé ${formatDate(work?.last_successful_refresh)}`);
-  }
-  const groups = work?.groups && typeof work.groups === "object" ? work.groups : {};
-  const targetRuns = runsByTarget(runs);
-  Object.entries(lifecycleLabels).forEach(([state, label]) => {
-    const column = document.createElement("article");
-    column.className = "work-column";
-    const heading = document.createElement("h3");
-    const issues = Array.isArray(groups[state]) ? groups[state] : [];
-    heading.textContent = `${label} · ${issues.length}`;
-    column.append(heading);
-
-    issues.forEach((issue) => {
-      const card = document.createElement("div");
-      card.className = "work-item";
-      const issueLink = safeExternalLink(
-        issue.canonical_url,
-        issue.title || `Ticket ${issue.reference || `#${issue.number || "?"}`}`,
-      );
-      if (issueLink) {
-        card.append(issueLink);
-      } else {
-        const title = document.createElement("strong");
-        title.textContent = issue.title || "Ticket sans titre";
-        card.append(title);
-      }
-      const metadata = document.createElement("p");
-      metadata.textContent = [issue.route, issue.source].filter(Boolean).join(" · ") || "Sans routage";
-      card.append(metadata);
-
-      const related = Array.isArray(issue.related_change_urls) ? issue.related_change_urls : [];
-      related.forEach((url, index) => {
-        const link = safeExternalLink(url, `Changement lié ${index + 1}`);
-        if (link) {
-          card.append(link);
-        }
-      });
-      if (issue.bugfix && typeof issue.bugfix === "object") {
-        const evidence = document.createElement("ul");
-        evidence.className = "bugfix-evidence";
-        const evidenceRows = [
-          ["Reproduction", issue.bugfix.reproduction],
-          ["Vérification", issue.bugfix.verification],
-          ["Blocage", issue.bugfix.blocked_reason],
-        ].filter(([, value]) => typeof value === "string" && value.trim());
-        evidenceRows.forEach(([label, value]) => {
-          const row = document.createElement("li");
-          row.textContent = `${label} : ${value}`;
-          evidence.append(row);
-        });
-        if (evidenceRows.length) card.append(evidence);
-      }
-      const agentAction = issue.agent_action;
-      if (agentAction && typeof agentAction === "object") {
-        const actions = document.createElement("div");
-        actions.className = "ticket-agent-actions";
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "button button-primary";
-        button.textContent = agentAction.label || "Lancer l’agent";
-        const target = typeof agentAction.target === "string" ? agentAction.target : "";
-        const run = targetRuns.get(target)
-          || issue.active_run
-          || (["queued", "running"].includes(agentAction.run_state)
-            ? {state: agentAction.run_state, skill: agentAction.skill}
-            : null);
-        const pending = pendingTicketActions.has(target);
-        button.disabled = !agentAction.available || pending || run?.state === "queued" || run?.state === "running" || !target;
-        button.addEventListener("click", () => launchTicketAgent(issue, button, actions));
-        actions.append(button);
-        if (!agentAction.available) {
-          const unavailable = document.createElement("span");
-          unavailable.className = "ticket-agent-unavailable";
-          unavailable.textContent = agentAction.unavailable_reason || "Agent indisponible";
-          actions.append(unavailable);
-        }
-        renderTicketActionState(button, actions, issue, run);
-        card.append(actions);
-      }
-      column.append(card);
-    });
-    elements.forgeGroups.append(column);
-  });
-  syncDetailTicketAction();
-  return true;
-}
-
 function renderTicketActionState(button, actions, issue, run) {
   const agentAction = issue?.agent_action;
   const target = typeof agentAction?.target === "string" ? agentAction.target : "";
@@ -1043,7 +925,8 @@ async function launchTicketAgent(issue, button, actions) {
     renderTicketActionState(button, actions, issue, runsByTarget(latestRuns).get(target));
     const run = await operation;
     upsertRun({...run, skill, target});
-    renderForgeWork(latestForgeWork, latestRuns);
+    renderPilotageView();
+    syncDetailTicketAction();
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
     return true;
   } catch {
@@ -1051,63 +934,9 @@ async function launchTicketAgent(issue, button, actions) {
     return false;
   } finally {
     pendingTicketActions.delete(target);
-    renderForgeWork(latestForgeWork, latestRuns);
+    renderPilotageView();
+    syncDetailTicketAction();
   }
-}
-
-function renderChanges(work) {
-  if (!elements.changeList) return;
-  elements.changeList.replaceChildren();
-  const changes = Array.isArray(work?.changes) ? work.changes : [];
-  setText(elements.changesState, changes.length ? `${changes.length} ouvert(s)` : "Aucun changement ouvert");
-  if (!changes.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = work?.degraded ? "Données de forge indisponibles." : "Aucun changement ouvert.";
-    elements.changeList.append(empty);
-    return;
-  }
-  changes.forEach((change) => {
-    const card = document.createElement("article");
-    card.className = "change-card";
-    const title = document.createElement("h4");
-    const link = safeExternalLink(
-      change.canonical_url,
-      `${change.title || "Changement sans titre"} · ${change.reference || `#${change.number || "?"}`}`,
-    );
-    if (link) title.append(link);
-    else title.textContent = `${change.title || "Changement sans titre"} · ${change.reference || `#${change.number || "?"}`}`;
-    card.append(title);
-
-    const branches = document.createElement("p");
-    branches.className = "change-branches";
-    branches.textContent = `${change.source_branch || "Branche source inconnue"} → ${change.target_branch || "Branche cible inconnue"}`;
-    card.append(branches);
-
-    const metadata = document.createElement("p");
-    metadata.className = "change-meta";
-    metadata.textContent = [
-      change.kind === "pull_request" ? "Pull request" : "Merge request",
-      change.author ? `Auteur : ${change.author}` : "Auteur : inconnu",
-      `Vérifications : ${change.checks_status || "inconnues"}`,
-    ].join(" · ");
-    card.append(metadata);
-
-    const actions = document.createElement("div");
-    actions.className = "change-actions";
-    if (work.provider === "gitlab" && change.kind === "merge_request") {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "button button-danger";
-      button.textContent = "Fusionner et supprimer la branche";
-      button.disabled = mergeSubmitting;
-      button.addEventListener("click", () => mergeMergeRequest(change, work));
-      actions.append(button);
-    }
-    appendActionState(actions, `${change.kind}:${change.canonical_url || change.number}`);
-    if (actions.childNodes.length) card.append(actions);
-    elements.changeList.append(card);
-  });
 }
 
 async function mergeMergeRequest(change, work) {
@@ -1120,7 +949,7 @@ async function mergeMergeRequest(change, work) {
   const sourceBranch = change.source_branch || "la branche source";
   if (!window.confirm(`Fusionner ${change.reference} dans ${change.target_branch || "la branche cible"} et supprimer ${sourceBranch} ?`)) return;
   mergeSubmitting = true;
-  renderChanges(work);
+  syncDetailTicketAction();
   setText(elements.operationalStatus, `Fusion de la MR ${change.reference} en cours.`);
   try {
     const result = await runAction(
@@ -1143,7 +972,7 @@ async function mergeMergeRequest(change, work) {
   } catch {
     setText(elements.operationalStatus, `Impossible de fusionner la MR ${change.reference}.`);
     mergeSubmitting = false;
-    renderChanges(work);
+    syncDetailTicketAction();
   }
 }
 
@@ -1567,7 +1396,6 @@ async function refreshForgeWork({manual = false, force = false} = {}) {
   if (state.data) {
     sources.work = state.data;
     latestForgeWork = state.data;
-    renderForgeWork(state.data, latestRuns);
   }
   if (!state.error) {
     await sourceStore.load(
@@ -1577,6 +1405,7 @@ async function refreshForgeWork({manual = false, force = false} = {}) {
   }
   if (!state.error) lastForgeRefresh = now;
   renderPilotageView();
+  syncDetailTicketAction();
   renderSourceStates();
   return state;
 }
@@ -1656,8 +1485,8 @@ async function refresh({ manual = false, skipForge = false } = {}) {
       if (!skipForge && !manual && becameTerminal) {
         await refreshForgeWork({force: true});
       }
-      renderForgeWork(latestForgeWork, latestRuns);
       renderPilotageView();
+      syncDetailTicketAction();
       renderSourceStates();
       const hasErrors = [
         "snapshot",

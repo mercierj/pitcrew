@@ -8,10 +8,10 @@ kanban (`Workflow`), qui est la vue de suivi unique.
 
 ## Décision
 
-Retirer le bloc visuel `#forge-work` et son rendu dédié (`renderForgeWork`,
-`renderChanges`, et l'action locale de fusion de merge request). Conserver le
-chargement de `/api/forge-work` et le modèle `sources.work`, car le kanban
-principal les consomme via `renderPilotageView`.
+Retirer le bloc visuel `#forge-work` et son rendu dédié (`renderForgeWork` et
+`renderChanges`). Conserver le chargement de `/api/forge-work` et le modèle
+`sources.work`, car le kanban principal les consomme via `renderPilotageView`.
+L'action locale de fusion reste dans le détail d'un ticket du kanban principal.
 
 Le libellé général du header sera ajusté pour ne plus présenter GitHub · GitLab
 comme une section de dashboard distincte.
@@ -25,8 +25,7 @@ comme une section de dashboard distincte.
 
 ## Vérification
 
-- Les assets ne contiennent plus `#forge-work`, les cartes de changements ou
-  l'action de fusion manuelle.
+- Les assets ne contiennent plus `#forge-work` ni les cartes de changements.
 - Le chargement forge reste présent et `renderPilotageView` reçoit toujours
   `sources.work`.
 - Les tests du dashboard et du modèle de workflow passent.
