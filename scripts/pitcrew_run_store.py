@@ -102,6 +102,25 @@ class RunStore:
                 raise RunStoreError("database ancestor is not a directory") from error
             raise error
 
+    @staticmethod
+    def _validate_ancestor(metadata: os.stat_result) -> None:
+        # Same-UID processes can already replace the user's private database,
+        # so traversal trusts only root and the current UID.
+        if metadata.st_uid not in {0, os.getuid()}:
+            raise RunStoreError("database ancestor owner is not trusted")
+        if (
+            metadata.st_mode & 0o022
+            and not metadata.st_mode & stat.S_ISVTX
+        ):
+            raise RunStoreError(
+                "database ancestor is writable without sticky bit"
+            )
+
+    @staticmethod
+    def _validate_opened_child(metadata: os.stat_result) -> None:
+        if metadata.st_uid not in {0, os.getuid()}:
+            raise RunStoreError("database ancestor owner is not trusted")
+
     def _open_parent(self, *, create: bool) -> int:
         absolute, _ = self._database_location()
         flags = (
@@ -114,6 +133,7 @@ class RunStore:
         try:
             current_fd = os.open(absolute.anchor, flags)
             for part in absolute.parent.parts[1:]:
+                self._validate_ancestor(os.fstat(current_fd))
                 try:
                     child_fd = self._open_directory(current_fd, part)
                 except FileNotFoundError:
@@ -124,10 +144,18 @@ class RunStore:
                     except FileExistsError:
                         pass
                     child_fd = self._open_directory(current_fd, part)
+                try:
+                    self._validate_opened_child(os.fstat(child_fd))
+                except (OSError, RunStoreError):
+                    os.close(child_fd)
+                    raise
                 os.close(current_fd)
                 current_fd = child_fd
             metadata = os.fstat(current_fd)
-            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            if (
+                metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
                 raise RunStoreError("database parent must be private")
             result = current_fd
             current_fd = None
@@ -148,8 +176,8 @@ class RunStore:
             raise RunStoreError("database path is invalid")
         try:
             if sys.platform.startswith("linux"):
-                descriptor_path = f"/proc/self/fd/{parent_fd}"
-                parent = Path(os.readlink(descriptor_path))
+                parent = Path(f"/proc/self/fd/{parent_fd}")
+                anchored = os.stat(parent)
             elif sys.platform == "darwin":
                 command = getattr(fcntl, "F_GETPATH", 50)
                 if not isinstance(command, int):
@@ -158,10 +186,10 @@ class RunStore:
                 if not isinstance(raw_path, bytes):
                     raise RunStoreError("stable parent path is unavailable")
                 parent = Path(os.fsdecode(raw_path.split(b"\0", 1)[0]))
+                anchored = os.stat(parent, follow_symlinks=False)
             else:
                 raise RunStoreError("stable parent path is unavailable")
             descriptor = os.fstat(parent_fd)
-            anchored = os.stat(parent, follow_symlinks=False)
         except RunStoreError:
             raise
         except (OSError, ValueError) as error:

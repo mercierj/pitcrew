@@ -8,6 +8,7 @@ from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.pitcrew_run_store import (
     ACTIVE_STATES,
@@ -581,6 +582,32 @@ class RunStoreTest(unittest.TestCase):
         finally:
             os.close(parent_fd)
 
+    def test_linux_anchored_database_path_uses_proc_fd_directly(self):
+        parent_fd = self.store._open_parent(create=False)
+        descriptor = os.fstat(parent_fd)
+        try:
+            with (
+                patch("scripts.pitcrew_run_store.sys.platform", "linux"),
+                patch(
+                    "scripts.pitcrew_run_store.os.readlink",
+                    side_effect=AssertionError("must not resolve /proc fd"),
+                ),
+                patch(
+                    "scripts.pitcrew_run_store.os.stat",
+                    return_value=descriptor,
+                ),
+            ):
+                anchored = self.store._anchored_database_path(
+                    parent_fd,
+                    self.path.name,
+                )
+            self.assertEqual(
+                Path(f"/proc/self/fd/{parent_fd}/{self.path.name}"),
+                anchored,
+            )
+        finally:
+            os.close(parent_fd)
+
     def test_symlink_and_private_permissions_are_enforced(self):
         target = Path(self.temp.name).resolve() / "target.sqlite"
         self.path.unlink()
@@ -604,6 +631,51 @@ class RunStoreTest(unittest.TestCase):
         insecure.mkdir(mode=0o755)
         with self.assertRaisesRegex(RunStoreError, "private"):
             RunStore(insecure / "runs.sqlite")
+
+    def test_writable_nonsticky_ancestor_is_rejected_before_db_creation(self):
+        for mode in (0o770, 0o777):
+            with self.subTest(mode=oct(mode)):
+                ancestor = (
+                    Path(self.temp.name).resolve()
+                    / f"writable-{mode:o}"
+                )
+                ancestor.mkdir(mode=mode)
+                ancestor.chmod(mode)
+                database = ancestor / "private" / "runs.sqlite"
+
+                with self.assertRaisesRegex(RunStoreError, "ancestor"):
+                    RunStore(database)
+
+                self.assertFalse(database.parent.exists())
+
+    def test_safe_sticky_ancestor_is_accepted(self):
+        ancestor = Path(self.temp.name).resolve() / "sticky"
+        ancestor.mkdir(mode=0o700)
+        ancestor.chmod(0o1777)
+        database = ancestor / "private" / "runs.sqlite"
+
+        store = RunStore(database)
+
+        self.assertIsNotNone(store)
+        self.assertTrue(database.exists())
+        self.assertEqual(0o700, stat.S_IMODE(database.parent.stat().st_mode))
+
+    def test_unsupported_platform_fails_before_sqlite_connect(self):
+        calls = []
+
+        def factory(database, **kwargs):
+            calls.append((database, kwargs))
+            return sqlite3.connect(database, **kwargs)
+
+        database = Path(self.temp.name).resolve() / "unsupported.sqlite"
+        with patch("scripts.pitcrew_run_store.sys.platform", "win32"):
+            with self.assertRaisesRegex(
+                RunStoreError,
+                "stable parent path is unavailable",
+            ):
+                RunStore(database, connect_factory=factory)
+
+        self.assertEqual([], calls)
 
     def test_non_immediate_ancestor_symlink_is_refused(self):
         actual = Path(self.temp.name).resolve() / "actual"
