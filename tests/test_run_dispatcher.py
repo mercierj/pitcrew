@@ -44,7 +44,7 @@ class RunDispatcherTest(unittest.TestCase):
         stale = self.enqueue("stale")
         good = self.enqueue("good")
         self.dispatcher.target_validator = lambda row: row["target"] != "stale"
-        result = self.dispatcher.drain("demo", {"qa-run": 2})
+        result = self.dispatcher.drain("demo", {"qa-run": 1})
         self.assertEqual("cancelled", self.store.get(stale["run_id"])["state"])
         self.assertEqual([good["run_id"]], [row["run_id"] for row in result["spawned"]])
 
@@ -56,7 +56,7 @@ class RunDispatcherTest(unittest.TestCase):
             if calls == 1: raise OSError("nope")
             return FakeProcess(99)
         dispatcher = RunDispatcher(self.store, "/runner", process_factory=popen)
-        dispatcher.drain("demo", {"qa-run": 2})
+        dispatcher.drain("demo", {"qa-run": 1})
         self.assertEqual(("failed", "spawn_failed"), (self.store.get(first["run_id"])["state"], self.store.get(first["run_id"])["error_code"]))
         self.assertEqual("running", self.store.get(second["run_id"])["state"])
 
@@ -140,6 +140,12 @@ class RunDispatcherTest(unittest.TestCase):
         with mock.patch("sys.stderr", error):
             self.assertEqual(2, dispatcher_module.main(["enqueue", "--project", "demo", "--skill", "qa-run"], runtime))
         self.assertIn("pitcrew dispatcher:", error.getvalue())
+
+    def test_cli_argument_errors_are_one_safe_line(self):
+        error = StringIO()
+        with mock.patch("sys.stderr", error):
+            self.assertEqual(2, dispatcher_module.main(["enqueue", "--skill", "qa-run"]))
+        self.assertEqual("pitcrew dispatcher: invalid arguments\n", error.getvalue())
 
     def test_cli_real_runtime_and_global_stop(self):
         root = Path(self.temp.name).resolve() / "codex"

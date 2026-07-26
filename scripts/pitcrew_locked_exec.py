@@ -380,7 +380,7 @@ def main() -> int:
                     if return_code == 0:
                         coordinated_store.finish(args.run_id, state="succeeded")
                     else:
-                        coordinated_store.finish(args.run_id, state="failed", error_code="interrupted" if return_code < 0 else "command_failed", error_message="worker command did not complete")
+                        coordinated_store.finish(args.run_id, state="failed", error_code="command_failed", error_message="worker command did not complete")
                 except RunStateError:
                     pass
                 except RunStoreError:

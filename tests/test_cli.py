@@ -123,7 +123,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
             self.assertNotEqual(0, self.helper(root, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"]).returncode)
-            self.assertEqual("interrupted", store.get(run["run_id"])["error_code"])
+            self.assertEqual("command_failed", store.get(run["run_id"])["error_code"])
             race = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two"); store.claim_ready(project="demo", capacities={"qa-run": 1})
             process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
             time.sleep(.05); store.finish(race["run_id"], state="cancelled"); process.communicate(timeout=2)

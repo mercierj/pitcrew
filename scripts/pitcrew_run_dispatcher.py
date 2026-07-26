@@ -30,36 +30,41 @@ class RunDispatcher:
         self.target_validator, self.killpg, self.sleep = target_validator, killpg, sleep
 
     def drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, list[dict[str, Any]]]:
-        claimed = self.store.claim_ready(project=project, capacities=capacities)
+        claimed: list[dict[str, Any]] = []
         spawned: list[dict[str, Any]] = []; cancelled: list[dict[str, Any]] = []; failed: list[dict[str, Any]] = []
-        for row in claimed:
-            if row["target"] is not None and self.target_validator is not None:
+        while True:
+            ready = self.store.claim_ready(project=project, capacities=capacities)
+            if not ready:
+                break
+            claimed.extend(ready)
+            for row in ready:
+                if row["target"] is not None and self.target_validator is not None:
+                    try:
+                        valid = bool(self.target_validator(row))
+                    except Exception:
+                        failed.append(self.store.finish(row["run_id"], state="failed", error_code="validation_failed", error_message="target validation is unavailable"))
+                        continue
+                    if not valid:
+                        cancelled.append(self.store.finish(row["run_id"], state="cancelled", error_code="stale_target", error_message="target is no longer eligible"))
+                        continue
+                args = [self.runner, row["skill"], project]
+                if row["target"] is not None: args += ["--target", row["target"]]
+                args += ["--scheduled", "--coordinated-run", row["run_id"]]
                 try:
-                    valid = bool(self.target_validator(row))
-                except Exception:
-                    failed.append(self.store.finish(row["run_id"], state="failed", error_code="validation_failed", error_message="target validation is unavailable"))
-                    continue
-                if not valid:
-                    cancelled.append(self.store.finish(row["run_id"], state="cancelled", error_code="stale_target", error_message="target is no longer eligible"))
-                    continue
-            args = [self.runner, row["skill"], project]
-            if row["target"] is not None: args += ["--target", row["target"]]
-            args += ["--scheduled", "--coordinated-run", row["run_id"]]
-            try:
-                process = self.process_factory(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                               stderr=subprocess.DEVNULL, start_new_session=True)
-                try:
-                    spawned.append(self.store.mark_pid(row["run_id"], process.pid))
-                except (RunStateError, RunStoreError):
-                    try: self.killpg(process.pid, signal.SIGTERM)
-                    except OSError: pass
-                    self.sleep(0.1)
-                    try: self.killpg(process.pid, signal.SIGKILL)
-                    except OSError: pass
-                    try: process.wait(timeout=1)
-                    except Exception: pass
-            except OSError:
-                failed.append(self.store.finish(row["run_id"], state="failed", error_code="spawn_failed", error_message="worker could not be started"))
+                    process = self.process_factory(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                   stderr=subprocess.DEVNULL, start_new_session=True)
+                    try:
+                        spawned.append(self.store.mark_pid(row["run_id"], process.pid))
+                    except (RunStateError, RunStoreError):
+                        try: self.killpg(process.pid, signal.SIGTERM)
+                        except OSError: pass
+                        self.sleep(0.1)
+                        try: self.killpg(process.pid, signal.SIGKILL)
+                        except OSError: pass
+                        try: process.wait(timeout=1)
+                        except Exception: pass
+                except OSError:
+                    failed.append(self.store.finish(row["run_id"], state="failed", error_code="spawn_failed", error_message="worker could not be started"))
         return {"claimed": claimed, "spawned": spawned, "cancelled": cancelled, "failed": failed}
 
     def reconcile_and_drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, Any]:
@@ -111,15 +116,20 @@ def _runtime(project: str, skill: str | None = None) -> tuple[RunStore, dict[str
     return RunStore(directory / "runs.sqlite3"), _capacities(config, skill)
 
 
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError("invalid arguments")
+
+
 def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | None], tuple[RunStore, dict[str, int]]] = _runtime,
          dispatcher_factory: Callable[[RunStore, str], RunDispatcher] = RunDispatcher) -> int:
-    parser = argparse.ArgumentParser()
+    parser = SafeArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
     enqueue = commands.add_parser("enqueue"); enqueue.add_argument("--project", required=True); enqueue.add_argument("--skill", required=True); enqueue.add_argument("--target")
     bind = commands.add_parser("bind-target"); bind.add_argument("--project", required=True); bind.add_argument("--run-id", required=True); bind.add_argument("--target", required=True)
     drain = commands.add_parser("drain"); drain.add_argument("--project", required=True)
-    args = parser.parse_args(argv)
     try:
+        args = parser.parse_args(argv)
         store, capacities = runtime_factory(args.project, getattr(args, "skill", None))
         dispatcher = dispatcher_factory(store, str(Path(__file__).resolve().parents[1] / "bin" / "pitcrew-codex.sh"))
         if args.command == "enqueue":
