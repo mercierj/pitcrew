@@ -8,9 +8,9 @@ sept jours.
 
 ## Portée
 
-- Le snapshot du tableau de bord calcule un agrégat d’usage sur tous les
-  enregistrements d’historique, selon les mêmes règles et tarifs que l’agrégat
-  sur sept jours.
+- Un compteur d’usage cumulatif local persiste au-delà de la rétention de sept
+  jours. Il est initialisé à partir des passages encore retenus lors du premier
+  déploiement, puis enrichi à chaque nouveau passage enregistré.
 - L’accueil affiche une nouvelle carte `Coût estimé · total historique` à côté
   des métriques globales existantes.
 - La carte montre le montant en USD et une note indiquant le nombre de passages
@@ -18,14 +18,19 @@ sept jours.
 
 ## Données et comportement
 
-Le serveur réutilise `aggregate_usage(records)` sur l’ensemble des
-enregistrements chargés, puis expose le résultat sous `usage_total` dans le
-snapshot. Cet agrégat utilise le modèle enregistré par passage et les quatre
-catégories de jetons déjà prises en compte par le calcul de prix.
+Le stockage d’historique conserve un résumé cumulatif séparé de ses lignes de
+détail, qui restent purgées après sept jours. Ce résumé est mis à jour de façon
+atomique quand un passage est ajouté. S’il n’existe pas encore, il est créé à
+partir des lignes actuellement retenues : les coûts plus anciens déjà purgés ne
+peuvent pas être reconstitués.
+
+Le serveur expose ce résumé sous `usage_total` dans le snapshot. Il utilise le
+modèle enregistré par passage et les quatre catégories de jetons déjà prises en
+compte par le calcul de prix.
 
 Si aucun passage ne comporte de mesure fiable, la carte affiche `—`. Les
-enregistrements anciens ou incomplets ne sont pas estimés artificiellement :
-ils restent exclus et sont signalés dans la note.
+enregistrements incomplets ne sont pas estimés artificiellement : ils restent
+exclus et sont signalés dans la note.
 
 ## Interface
 
@@ -36,8 +41,8 @@ pour préciser la couverture des données du total historique.
 
 ## Tests
 
-- Un test backend vérifie que `usage_total` agrège tous les enregistrements,
-  même ceux antérieurs à sept jours.
+- Un test backend vérifie l’initialisation depuis les lignes retenues et la
+  conservation du cumul après la purge de ces lignes.
 - Un test d’interface vérifie la présence de la nouvelle métrique et son rendu
   à partir du snapshot.
 - Les tests existants de formatage et d’absence de données restent verts.
