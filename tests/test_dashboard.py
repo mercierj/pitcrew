@@ -2651,6 +2651,33 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("@media (max-width: 900px)", self.styles)
         self.assertIn("@media (prefers-reduced-motion: reduce)", self.styles)
 
+    def test_html_wires_the_application_shell_to_its_css_classes(self):
+        for element, identifier, class_name in (
+            ("header", "app-header", "app-header"),
+            ("aside", None, "app-sidebar"),
+            ("main", None, "app-main"),
+            ("div", "action-queue-list", "action-queue-list"),
+            ("div", "workflow-board-content", "workflow-columns"),
+        ):
+            identifier_match = (
+                rf'(?=[^>]*\bid="{re.escape(identifier)}")'
+                if identifier
+                else ""
+            )
+            self.assertRegex(
+                self.html,
+                rf"<{element}\b{identifier_match}(?=[^>]*\bclass=\"[^\"]*"
+                rf"\b{re.escape(class_name)}\b[^\"]*\")[^>]*>",
+            )
+        self.assertEqual(
+            3,
+            len(re.findall(r"<button\b[^>]*\bclass=\"[^\"]*\bnav-item\b", self.html)),
+        )
+        self.assertNotIn("site-header", self.html)
+        self.assertNotIn(".site-header", self.styles)
+        self.assertNotIn(".app-shell > main", self.styles)
+        self.assertNotIn(".nav-count", self.styles)
+
     def test_pilotage_layout_is_responsive_and_wraps_content(self):
         for token in (
             ".app-shell",

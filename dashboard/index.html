@@ -8,10 +8,10 @@
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <header id="app-header" class="site-header">
+  <header id="app-header" class="app-header">
     <div>
       <p class="eyebrow">Pilotage local</p>
-      <p class="brand">GetBill <span>Pitcrew</span></p>
+      <a class="brand" href="#pilotage" aria-label="Pitcrew · Pilotage">GetBill <span>Pitcrew</span></a>
       <p class="header-copy">Surveillez les agents, leurs passages et le travail GitLab depuis cette machine.</p>
     </div>
     <div class="refresh-panel">
@@ -29,11 +29,12 @@
   <p id="operational-status" class="sr-only" aria-live="polite">Initialisation du tableau de bord.</p>
 
   <div class="app-shell">
-    <aside aria-label="Navigation et santé du crew">
+    <aside class="app-sidebar" aria-label="Navigation et santé du crew">
+      <p class="project-name">GetBill</p>
       <nav id="app-navigation" aria-label="Vues du tableau de bord">
-        <button type="button" data-view-target="pilotage">Pilotage</button>
-        <button type="button" data-view-target="agents">Agents</button>
-        <button type="button" data-view-target="history">Historique</button>
+        <button class="nav-item" type="button" data-view-target="pilotage">Pilotage</button>
+        <button class="nav-item" type="button" data-view-target="agents">Agents</button>
+        <button class="nav-item" type="button" data-view-target="history">Historique</button>
       </nav>
       <section id="crew-health" aria-labelledby="crew-health-title">
         <h2 id="crew-health-title">Santé du crew</h2>
@@ -41,14 +42,14 @@
       </section>
     </aside>
 
-    <main>
+    <main class="app-main">
       <section id="view-pilotage" data-view="pilotage" aria-labelledby="pilotage-title">
         <h1 id="pilotage-title" tabindex="-1">Pilotage</h1>
         <div id="pilotage-source-state" aria-live="polite"></div>
 
         <section id="action-queue" class="panel" aria-labelledby="action-queue-title">
           <h2 id="action-queue-title">Actions à traiter <span id="action-queue-count">0</span></h2>
-          <div id="action-queue-list" aria-live="polite"></div>
+          <div id="action-queue-list" class="action-queue-list" aria-live="polite"></div>
           <div id="action-queue-more"></div>
         </section>
 
@@ -69,7 +70,7 @@
               </label>
             </div>
           </div>
-          <div id="workflow-board-content" class="work-grid" aria-live="polite"></div>
+          <div id="workflow-board-content" class="work-grid workflow-columns" aria-live="polite"></div>
         </section>
 
         <section id="done-work" class="panel" aria-labelledby="done-work-title">

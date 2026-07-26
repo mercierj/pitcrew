@@ -58,7 +58,6 @@ footer {
   margin-inline: auto;
 }
 
-.site-header,
 .app-header {
   position: sticky;
   z-index: 20;
@@ -121,8 +120,6 @@ footer {
   color: var(--muted);
 }
 
-.site-header .eyebrow,
-.site-header .header-copy,
 .app-header .eyebrow,
 .app-header .header-copy {
   display: none;
@@ -182,8 +179,7 @@ footer {
   color: var(--error);
 }
 
-.app-main,
-.app-shell > main {
+.app-main {
   display: grid;
   min-width: 0;
   gap: 24px;
@@ -781,8 +777,7 @@ select {
   min-width: 0;
 }
 
-.app-sidebar,
-.app-shell > aside {
+.app-sidebar {
   position: sticky;
   top: 64px;
   min-width: 0;
@@ -812,7 +807,6 @@ select {
   padding: 0;
 }
 
-#app-navigation button,
 .nav-item {
   display: flex;
   width: 100%;
@@ -829,10 +823,14 @@ select {
   cursor: pointer;
 }
 
-#app-navigation button[aria-current="page"],
 .nav-item[aria-current="page"] {
   background: var(--accent-soft);
   color: var(--accent);
+  font-weight: 850;
+}
+
+.project-name {
+  margin: 0 8px;
   font-weight: 850;
 }
 
@@ -872,13 +870,6 @@ select {
   margin-bottom: 12px;
 }
 
-#action-queue-list {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
 .action-card {
   display: grid;
   min-width: 0;
@@ -909,8 +900,7 @@ select {
   font-size: 0.8rem;
 }
 
-.workflow-columns,
-#workflow-board-content.work-grid {
+.workflow-columns {
   display: grid;
   min-width: 920px;
   grid-template-columns: repeat(4, minmax(215px, 1fr));
@@ -1063,9 +1053,7 @@ select {
 }
 
 body[data-global-state="stopped"] .workflow-columns,
-body[data-global-state="stopped"] #workflow-board-content,
-body[data-global-state="stopped"] .action-queue-list,
-body[data-global-state="stopped"] #action-queue-list {
+body[data-global-state="stopped"] .action-queue-list {
   opacity: 0.65;
 }
 
@@ -1238,42 +1226,40 @@ footer {
     grid-template-columns: 72px minmax(0, 1fr);
   }
 
-  .app-sidebar,
-  .app-shell > aside {
+  .app-sidebar {
     padding-inline: 8px;
   }
 
-  .app-sidebar .project-name,
-  .nav-item:not([aria-current="page"]) .nav-count {
+  .app-sidebar .project-name {
     display: none;
   }
 
-  #app-navigation button {
+  .nav-item {
     justify-content: center;
     overflow: hidden;
     color: transparent;
     font-size: 0;
   }
 
-  #app-navigation button::before {
+  .nav-item::before {
     color: var(--muted);
     font-size: 0.78rem;
     font-weight: 850;
   }
 
-  #app-navigation button[aria-current="page"]::before {
+  .nav-item[aria-current="page"]::before {
     color: var(--accent);
   }
 
-  #app-navigation button[data-view-target="pilotage"]::before {
+  .nav-item[data-view-target="pilotage"]::before {
     content: "PI";
   }
 
-  #app-navigation button[data-view-target="agents"]::before {
+  .nav-item[data-view-target="agents"]::before {
     content: "AG";
   }
 
-  #app-navigation button[data-view-target="history"]::before {
+  .nav-item[data-view-target="history"]::before {
     content: "HI";
   }
 
@@ -1283,13 +1269,11 @@ footer {
   }
 
   .action-queue-list,
-  #action-queue-list,
   #done-list {
     grid-template-columns: 1fr;
   }
 
-  .app-main,
-  .app-shell > main {
+  .app-main {
     padding: 16px;
   }
 
@@ -1312,7 +1296,6 @@ footer {
 }
 
 @media (max-width: 620px) {
-  .site-header,
   .app-header {
     gap: 8px;
     padding-inline: 12px;
@@ -1351,8 +1334,7 @@ footer {
     content: "▶";
   }
 
-  .workflow-columns.work-grid,
-  #workflow-board-content.work-grid {
+  .workflow-columns {
     min-width: 0;
     grid-template-columns: 1fr;
   }
