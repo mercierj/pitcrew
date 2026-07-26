@@ -305,7 +305,15 @@ async function runPreprodReviewAction(action) {
   preprodReviewSubmitting = true;
   renderPreprodReview(sources.preprod);
   try {
-    await api.action({action});
+    await runAction(
+      "preprod:review",
+      {
+        pending: trigger ? "Lancement de la revue avant Preprod…" : "Arrêt de la revue avant Preprod…",
+        success: trigger ? "Revue avant Preprod lancée." : "Revue avant Preprod arrêtée.",
+        error: "Impossible de contrôler la revue avant Preprod.",
+      },
+      () => api.action({action}),
+    );
     setText(elements.operationalStatus, trigger ? "Revue avant Preprod lancée." : "Revue avant Preprod arrêtée.");
   } catch {
     setText(elements.operationalStatus, "Impossible de contrôler la revue avant Preprod.");
@@ -1153,7 +1161,15 @@ async function globalControl(action) {
   if (elements.globalResumeButton) elements.globalResumeButton.disabled = true;
   setText(elements.operationalStatus, isStop ? "Arrêt global en cours." : "Réactivation des agents en cours.");
   try {
-    await api.action({action});
+    await runAction(
+      "global:crew",
+      {
+        pending: isStop ? "Arrêt global en cours." : "Réactivation des agents en cours.",
+        success: isStop ? "Exécutions bloquées." : "Agents réactivés.",
+        error: "Impossible de modifier l’état global.",
+      },
+      () => api.action({action}),
+    );
     setText(elements.operationalStatus, isStop ? "Exécutions bloquées." : "Agents réactivés.");
     await refresh({ manual: true });
   } catch {

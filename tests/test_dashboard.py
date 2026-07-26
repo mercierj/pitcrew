@@ -2687,6 +2687,25 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("action.state", pilotage)
         self.assertNotIn("innerHTML", pilotage)
 
+    def test_global_and_preprod_actions_keep_resource_feedback(self):
+        preprod = self.javascript.split(
+            "async function runPreprodReviewAction",
+            1,
+        )[1].split("function finiteNumber", 1)[0]
+        global_control = self.javascript.split(
+            "async function globalControl",
+            1,
+        )[1].split("function restoreModelSelect", 1)[0]
+
+        for source, key in (
+            (preprod, "preprod:review"),
+            (global_control, "global:crew"),
+        ):
+            self.assertIn("await runAction(", source)
+            self.assertIn(f'"{key}"', source)
+            self.assertIn("() => api.action({action})", source)
+            self.assertLess(source.index(f'"{key}"'), source.index("api.action({action})"))
+
     def test_javascript_serializes_controls_per_skill(self):
         agents = self.modules["agents.mjs"]
         self.assertIn("const pendingSkills = new Set();", self.javascript)
