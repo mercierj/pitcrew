@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocsTest(unittest.TestCase):
+    def test_native_github_issue_setup_is_explicit(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "Native GitHub Issues",
+            "bin/configure.sh bind-github",
+            "providers.forge",
+            "providers.tracker",
+            "does not infer",
+            "bugfixer-run remains disabled",
+        ):
+            self.assertIn(marker, readme)
+
     def test_dashboard_operator_contract_is_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         scheduled = (ROOT / "references/SCHEDULED-TASKS.md").read_text(

@@ -259,6 +259,26 @@ map to pull requests on GitHub and merge requests on GitLab. Details live in
 [provider selection](references/PROVIDERS.md) and
 [crew topology](references/TOPOLOGY.md).
 
+### Native GitHub Issues
+
+A native GitHub issue tracker requires the matched
+`providers.forge=github` and `providers.tracker=github` pair plus an explicit,
+reviewed binding:
+
+```bash
+./bin/configure.sh example --profile generic
+$EDITOR /absolute/path/github-binding.json
+./bin/configure.sh bind-github example --binding /absolute/path/github-binding.json
+python3 scripts/pitcrew_config.py validate \
+  "${CODEX_HOME:-$HOME/.codex}/pitcrew/example/config.json"
+```
+
+The binding file contains the complete reviewed `github` object documented by
+the schema example. Pitcrew does not infer a host, identity, owner, repository,
+label, or state from `gh auth`, Git metadata, or the current directory.
+`bugfixer-run remains disabled` until its lifecycle configuration supplies and
+validates the sensitivity policy.
+
 ## Safety and GetBill
 
 Autonomy is explicit, bounded, and fail-closed:
