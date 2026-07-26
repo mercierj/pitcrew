@@ -6,6 +6,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReferenceContractTest(unittest.TestCase):
+    def test_manager_architecture_proposal_contract(self):
+        self.assert_markers(
+            "skills/manager-run/SKILL.md",
+            "architecture-proposals-v1",
+            'category="architecture"',
+            "finding-key is the record's stable `id`",
+            "status∈{\"approved\",\"investigate\"}",
+            "attach-tracker",
+            "before any `state.filed[key]` or history write",
+            "fallback architecture source",
+            "$CONFIG_DIR/proposals.json",
+            'findings_json == "$CONFIG_DIR/proposals.json"',
+            '(.proposals.ledger // $fallback) | if . == "$CONFIG_DIR/proposals.json" then $fallback else . end',
+        )
     def assert_markers(self, relative_path, *markers):
         contents = (ROOT / relative_path).read_text(encoding="utf-8")
         for marker in markers:
@@ -168,6 +182,7 @@ class ReferenceContractTest(unittest.TestCase):
             "/-/merge_requests/<number>",
             "linear.app/<workspace>/issue/<id>",
             "/-/issues/<number>",
+            "/-/work_items/<number>",
             "<configured-repo>!<number>",
             "<configured-repo>#<number>",
             "Validate the URL host",
@@ -267,6 +282,7 @@ class ReferenceContractTest(unittest.TestCase):
 
     def test_secondary_roles_are_provider_neutral_and_getbill_safe(self):
         secondary = (
+            "architecture-run",
             "research-run",
             "qa-run",
             "coverage-run",
@@ -322,6 +338,37 @@ class ReferenceContractTest(unittest.TestCase):
                 self.assertIn("coverage_area", text)
                 self.assertIn("fingerprints", text)
                 self.assertIn("Git tree fingerprint", text)
+            if name == "architecture-run":
+                for marker in (
+                    "architecture-state.json",
+                    "architecture:$REPO_NAME",
+                    "research_coverage.py",
+                    "responsabilités mélangées",
+                    "couplage framework/persistence",
+                    "direction/cycles dépendances",
+                    "frontières dupliquées",
+                    "interfaces fuyantes",
+                    "abstraction manquante prouvée",
+                    "confidence >= 80%",
+                    "maximum 3",
+                    '"source": "architecture-run"',
+                    '"category": "architecture"',
+                    "architecture_category",
+                    '"status": "suggested"',
+                    "stable id",
+                    "No code, ticket, or remote action",
+                ):
+                    with self.subTest(marker=marker):
+                        self.assertIn(marker, text)
+                for forbidden in (
+                    "hygiene",
+                    "hardening",
+                    "security finding",
+                    "documentation drift",
+                    "test gap",
+                ):
+                    with self.subTest(forbidden=forbidden):
+                        self.assertNotIn(forbidden, text)
 
         for name in ("research-run", "qa-run"):
             self.assert_markers(
@@ -392,6 +439,17 @@ class ReferenceContractTest(unittest.TestCase):
             self.assertIn("references/PROVIDERS.md", text, skill_file)
             for token in forbidden:
                 self.assertNotIn(token, text, f"{skill_file} contains {token}")
+
+    def test_preprod_review_skill_is_manual_read_only_and_fail_closed(self):
+        text = (ROOT / "skills/preprod-review-run/SKILL.md").read_text(encoding="utf-8")
+        for marker in (
+            "manual-only", "gpt-5.6-sol", "xhigh", "MANIFEST", "RESULT", "STORE",
+            "prepare", "finalize", "origin/preprod", "origin/develop", "base_sha...compare_sha",
+            "reviewed_files", "findings", "synthesis", "ready", "changes_required", "incomplete",
+        ):
+            self.assertIn(marker, text)
+        for forbidden in ("issues", "comments", "tracker", "branches", "commits", "merge", "deploy", "database", "Preprod", "secrets", "working-tree"):
+            self.assertIn(forbidden, text)
 
     def test_cross_skill_invocations_are_namespaced(self):
         skill_names = [

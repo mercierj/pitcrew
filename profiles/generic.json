@@ -3,8 +3,25 @@
   "project_name": "example",
   "providers": {"forge": "github", "tracker": "linear"},
   "repos": [],
+  "architecture": {"interval_seconds": 604800},
+  "preprod_review": {"base_ref": "origin/preprod", "compare_ref": "origin/develop", "history_limit": 10},
+  "proposals": {"ledger": "$CONFIG_DIR/proposals.json"},
+  "manager": {
+    "sources": [
+      {
+        "name": "architecture",
+        "format": "architecture-proposals-v1",
+        "label": "pitcrew-source::architecture",
+        "findings_json": "$CONFIG_DIR/proposals.json",
+        "target_depth": 2,
+        "investigate_wip": 1
+      }
+    ]
+  },
   "release": {"autonomy": "off"},
   "agents": {
+    "architecture-run": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+    "preprod-review-run": {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
     "security-run": {"model": "gpt-5.6-sol"},
     "product-discovery-run": {"model": "gpt-5.6-terra"},
     "research-run": {"model": "gpt-5.6-terra"},

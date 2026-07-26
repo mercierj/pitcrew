@@ -16,6 +16,8 @@ primary installation, runtime, and documentation path.
 | `$pitcrew:research-run` | Record one grounded codebase finding. |
 | `$pitcrew:security-run` | Record one grounded security proposal. |
 | `$pitcrew:product-discovery-run` | Record one feature proposal for dashboard approval. |
+| `$pitcrew:architecture-run` | Scan one rotating repository area and record high-confidence architecture proposals. |
+| `$pitcrew:preprod-review-run` | Manually review the unmerged Preprod delta before a human promotion decision. |
 | `$pitcrew:qa-run` | Exercise one configured QA flow. |
 | `$pitcrew:manager-run` | Pace findings into the configured tracker. |
 | `$pitcrew:implementer-run` | Claim and implement one eligible item. |
@@ -79,6 +81,7 @@ Start with read-only or review-oriented roles:
 ```text
 Use $pitcrew:research-run for project getbill. Perform one bounded pass.
 Use $pitcrew:reviewer-run for project getbill. Perform one bounded pass.
+Use $pitcrew:architecture-run for project getbill. Perform one bounded read-only pass.
 ```
 
 Observe the first runs before enabling implementation workflows. Do not schedule
@@ -88,6 +91,13 @@ preprod action requires a fresh explicit approval.
 See [the Codex guide](docs/CODEX.md) and
 [scheduled-task templates](references/SCHEDULED-TASKS.md).
 
+`$pitcrew:architecture-run` is scheduled weekly (604800 seconds) and can also be
+started manually from the local dashboard. It scans exactly one rotating repository
+area per pass and records at most three high-confidence, structured architecture
+proposals. It is read-only for both the repository and tracker: it writes no code,
+MR/PR, issue, merge, or deploy. Its only writes are local: the proposal ledger for
+human review and the separate `architecture-state.json` coverage state.
+
 For a persistent local GetBill installation on macOS, install the safe core
 loops with:
 
@@ -95,6 +105,39 @@ loops with:
 python3 bin/pitcrew-schedule.py install --project getbill
 python3 bin/pitcrew-schedule.py status --project getbill
 ```
+
+### Manual review before Preprod
+
+Use the **Lancer la revue complète** dashboard button as the recommended
+operator path for `$pitcrew:preprod-review-run`; it requires confirmation. A
+direct manual CLI launch is also supported:
+
+```bash
+./bin/pitcrew-codex.sh preprod-review-run getbill
+```
+
+Both paths use the locked, ephemeral local execution boundary. This role is
+strictly manual-only: it is never scheduled, has no LaunchAgent, interval,
+restart, or automatic invocation. `--scheduled`, `--coordinated-run`, and
+`--target` are refused. The global stop switch blocks its trigger; **Arrêter la
+revue** sends SIGTERM to the tracked local helper and an interruption makes any
+prior result stale.
+
+The fixed, non-configurable runtime is `gpt-5.6-sol` with reasoning effort
+`xhigh`. It captures remote `origin/preprod...origin/develop` SHAs and their
+merge-base before analysis. The working tree, untracked files, and ignored files
+are excluded. Every manifest entry is reviewed exactly once, including deletion,
+rename, copy, typechange, binary, and generated entries, followed by one
+cross-change synthesis.
+
+It is read-only: no GitLab issue, comment, MR, merge, commit, branch, push,
+deploy, Preprod environment, or database action is permitted. Its only writes
+are private local manifest, result, report, live-status, and bounded-history
+files. Only the helper can produce `ready` / **PRÊT**. It returns
+`changes_required` / **CORRECTIONS REQUISES** for high or critical findings, and
+`incomplete` / **INCOMPLET** for failed policy, schema, coverage, helper, or
+interrupted runs. Local history retains at most 10 reports and replaces a report
+for the same captured SHA pair.
 
 To stop all scheduled agents and block future manual or scheduled runs before
 they can invoke Codex, use the persistent project stop switch:
@@ -140,8 +183,9 @@ history, and controls continue to work.
 For an enabled agent, **Trigger** starts one bounded pass immediately (the
 per-agent lock prevents overlap), **Stop** stops its current pass and unloads its
 schedule, and **Restart** installs or reloads its schedule. Release, prod, and
-preprod controls are explicitly absent: the dashboard cannot deploy or perform
-remote environment actions. The status CLI remains available:
+remote Preprod environment/deployment controls are explicitly absent. The sole
+exception is the local, read-only, manual-only Preprod review panel; it cannot
+deploy or perform remote environment actions. The status CLI remains available:
 
 ```bash
 python3 bin/pitcrew-schedule.py status --project getbill

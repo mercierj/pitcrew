@@ -32,6 +32,7 @@ PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 LABEL_PREFIX = "io.getbill.pitcrew"
 
 SCHEDULE = (
+    ("architecture-run", 604800, True, ""),
     ("security-run", 86400, True, ""),
     ("product-discovery-run", 604800, True, ""),
     ("research-run", 1800, True, ""),

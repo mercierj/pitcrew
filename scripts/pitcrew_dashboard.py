@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
+import shlex
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
@@ -17,6 +19,7 @@ from scripts.pitcrew_config import ConfigError, update_runtime_model, validate
 from scripts.pitcrew_config import max_concurrent_for
 from scripts.pitcrew_history import HistoryStore, classify_record
 from scripts.pitcrew_proposals import ProposalError, ProposalStore
+from scripts.pitcrew_preprod_review import PreprodReviewError, ReportStore
 from scripts.pitcrew_run_dispatcher import RunDispatcher
 from scripts.pitcrew_run_store import RunStore, RunStoreError
 try:
@@ -26,6 +29,7 @@ try:
         aggregate_usage,
         public_catalog,
         resolve_model,
+        resolve_reasoning_effort,
         MODEL_CATALOG,
     )
 except ModuleNotFoundError:
@@ -35,6 +39,7 @@ except ModuleNotFoundError:
         aggregate_usage,
         public_catalog,
         resolve_model,
+        resolve_reasoning_effort,
         MODEL_CATALOG,
     )
 
@@ -54,6 +59,8 @@ TICKET_AGENT_ACTIONS = {
 MR_URL = re.compile(r"https?://[^\s<>'\"]+/-/merge_requests/\d+")
 MR_REFERENCE = re.compile(r"(?<![\w!])!(\d+)\b")
 TICKET_REFERENCE = re.compile(r"#(\d+)$")
+STATE_LABEL_PREFIX = "pitcrew-state::"
+MERGED_SYNC_MARKER = "Pitcrew sync: marked done because related MR"
 
 
 class DashboardError(RuntimeError):
@@ -155,6 +162,14 @@ class DashboardService:
             if isinstance(proposal_path, str) and proposal_path
             else self.runtime_dir / "proposals.json"
         )
+        review_config = self.config.get("preprod_review", {})
+        history_limit = review_config.get("history_limit", 10) if isinstance(review_config, dict) else 10
+        try:
+            self.preprod_reports = ReportStore(
+                self.runtime_dir / "preprod-review-reports.json", history_limit
+            )
+        except PreprodReviewError as error:
+            raise DashboardError("invalid preprod review configuration") from error
         self._gitlab_cache: dict | None = None
         self._gitlab_cached_at: datetime | None = None
         self._last_successful_refresh: str | None = None
@@ -176,6 +191,7 @@ class DashboardService:
                 store=self.run_store,
                 runner=str(RUNNER),
             )
+        self._preprod_process: subprocess.Popen | None = None
 
     def _load_config(self) -> dict:
         try:
@@ -342,6 +358,23 @@ class DashboardService:
         encoded_project = quote(self.gitlab_project, safe="")
         iid = match.group(1)
         ticket = self._gitlab_document(f"projects/{encoded_project}/issues/{iid}")
+        if not isinstance(ticket, dict):
+            raise DashboardError("pending decision context is invalid")
+        ticket_lifecycle = _label_value(ticket.get("labels"), STATE_LABEL_PREFIX)
+        if ticket_lifecycle == "done" or ticket.get("state") == "closed":
+            state["pending_question"] = None
+            temporary_path = state_path.with_name(f"{state_path.name}.tmp")
+            try:
+                temporary_path.write_text(
+                    json.dumps(state, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary_path.replace(state_path)
+            except OSError as error:
+                raise DashboardError(
+                    _redacted_error(str(error), "decision state unavailable")
+                ) from error
+            return {"pending": None}
         notes = self._gitlab_document(
             f"projects/{encoded_project}/issues/{iid}/notes?per_page=100"
         )
@@ -397,8 +430,9 @@ class DashboardService:
                 proposal for proposal in self.proposals.list()
                 if proposal.get("id") == proposal_id
             )
+            manager_queued = current.get("category") == "architecture" and status in {"approved", "investigate"}
             metadata = None
-            if status in {"approved", "investigate"}:
+            if status in {"approved", "investigate"} and not manager_queued:
                 issue = self._create_proposal_issue(current, investigate=status == "investigate")
                 metadata = {"tracker": {
                     "iid": issue.get("iid"),
@@ -407,7 +441,7 @@ class DashboardService:
             updated = self.proposals.transition(
                 proposal_id, status, actor="dashboard", reason=reason, metadata=metadata
             )
-            return {"accepted": True, "proposal": updated}
+            return {"accepted": True, "proposal": updated, "manager_queued": manager_queued}
         except ProposalError as error:
             raise DashboardError(str(error)) from error
 
@@ -516,6 +550,124 @@ class DashboardService:
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
+    def _preprod_process_running(self) -> bool:
+        if self._preprod_process is None:
+            return False
+        try:
+            if self._preprod_process.poll() is None:
+                return True
+        except (AttributeError, OSError):
+            return True
+        self._preprod_process = None
+        return False
+
+    def _verified_preprod_live_status(self) -> dict | None:
+        live = self._live_status("preprod-review-run")
+        if live is None:
+            return None
+        result = self._run(["ps", "-p", str(live["pid"]), "-o", "command="])
+        if result.returncode:
+            return None
+        try:
+            command = shlex.split(result.stdout.strip())
+        except ValueError:
+            return None
+        live_path = str(self.runtime_dir / "live" / "preprod-review-run.json")
+        def has_pair(flag: str, value: str) -> bool:
+            return any(command[index:index + 2] == [flag, value] for index in range(len(command) - 1))
+        if (
+            not any(Path(item).name == "pitcrew_locked_exec.py" for item in command)
+            or not has_pair("--project", self.project)
+            or not has_pair("--skill", "preprod-review-run")
+            or not has_pair("--live-file", live_path)
+        ):
+            return None
+        return live
+
+    def preprod_review_snapshot(self) -> dict:
+        review_config = self.config.get("preprod_review")
+        if not isinstance(review_config, dict):
+            raise DashboardError("preprod review is not configured")
+        try:
+            reports = self.preprod_reports.read()["reports"]
+        except PreprodReviewError as error:
+            raise DashboardError("preprod review reports are unavailable") from error
+        history = self.history("preprod-review-run", None)
+        latest = reports[0] if reports else None
+        latest_run = history[0] if history else None
+        stale = False
+        if latest_run and latest_run.get("outcome") in {"failed", "interrupted"}:
+            try:
+                run_at = _timestamp(latest_run["finished_at"])
+                report_at = _timestamp(latest["completed_at"]) if latest else None
+                stale = report_at is None or run_at > report_at
+            except (KeyError, TypeError, ValueError):
+                stale = True
+        live_status = self._verified_preprod_live_status()
+        schedule = self._schedule_entries(force_refresh=True)
+        return {
+            "skill": "preprod-review-run",
+            "base_ref": review_config["base_ref"],
+            "compare_ref": review_config["compare_ref"],
+            "configured_model": resolve_model(self.config, "preprod-review-run"),
+            "reasoning_effort": resolve_reasoning_effort(self.config, "preprod-review-run"),
+            "running": live_status is not None or self._preprod_process_running(),
+            "live_status": live_status,
+            "global_state": self._global_state(schedule),
+            "latest": latest,
+            "history": reports,
+            "latest_run": latest_run,
+            "report_stale": stale,
+        }
+
+    def trigger_preprod_review(self) -> dict:
+        with self._control_lock:
+            snapshot = self.preprod_review_snapshot()
+            if snapshot["global_state"] == "stopped":
+                raise DashboardError("global execution is stopped")
+            if snapshot["configured_model"] != "gpt-5.6-sol" or snapshot["reasoning_effort"] != "xhigh":
+                raise DashboardError("preprod review policy is invalid")
+            if snapshot["running"]:
+                raise DashboardError("preprod review is already running")
+            try:
+                process = subprocess.Popen(
+                    [str(RUNNER), "preprod-review-run", self.project],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise DashboardError(_redacted_error(str(error), "failed to trigger preprod review")) from error
+            self._preprod_process = process
+            return {"accepted": True, "pid": process.pid, "skill": "preprod-review-run"}
+
+    def _stop_preprod_review(self, *, allow_absent: bool) -> dict | None:
+        if self._preprod_process_running():
+            process = self._preprod_process
+            assert process is not None
+            try:
+                process.terminate()
+            except OSError as error:
+                raise DashboardError(_redacted_error(str(error), "failed to stop preprod review")) from error
+            pid = process.pid
+            self._preprod_process = None
+            return {"accepted": True, "skill": "preprod-review-run", "pid": pid}
+        live = self._verified_preprod_live_status()
+        if live is None:
+            if allow_absent:
+                return None
+            raise DashboardError("preprod review is not running")
+        try:
+            os.kill(live["pid"], signal.SIGTERM)
+        except (OSError, ValueError) as error:
+            raise DashboardError(_redacted_error(str(error), "failed to stop preprod review")) from error
+        return {"accepted": True, "skill": "preprod-review-run", "pid": live["pid"]}
+
+    def stop_preprod_review(self) -> dict:
+        with self._control_lock:
+            stopped = self._stop_preprod_review(allow_absent=False)
+            assert stopped is not None
+            return stopped
+
     def snapshot(self) -> dict:
         schedule = self._schedule_entries(force_refresh=True)
         records = self.history(None, None)
@@ -562,6 +714,7 @@ class DashboardService:
                 "health": "stopped" if not loaded else classify_record(latest),
                 "estimated_next_pass": estimated,
                 "configured_model": resolve_model(self.config, skill),
+                "configured_reasoning_effort": resolve_reasoning_effort(self.config, skill),
                 "latest_model": latest_measured["model"] if latest_measured is not None else None,
                 "latest_usage": _present_usage(
                     aggregate_usage([latest_measured]) if latest_measured is not None else aggregate_usage([])
@@ -895,6 +1048,67 @@ class DashboardService:
         self._gitlab_cached_at = current
         return self._with_run_overlay(payload)
 
+    def _sync_merged_issue(
+        self,
+        issue: dict,
+        lifecycle: str,
+        related_urls: list[str],
+        merge_requests: list[dict],
+    ) -> tuple[dict, str]:
+        merged = [
+            merge_request
+            for merge_request in merge_requests
+            if merge_request.get("state") == "merged"
+            and merge_request.get("web_url") in related_urls
+        ]
+        if not merged:
+            return issue, lifecycle
+
+        merge_request = merged[-1]
+        mr_iid = merge_request.get("iid")
+        mr_url = merge_request.get("web_url")
+        if not isinstance(mr_iid, int) or not isinstance(mr_url, str):
+            return issue, lifecycle
+
+        encoded = quote(self.gitlab_project, safe="")
+        issue_iid = issue.get("iid")
+        if not isinstance(issue_iid, int):
+            return issue, lifecycle
+        notes = self._gitlab_document(
+            f"projects/{encoded}/issues/{issue_iid}/notes?per_page=100"
+        )
+        if not isinstance(notes, list):
+            raise DashboardError("GitLab returned invalid issue notes")
+        marker = f"{MERGED_SYNC_MARKER} !{mr_iid}"
+        marker_exists = any(
+            isinstance(note, dict)
+            and isinstance(note.get("body"), str)
+            and marker in note["body"]
+            for note in notes
+        )
+
+        labels = issue.get("labels")
+        if not isinstance(labels, list):
+            return issue, lifecycle
+        next_labels = [
+            label for label in labels
+            if not (isinstance(label, str) and label.startswith(STATE_LABEL_PREFIX))
+        ]
+        next_labels.append(f"{STATE_LABEL_PREFIX}done")
+        self._gitlab_mutation(
+            f"projects/{encoded}/issues/{issue_iid}",
+            "PUT",
+            {"labels": ",".join(next_labels)},
+        )
+        if not marker_exists:
+            self._gitlab_mutation(
+                f"projects/{encoded}/issues/{issue_iid}/notes",
+                "POST",
+                {"body": f"{marker} ({mr_url})."},
+            )
+        updated = dict(issue)
+        updated["labels"] = next_labels
+        return updated, "done"
 
     @staticmethod
     def _normalize_merge_request(merge_request: dict) -> dict:
@@ -1084,6 +1298,8 @@ class DashboardService:
             if action not in GLOBAL_CONTROL_ACTIONS:
                 raise DashboardError(f"unknown action: {action}")
             self._scheduler_global_control(action)
+            if action == "stop-all":
+                self._stop_preprod_review(allow_absent=True)
             return {
                 "accepted": True,
                 "global_state": "stopped" if action == "stop-all" else "running",

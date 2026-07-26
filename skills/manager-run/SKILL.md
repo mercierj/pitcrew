@@ -45,13 +45,26 @@ RISKY_RE=$(jq -r '.manager.risky_categories_regex // "IDOR|access.?control|auth|
 #   label         → the source's bucket label (defaults to .name). The `audit` source defaults to $AUDIT_LABEL.
 #   target_depth  → max open agent-route tickets for THIS source (defaults to DEFAULT_DEPTH)
 #   investigate_wip → max open investigate-route tickets for THIS source (defaults to DEFAULT_WIP)
-sources()   { jq -c '.manager.sources // [] | .[]' "$CONFIG_FILE"; }
+sources() {
+  jq -c --arg fallback "$CONFIG_DIR/proposals.json" '
+    (.manager.sources // []) as $configured |
+    if ($configured | length) > 0 then
+      $configured[] | if .findings_json == "$CONFIG_DIR/proposals.json" then .findings_json = $fallback else . end
+    else
+      {name:"architecture", format:"architecture-proposals-v1", label:"pitcrew-source::architecture",
+       findings_json:((.proposals.ledger // $fallback) | if . == "$CONFIG_DIR/proposals.json" then $fallback else . end), target_depth:2, investigate_wip:1}
+    end
+  ' "$CONFIG_FILE"
+}
 src_label() { echo "$1" | jq -r 'if .name=="audit" then (.label // "audit") else (.label // .name) end'; }
 src_depth() { echo "$1" | jq -r --argjson d "$DEFAULT_DEPTH" '.target_depth // $d'; }
 src_wip()   { echo "$1" | jq -r --argjson w "$DEFAULT_WIP" '.investigate_wip // $w'; }
 ```
 
-If `.manager.sources` is empty, exit cleanly: `manager-run: no findings sources configured — nothing to manage.`
+When `.manager.sources` is absent or empty, `sources()` derives the fallback architecture source from
+`.proposals.ledger`, or `$CONFIG_DIR/proposals.json` when no ledger is configured. This fallback architecture source
+uses `architecture-proposals-v1`, `pitcrew-source::architecture`, depth `2`, and investigate WIP `1`; do not
+emit the "no findings sources configured" no-op before this derivation.
 
 ═══ PRIME DIRECTIVE (read every fire, do not skim) ═══
 
@@ -103,7 +116,8 @@ structured no-op and stop.
 3. **DEDUP HARD against existing configured tracker AND state.** Before filing, (a) check the state file by
    finding-key, and (b) search configured tracker for an open ticket already covering this finding (title
    keywords + the repo's `svc: <name>` label + file path). A match → record the finding as ticketed (link the
-   existing ticket), file nothing. Many audit P0s ALREADY have tickets (e.g. cart IDOR = EX-995).
+   existing ticket), file nothing. For `architecture-proposals-v1`, attach the tracker first as specified in
+   STEP 4, then record it as ticketed. Many audit P0s ALREADY have tickets (e.g. cart IDOR = EX-995).
    Re-filing them is a HARD-RULE violation.
 4. **ROUTE risky findings to investigate-first, NEVER straight to agent.** A finding is RISKY if
    its severity is `critical`/`high` OR its category matches `$RISKY_RE` (security/auth/access-
@@ -165,6 +179,12 @@ For each source from `sources()`: read its `findings_json`, normalize by `format
   (`<repo>::<mode>::<signature>`). `repo` maps to a `repos[]` entry for the `svc:` label. `quick_win`
   (boolean) drives the `quick-win` label; severity is medium (hardening/architecture) or low
   (hygiene/doc-sync). Mostly `agent`-route (contained Improvements) unless the category is risky.
+- **`architecture-proposals-v1`** — a local proposal ledger array. Select only records with
+  `category="architecture"`, `status∈{"approved","investigate"}`, and no `tracker`. The
+  finding-key is the record's stable `id`; preserve its `evidence`, `where`, and `recommendation`
+  faithfully in the ticket body. An `investigate` status always routes to `investigate`.
+  An approved architecture finding follows the safe classification below; uncertain, broad, or
+  high-impact architecture changes route to `investigate`, never unattended implementation.
 
 If the source file is missing/empty, skip that source (qa may not have run yet). Skip an audit
 finding whose `repo` is not in `repos[]`; do NOT skip a qa finding for that reason (its repo is a
@@ -173,7 +193,7 @@ best-effort guess, not a hard scope gate).
 **STEP 2. Classify + prioritize each not-yet-filed finding.**
 
 For each finding whose `finding-key` is NOT in `state.filed`:
-- **Route** (HARD RULE 4): RISKY (`severity∈{critical,high}` OR `category =~ $RISKY_RE`) → `investigate`; else → `agent`.
+- **Route** (HARD RULE 4): RISKY (`severity∈{critical,high}` OR `category =~ $RISKY_RE`) → `investigate`; else → `agent`. `architecture-proposals-v1` records already marked `investigate` are always `investigate`.
 - **Priority**: critical→1 (Urgent), high→2 (High), medium→3 (Medium), low→4 (Low).
 - **Sort** within each stream: priority asc (Urgent first), then `confidence` (high first), then severity.
 
@@ -202,8 +222,8 @@ sorted findings.
 
 For each finding to file (take the top `slots` from each stream's sorted list):
 1. **Dedup (HARD RULE 3):** `list_issues(team, query="<3-5 distinctive title words>")` + filter to the repo, exclude Done/Canceled. Also scan for the finding's `file` path in open ticket
-   bodies. A plausible match → record `state.filed[key] = {route:"dedup", ticket:<existing>}`,
-   history `deduped`, do NOT file, and this does NOT consume a slot (try the next finding).
+   bodies. A plausible match supplies the ticket and route `dedup`; do not write `state.filed` yet for
+   `architecture-proposals-v1`.
 2. **File:**
    - title: prefix with the source — `[<source-name>] <repo>: <title…>` (audit) / `[qa] <flow_id>×<surface>: <reason…>` (qa) / `[research] <repo>: <title…>` (research), trimmed to ~80 chars
    - team `$TRACKER_TEAM`; project `$AGENT_BACKLOG_PROJECT_ID` if set; assignee `$ASSIGNEE_EMAIL`; priority per STEP 2.
@@ -219,7 +239,13 @@ For each finding to file (take the top `slots` from each stream's sorted list):
      <if agent-route:> Contained finding — implementer may pick up and open a fix change (human-go gate before merge).
      ```
      **Redact** any token/secret in a quoted snippet.
-   - Record `state.filed[key] = {ticket, route, severity, filed_at}`, history `filed`.
+   - For `architecture-proposals-v1`, after a created **or deduplicated** ticket, invoke
+     `python3 scripts/pitcrew_proposals.py attach-tracker --ledger "<findings_json>" --proposal-id "<id>" --iid "<tracker iid>" --url "<https tracker url>"`.
+     This helper must succeed **before any `state.filed[key]` or history write**; its failure is a hard
+     failure, writes neither filed nor history, and leaves the finding retryable. Do not attach a tracker
+     to a non-architecture proposal.
+   - Only now record `state.filed[key] = {ticket, route, severity, filed_at}` and history (`filed` or
+     `deduped`). For non-architecture sources this is the normal immediate post-create/dedup write.
 
 **STEP 5. Slack digest + summary.**
 

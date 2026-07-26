@@ -15,6 +15,11 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.pitcrew_preprod_review import PreprodReviewError, validate_remote_ref
+except ImportError:
+    from pitcrew_preprod_review import PreprodReviewError, validate_remote_ref
+
 if __package__:
     from scripts.pitcrew_models import (
         DEFAULT_MODELS,
@@ -209,6 +214,41 @@ def validate(config: Mapping[str, Any]) -> None:
         if safety.get(key, False) is not False:
             raise ConfigError(f"safety.{key} must default to false")
     _execution(config)
+    if "architecture" in config:
+        architecture = config["architecture"]
+        if not isinstance(architecture, Mapping):
+            raise ConfigError("architecture must be an object")
+        unsupported = set(architecture) - {"interval_seconds"}
+        if unsupported:
+            setting = sorted(unsupported, key=str)[0]
+            raise ConfigError(f"architecture.{setting} is unsupported")
+        interval_seconds = architecture.get("interval_seconds")
+        if (
+            isinstance(interval_seconds, bool)
+            or not isinstance(interval_seconds, int)
+            or interval_seconds != 604800
+        ):
+            raise ConfigError("architecture.interval_seconds must be exactly 604800")
+    if "preprod_review" in config:
+        preprod_review = config["preprod_review"]
+        if not isinstance(preprod_review, Mapping):
+            raise ConfigError("preprod_review must be an object")
+        required = {"base_ref", "compare_ref", "history_limit"}
+        if set(preprod_review) != required:
+            raise ConfigError("preprod_review must contain exactly base_ref, compare_ref, history_limit")
+        try:
+            base_ref = validate_remote_ref(preprod_review["base_ref"])
+        except PreprodReviewError as error:
+            raise ConfigError("preprod_review.base_ref is invalid") from error
+        try:
+            compare_ref = validate_remote_ref(preprod_review["compare_ref"])
+        except PreprodReviewError as error:
+            raise ConfigError("preprod_review.compare_ref is invalid") from error
+        if base_ref == compare_ref:
+            raise ConfigError("preprod_review refs must differ")
+        history_limit = preprod_review["history_limit"]
+        if isinstance(history_limit, bool) or not isinstance(history_limit, int) or not 1 <= history_limit <= 50:
+            raise ConfigError("preprod_review.history_limit must be an integer from 1 to 50")
     agents = config.get("agents", {})
     if not isinstance(agents, Mapping):
         raise ConfigError("agents must be an object")
@@ -235,6 +275,12 @@ def validate(config: Mapping[str, Any]) -> None:
             routing_mode = entry["routing_mode"]
             if not isinstance(routing_mode, str) or routing_mode not in ROUTING_MODES:
                 raise ConfigError(f"agents.{skill}.routing_mode is unsupported")
+        if skill == "preprod-review-run":
+            expected = {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"}
+            if dict(entry) != expected:
+                if entry.get("model") != expected["model"]:
+                    raise ConfigError("agents.preprod-review-run.model must be gpt-5.6-sol")
+                raise ConfigError("agents.preprod-review-run.reasoning_effort must be xhigh")
 
 
 def write_project(
@@ -674,6 +720,9 @@ def main(argv: list[str] | None = None) -> int:
     reasoning_parser = subparsers.add_parser("reasoning")
     reasoning_parser.add_argument("--project", required=True)
     reasoning_parser.add_argument("--skill", required=True)
+    reasoning_effort_parser = subparsers.add_parser("reasoning-effort")
+    reasoning_effort_parser.add_argument("--project", required=True)
+    reasoning_effort_parser.add_argument("--skill", required=True)
     routing_parser = subparsers.add_parser("routing-mode")
     routing_parser.add_argument("--project", required=True)
     routing_parser.add_argument("--skill", required=True)
@@ -697,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "model":
         print(resolve_model(load_runtime_config(args.project), args.skill))
         return 0
-    if args.command == "reasoning":
+    if args.command in {"reasoning", "reasoning-effort"}:
         print(resolve_reasoning_effort(load_runtime_config(args.project), args.skill))
         return 0
     if args.command == "routing-mode":

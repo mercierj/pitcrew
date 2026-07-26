@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = {
+    "architecture-run",
+    "preprod-review-run",
     "product-discovery-run",
     "security-run",
     "coverage-run",
@@ -43,6 +45,13 @@ INTERFACE = {
 
 
 class PluginContractTest(unittest.TestCase):
+    def test_standard_installer_references_every_codex_skill(self):
+        installer = (ROOT / "bin/install.sh").read_text(encoding="utf-8")
+        match = re.search(r"SKILLS=\(\n(?P<skills>.*?)\n\)", installer, re.DOTALL)
+        self.assertIsNotNone(match)
+        installed = set(re.findall(r'^\s+"([a-z-]+)"$', match.group("skills"), re.MULTILINE))
+        self.assertEqual(SKILLS, installed)
+
     def test_manifest_exposes_all_skills(self):
         manifest = json.loads(
             (ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8")

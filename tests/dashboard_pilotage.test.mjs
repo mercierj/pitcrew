@@ -195,13 +195,16 @@ test("detail transitions preserve the explicit external focus target", () => {
   delete globalThis.document;
 });
 
-test("refresh loads decisions with its initial data and renders pilotage before GitLab", async () => {
+test("refresh loads decisions and the authenticated local preprod review before GitLab", async () => {
   const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
   const refreshSource = appSource.split("async function refresh({")[1].split("elements.refreshButton.addEventListener")[0];
   const initialLoad = refreshSource.split("const now = Date.now();")[0];
 
-  assert.match(initialLoad, /const \[snapshot, history, decisions, proposals\] = await Promise\.all\(/);
+  assert.match(initialLoad, /const \[snapshot, history, decisions, proposals, preprod\] = await Promise\.all\(/);
   assert.match(initialLoad, /fetchJson\("\/api\/decisions"\)\.then\(\(payload\) => \{\s*sources\.decisions = payload;/);
+  assert.match(initialLoad, /fetchJson\("\/api\/preprod-review", \{headers: \{"X-Pitcrew-Session": sessionToken\}\}\)\.then\(\(payload\) => \{\s*sources\.preprod = payload;/);
+  assert.match(initialLoad, /\.catch\(\(\) => \{\s*const unavailable = \{unavailable: true\};\s*sources\.preprod = unavailable;/);
+  assert.ok(initialLoad.indexOf("renderPreprodReview(preprod);") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
   assert.ok(initialLoad.indexOf("renderDecision(decisions);") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
   assert.ok(initialLoad.indexOf("renderPilotageView();") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
 });

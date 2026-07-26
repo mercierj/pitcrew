@@ -1,0 +1,194 @@
+<style>
+  .dashboard-frame {
+    overflow: hidden;
+    margin: 22px 0;
+    border: 1px solid #cfd7d1;
+    border-radius: 20px;
+    background: #eef2ef;
+    box-shadow: 0 20px 50px rgba(24, 60, 44, .12);
+    color: #1c2b24;
+    font: 12px/1.35 ui-sans-serif, system-ui, sans-serif;
+  }
+  .dash-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    background: #173b2b;
+    color: white;
+  }
+  .brand { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:850; }
+  .brand-mark { display:grid; place-items:center; width:28px; height:28px; border-radius:8px; background:#62d39a; color:#173b2b; }
+  .top-actions { display:flex; align-items:center; gap:12px; }
+  .sync { color:#ccebd9; font-weight:700; }
+  .sync::before { content:""; display:inline-block; width:7px; height:7px; margin-right:6px; border-radius:50%; background:#62d39a; }
+  .stop { padding:7px 10px; border:1px solid rgba(255,255,255,.3); border-radius:7px; color:white; }
+  .dash-shell { display:grid; grid-template-columns:160px minmax(0,1fr); min-height:620px; }
+  .sidebar { padding:15px 11px; border-right:1px solid #d5ddd7; background:#f8faf8; }
+  .project { margin-bottom:16px; padding:9px; border-radius:9px; background:white; font-weight:800; }
+  .nav-item { display:flex; justify-content:space-between; margin-bottom:4px; padding:8px 9px; border-radius:8px; color:#607068; font-weight:700; }
+  .nav-item.active { background:#dff2e7; color:#146b45; }
+  .nav-count { min-width:20px; padding:1px 5px; border-radius:9px; background:rgba(20,107,69,.12); text-align:center; }
+  .side-health { margin-top:28px; padding:10px; border:1px solid #dce3de; border-radius:10px; background:#fff; }
+  .side-health b { display:block; margin-bottom:6px; }
+  .health-line { display:flex; justify-content:space-between; padding:3px 0; color:#607068; }
+  .good { color:#146b45; font-weight:800; }
+  .warn { color:#9a6205; font-weight:800; }
+  .dash-main { min-width:0; padding:18px; }
+  .page-title { display:flex; align-items:end; justify-content:space-between; gap:12px; margin-bottom:14px; }
+  .page-title h3 { margin:0; font-size:20px; }
+  .page-title p { margin:2px 0 0; color:#67766e; }
+  .refresh { padding:7px 10px; border:1px solid #cbd5ce; border-radius:8px; background:#fff; font-weight:750; }
+  .human-queue { margin-bottom:13px; padding:12px; border:1px solid #e5c471; border-radius:12px; background:#fff8df; }
+  .queue-head { display:flex; justify-content:space-between; margin-bottom:8px; }
+  .queue-head b { font-size:13px; }
+  .queue-head span { color:#8a5400; font-weight:800; }
+  .queue-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .queue-card { display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:center; min-width:0; padding:8px; border-radius:8px; background:#fff; }
+  .queue-icon { display:grid; place-items:center; width:25px; height:25px; border-radius:7px; background:#ffe5a6; color:#8a5400; font-weight:900; }
+  .queue-card b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .queue-card small { color:#69766f; }
+  .primary { padding:5px 7px; border-radius:6px; background:#146b45; color:#fff; font-weight:800; white-space:nowrap; }
+  .board-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:9px; }
+  .board-head strong { font-size:14px; }
+  .board-tools { display:flex; gap:5px; }
+  .tool { padding:5px 7px; border:1px solid #d5ddd7; border-radius:7px; background:#fff; color:#617068; }
+  .board { display:grid; grid-template-columns:repeat(4,minmax(170px,1fr)); gap:9px; }
+  .lane { min-width:0; padding:9px; border-radius:11px; background:#e3e9e5; }
+  .lane-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; font-weight:850; }
+  .lane-head span { display:grid; place-items:center; min-width:21px; height:21px; border-radius:10px; background:#fff; color:#69766f; font-size:10px; }
+  .lane.blocked { background:#f5e7e1; }
+  .ticket { margin-bottom:8px; padding:9px; border:1px solid #d9e0da; border-radius:9px; background:#fff; box-shadow:0 3px 8px rgba(28,43,36,.05); }
+  .ticket:last-child { margin-bottom:0; }
+  .ticket-type { display:flex; align-items:center; justify-content:space-between; color:#69766f; font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:.04em; }
+  .ticket h4 { margin:5px 0 7px; font-size:12px; line-height:1.3; }
+  .ticket-meta { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:7px; }
+  .pill { padding:2px 5px; border-radius:5px; background:#eef3ef; color:#55655d; font-size:10px; }
+  .ticket-foot { display:flex; align-items:center; justify-content:space-between; border-top:1px solid #edf0ed; padding-top:7px; color:#68756e; }
+  .mini-action { color:#146b45; font-weight:850; }
+  .done-row { display:flex; align-items:center; justify-content:space-between; margin-top:10px; padding:9px 11px; border:1px solid #d6ddd8; border-radius:9px; background:#f8faf8; color:#5e6c65; font-weight:750; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; color:#65736c; }
+  .legend b { color:#26362e; }
+  .approval { margin-top:22px; }
+  @media (max-width: 980px) {
+    .dashboard-frame { overflow-x:auto; }
+    .dash-shell { min-width:1060px; }
+  }
+</style>
+
+<h2>Design proposé · Flux de livraison</h2>
+<p class="subtitle">Les interventions humaines passent en premier, puis le tableau actif. La santé des agents reste visible sans occuper le contenu principal.</p>
+
+<div class="dashboard-frame">
+  <header class="dash-top">
+    <div class="brand"><span class="brand-mark">P</span> Pitcrew</div>
+    <div class="top-actions"><span class="sync">Actualisé il y a 8 s</span><span class="stop">Tout arrêter</span></div>
+  </header>
+  <div class="dash-shell">
+    <aside class="sidebar">
+      <div class="project">GetBill⌄</div>
+      <div class="nav-item active"><span>Pilotage</span><span class="nav-count">3</span></div>
+      <div class="nav-item"><span>Agents</span><span>›</span></div>
+      <div class="nav-item"><span>Historique</span><span>›</span></div>
+      <div class="side-health">
+        <b>Santé du crew</b>
+        <div class="health-line"><span>Sains</span><span class="good">12</span></div>
+        <div class="health-line"><span>Alertes</span><span class="warn">1</span></div>
+        <div class="health-line"><span>Échecs</span><span>0</span></div>
+        <div class="health-line"><span>En cours</span><span>2</span></div>
+      </div>
+    </aside>
+
+    <main class="dash-main">
+      <div class="page-title">
+        <div><h3>Bonjour · voici ce qui bouge</h3><p>Dimanche 26 juillet · synchronisation GitLab active</p></div>
+        <span class="refresh">↻ Actualiser</span>
+      </div>
+
+      <section class="human-queue">
+        <div class="queue-head"><b>Ton intervention est requise</b><span>3 actions</span></div>
+        <div class="queue-grid">
+          <div class="queue-card"><span class="queue-icon">?</span><span><b>#418 Stratégie de migration</b><small>Décision · bloque le flux</small></span><span class="primary">Répondre</span></div>
+          <div class="queue-card"><span class="queue-icon">✓</span><span><b>Durcir les permissions OAuth</b><small>Proposition sécurité</small></span><span class="primary">Examiner</span></div>
+          <div class="queue-card"><span class="queue-icon">↗</span><span><b>!127 prête à fusionner</b><small>Pipeline vert · validée</small></span><span class="primary">Fusionner</span></div>
+        </div>
+      </section>
+
+      <div class="board-head">
+        <strong>Flux actif · 10 éléments</strong>
+        <div class="board-tools"><span class="tool">Tous les rôles⌄</span><span class="tool">Rechercher</span></div>
+      </div>
+
+      <section class="board">
+        <div class="lane">
+          <div class="lane-head">À faire <span>4</span></div>
+          <article class="ticket">
+            <div class="ticket-type"><span>#423 · Fonctionnalité</span><span>8 min</span></div>
+            <h4>Exporter les règlements au format CSV</h4>
+            <div class="ticket-meta"><span class="pill">Priorité haute</span><span class="pill">Facturation</span></div>
+            <div class="ticket-foot"><span>Non assigné</span><span class="mini-action">Lancer ›</span></div>
+          </article>
+          <article class="ticket">
+            <div class="ticket-type"><span>#422 · Correctif</span><span>32 min</span></div>
+            <h4>Corriger l’état des relances automatiques</h4>
+            <div class="ticket-foot"><span>Manager</span><span class="mini-action">Ouvrir ›</span></div>
+          </article>
+        </div>
+
+        <div class="lane">
+          <div class="lane-head">En cours <span>2</span></div>
+          <article class="ticket">
+            <div class="ticket-type"><span>#419 · Correctif</span><span>12 min</span></div>
+            <h4>Fiabiliser le rapprochement des paiements</h4>
+            <div class="ticket-meta"><span class="pill">Implementer</span><span class="pill">gpt-5.6-sol</span></div>
+            <div class="ticket-foot"><span class="good">● Agent actif</span><span class="mini-action">Détails ›</span></div>
+          </article>
+          <article class="ticket">
+            <div class="ticket-type"><span>#420 · Recherche</span><span>27 min</span></div>
+            <h4>Auditer les imports de fichiers volumineux</h4>
+            <div class="ticket-foot"><span>Research</span><span class="mini-action">Ouvrir ›</span></div>
+          </article>
+        </div>
+
+        <div class="lane">
+          <div class="lane-head">En revue <span>3</span></div>
+          <article class="ticket">
+            <div class="ticket-type"><span>!127 · MR</span><span>5 min</span></div>
+            <h4>Renforcer la validation des webhooks</h4>
+            <div class="ticket-meta"><span class="pill">Pipeline ✓</span><span class="pill">Approuvée</span></div>
+            <div class="ticket-foot"><span>main ← feat/webhooks</span><span class="mini-action">Fusionner ›</span></div>
+          </article>
+          <article class="ticket">
+            <div class="ticket-type"><span>#417 · UX</span><span>1 h</span></div>
+            <h4>Clarifier l’écran de réconciliation</h4>
+            <div class="ticket-foot"><span>Validator</span><span class="mini-action">Valider ›</span></div>
+          </article>
+        </div>
+
+        <div class="lane blocked">
+          <div class="lane-head">Bloqué <span>1</span></div>
+          <article class="ticket">
+            <div class="ticket-type"><span>#418 · Décision</span><span>34 min</span></div>
+            <h4>Choisir la stratégie de migration des factures</h4>
+            <div class="ticket-meta"><span class="pill">Intervention requise</span></div>
+            <div class="ticket-foot"><span class="warn">● En attente</span><span class="mini-action">Répondre ›</span></div>
+          </article>
+        </div>
+      </section>
+
+      <div class="done-row"><span>› Terminés aujourd’hui</span><span>6 éléments</span></div>
+      <div class="legend"><span><b>1.</b> Une file d’actions unique remplace trois grands panneaux.</span><span><b>2.</b> Les détails agents s’ouvrent à la demande.</span><span><b>3.</b> Historique et réglages vivent dans la navigation.</span></div>
+    </main>
+  </div>
+</div>
+
+<div class="options approval">
+  <div class="option" data-choice="layout-approved" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Cette hiérarchie me convient</h3><p>On conserve cette structure pour détailler les interactions.</p></div>
+  </div>
+  <div class="option" data-choice="layout-revise" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>À ajuster</h3><p>Je préciserai dans la conversation ce qui doit changer.</p></div>
+  </div>
+</div>

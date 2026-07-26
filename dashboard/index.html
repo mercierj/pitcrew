@@ -118,6 +118,26 @@
           <p id="overview-usage-note" class="usage-note" aria-live="polite"></p>
         </section>
 
+        <section id="preprod-review" class="panel preprod-review-panel" aria-labelledby="preprod-review-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Contrôle manuel</p>
+              <h2 id="preprod-review-title">Revue avant Preprod</h2>
+              <p class="section-note">origin/preprod...origin/develop · Sol/xhigh</p>
+            </div>
+            <p id="preprod-review-state" class="section-note" aria-live="polite">Chargement de la revue locale…</p>
+          </div>
+          <div class="preprod-review-controls">
+            <button id="preprod-review-trigger" class="button button-primary" type="button">Lancer la revue complète</button>
+            <button id="preprod-review-stop" class="button button-danger" type="button" hidden>Arrêter la revue</button>
+          </div>
+          <div id="preprod-review-report" class="preprod-review-report" aria-live="polite"></div>
+          <section id="preprod-review-history" aria-labelledby="preprod-review-history-title">
+            <h3 id="preprod-review-history-title">Historique des revues</h3>
+            <ol id="preprod-review-history-list" class="preprod-review-history-list"></ol>
+          </section>
+        </section>
+
         <section id="gitlab-work" aria-labelledby="gitlab-title" hidden>
           <div class="section-heading">
             <div>

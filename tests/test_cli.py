@@ -354,7 +354,28 @@ class CliTest(unittest.TestCase):
             self.assertEqual(0, override.returncode, override.stderr)
             self.assertEqual("gpt-5.6-luna\n", override.stdout)
 
-    def test_runner_dry_run_prints_configured_model(self):
+    def test_runner_dry_run_prints_routing_mode_for_model_only_profile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root)}
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--dry-run",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("reasoning_effort=medium", result.stdout)
+            self.assertIn("routing_mode=observe", result.stdout)
+
+    def test_runner_dry_run_prints_configured_model_and_reasoning_effort(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
             env = {**os.environ, "CODEX_HOME": str(root)}
@@ -372,6 +393,122 @@ class CliTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("model=gpt-5.6-luna", result.stdout)
+            self.assertIn("reasoning_effort=medium", result.stdout)
+            self.assertIn("routing_mode=observe", result.stdout)
+
+    def test_preprod_review_runner_is_pinned_to_sol_xhigh(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "CODEX_HOME": str(root)}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            result = self.run_cli("bin/pitcrew-codex.sh", "preprod-review-run", "getbill", "--dry-run", env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("model=gpt-5.6-sol", result.stdout)
+            self.assertIn("reasoning_effort=xhigh", result.stdout)
+
+    def test_preprod_review_runner_passes_xhigh_to_codex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            args_path = root / "codex-args"
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n", encoding="utf-8")
+            fake_codex.chmod(0o755)
+            env = {**os.environ, "CODEX_HOME": str(root), "FAKE_CODEX_ARGS": str(args_path), "CODEX_BIN": str(fake_codex)}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            result = self.run_cli("bin/pitcrew-codex.sh", "preprod-review-run", "getbill", env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn('-c\nmodel_reasoning_effort="xhigh"', args_path.read_text(encoding="utf-8"))
+
+    def test_preprod_review_manual_run_never_calls_preflight_or_dispatcher(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            calls = root / "python-calls"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$PITCREW_PYTHON_CALLS\"\nexec \"$PITCREW_REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\nargs=(\"$@\")\nfor ((i=0; i<${#args[@]}; i++)); do\n  if [[ \"${args[$i]}\" == \"--output-last-message\" ]]; then printf 'no eligible item\\n' > \"${args[$((i+1))]}\"; fi\ndone\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "CODEX_HOME": str(root),
+                "CODEX_BIN": str(fake_codex),
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "PITCREW_PYTHON_CALLS": str(calls),
+                "PITCREW_REAL_PYTHON": sys.executable,
+            }
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+
+            result = self.run_cli("bin/pitcrew-codex.sh", "preprod-review-run", "getbill", env=env)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertNotIn("pitcrew_preflight.py", recorded)
+            self.assertNotIn("pitcrew_run_dispatcher.py", recorded)
+
+    def test_preprod_review_rejects_scheduled_and_directed_execution_before_helpers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            marker = root / "python-was-called"
+            fake_python = fake_bin / "python3"
+            fake_python.write_text("#!/usr/bin/env bash\ntouch \"$PITCREW_HELPER_MARKER\"\nexit 99\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "PITCREW_HELPER_MARKER": str(marker), "CODEX_HOME": str(root / ".codex")}
+            for args in (
+                ("--scheduled",),
+                ("--target", "getbill1/getbill#1"),
+                ("--scheduled", "--coordinated-run", "00000000-0000-0000-0000-000000000000"),
+            ):
+                with self.subTest(args=args):
+                    result = self.run_cli("bin/pitcrew-codex.sh", "preprod-review-run", "getbill", *args, env=env)
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("manual-only", result.stderr)
+                    self.assertFalse(marker.exists(), result.stderr)
+
+    def test_runner_passes_configured_reasoning_effort_to_codex(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {
+                **os.environ,
+                "CODEX_HOME": str(root),
+                "FAKE_CODEX_ARGS": str(root / "codex-args"),
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            config_path = root / "pitcrew/getbill/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["agents"]["research-run"]["reasoning_effort"] = "medium"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$FAKE_CODEX_ARGS\"\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh", "research-run", "getbill", env=env
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            args = (root / "codex-args").read_text(encoding="utf-8")
+            self.assertIn("-c\nmodel_reasoning_effort=\"medium\"", args)
 
     def test_runner_refuses_to_start_when_global_stop_is_active(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -766,6 +903,22 @@ class CliTest(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env["CODEX_BIN"] = str(fake_codex)
+            fake_glab = root / "fake-glab"
+            fake_glab.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "prefix = 'projects/59043683/issues/'\n"
+                "if len(sys.argv) != 5 or sys.argv[1:4] != ['api', '--hostname', 'gitlab.com'] or not sys.argv[4].startswith(prefix):\n"
+                "    raise SystemExit(17)\n"
+                "raw_iid = sys.argv[4].removeprefix(prefix)\n"
+                "if not raw_iid.isdigit() or int(raw_iid) <= 0:\n"
+                "    raise SystemExit(17)\n"
+                "iid = int(raw_iid)\n"
+                "print(json.dumps({'iid': iid, 'state': 'opened', 'labels': ['pitcrew-agent', 'pitcrew-state::todo'], 'web_url': f'https://gitlab.com/getbill1/getbill/-/issues/{iid}'}))\n",
+                encoding="utf-8",
+            )
+            fake_glab.chmod(0o755)
+            env["GLAB_BIN"] = str(fake_glab)
             targets = [f"https://gitlab.com/getbill1/getbill/-/issues/{number}" for number in range(1, 5)]
             responses = [
                 self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)
@@ -801,6 +954,22 @@ class CliTest(unittest.TestCase):
             fake_codex.write_text("#!/usr/bin/env bash\nwhile [ -e \"$FAKE_GATE\" ]; do sleep .02; done\n", encoding="utf-8")
             fake_codex.chmod(0o755)
             env["CODEX_BIN"] = str(fake_codex)
+            fake_glab = root / "fake-glab"
+            fake_glab.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                "prefix = 'projects/59043683/issues/'\n"
+                "if len(sys.argv) != 5 or sys.argv[1:4] != ['api', '--hostname', 'gitlab.com'] or not sys.argv[4].startswith(prefix):\n"
+                "    raise SystemExit(17)\n"
+                "raw_iid = sys.argv[4].removeprefix(prefix)\n"
+                "if not raw_iid.isdigit() or int(raw_iid) <= 0:\n"
+                "    raise SystemExit(17)\n"
+                "iid = int(raw_iid)\n"
+                "print(json.dumps({'iid': iid, 'state': 'opened', 'labels': ['pitcrew-agent', 'pitcrew-state::todo'], 'web_url': f'https://gitlab.com/getbill1/getbill/-/issues/{iid}'}))\n",
+                encoding="utf-8",
+            )
+            fake_glab.chmod(0o755)
+            env["GLAB_BIN"] = str(fake_glab)
             target = "https://gitlab.com/getbill1/getbill/-/issues/42"
             first = self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)
             second = self.run_cli("bin/pitcrew-codex.sh", "implementer-run", "getbill", "--target", target, "--scheduled", env=env)

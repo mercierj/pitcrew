@@ -117,6 +117,18 @@ def create_server(
                 self._send_json(403, {"error": "request rejected"})
                 return
             parsed = urlsplit(self.path)
+            if parsed.path == "/api/preprod-review":
+                supplied_token = self.headers.get("X-Pitcrew-Session")
+                if (
+                    parsed.query
+                    or self.headers.get("Host") is None
+                    or supplied_token is None
+                    or not secrets.compare_digest(supplied_token, session_token)
+                ):
+                    self._send_json(403, {"error": "request rejected"})
+                    return
+                self._service_json(service.preprod_review_snapshot)
+                return
             if parsed.path == "/favicon.ico":
                 self._send_empty(204)
                 return
@@ -219,6 +231,24 @@ def create_server(
                 self._send_json(400, {"error": "invalid request"})
                 return
             action = request.get("action")
+            if action in {"trigger-preprod-review", "stop-preprod-review"}:
+                if set(request) != {"action"}:
+                    self._send_json(400, {"error": "invalid request"})
+                    return
+                try:
+                    result = (
+                        service.trigger_preprod_review()
+                        if action == "trigger-preprod-review"
+                        else service.stop_preprod_review()
+                    )
+                except DashboardError:
+                    self._send_json(403, {"error": "action rejected"})
+                    return
+                except Exception:
+                    self._send_json(500, {"error": "service unavailable"})
+                    return
+                self._send_json(202, result)
+                return
             if action in {"stop-all", "resume-all"}:
                 if set(request) != {"action"}:
                     self._send_json(400, {"error": "invalid request"})

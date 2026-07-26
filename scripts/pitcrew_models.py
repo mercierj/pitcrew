@@ -38,6 +38,8 @@ MODEL_CATALOG = {
 }
 
 DEFAULT_MODELS = {
+    "architecture-run": "gpt-5.6-sol",
+    "preprod-review-run": "gpt-5.6-sol",
     "security-run": "gpt-5.6-sol",
     "product-discovery-run": "gpt-5.6-terra",
     "research-run": "gpt-5.6-terra",
@@ -55,10 +57,12 @@ DEFAULT_MODELS = {
     "releaser-run": "gpt-5.6-terra",
 }
 
-REASONING_EFFORTS = {"low", "medium", "high"}
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
 ROUTING_MODES = {"fixed", "observe"}
 
 DEFAULT_REASONING_EFFORTS = {
+    "architecture-run": "high",
+    "preprod-review-run": "xhigh",
     "security-run": "high",
     "product-discovery-run": "medium",
     "research-run": "medium",

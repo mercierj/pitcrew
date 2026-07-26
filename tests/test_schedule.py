@@ -52,6 +52,7 @@ class ScheduleTest(unittest.TestCase):
         schedule = {item["skill"]: item for item in json.loads(result.stdout)}
 
         for skill in (
+            "architecture-run",
             "research-run",
             "manager-run",
             "implementer-run",
@@ -72,6 +73,17 @@ class ScheduleTest(unittest.TestCase):
         ):
             self.assertFalse(schedule[skill]["enabled"], skill)
             self.assertTrue(schedule[skill]["reason"], skill)
+
+        self.assertNotIn("preprod-review-run", schedule)
+
+    def test_preprod_review_is_never_rendered_as_a_launch_agent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            output = root / "LaunchAgents"
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            result = self.run_scheduler("render", "--project", "getbill", "--output-dir", str(output), env=env)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(any("preprod-review-run" in path.name for path in output.glob("*.plist")))
 
     def test_runtime_state_defaults_and_transitions(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -153,7 +165,12 @@ class ScheduleTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             plists = sorted(output.glob("io.getbill.pitcrew.getbill.*.plist"))
-            self.assertEqual(10, len(plists))
+            self.assertEqual(11, len(plists))
+
+            architecture = output / "io.getbill.pitcrew.getbill.architecture-run.plist"
+            with architecture.open("rb") as handle:
+                payload = plistlib.load(handle)
+            self.assertEqual(604800, payload["StartInterval"])
 
             research = output / "io.getbill.pitcrew.getbill.research-run.plist"
             with research.open("rb") as handle:
@@ -240,7 +257,7 @@ class ScheduleTest(unittest.TestCase):
             self.assertTrue(payload)
             self.assertTrue(all(item["global_state"] == "stopped" for item in payload))
             bootouts = [line for line in calls.read_text().splitlines() if "bootout" in line]
-            self.assertEqual(10, len(bootouts))
+            self.assertEqual(11, len(bootouts))
 
     def test_stop_all_closes_admission_before_cancelling_and_booting_out(self):
         scheduler = load_scheduler_module()
@@ -317,7 +334,7 @@ class ScheduleTest(unittest.TestCase):
             ],
             calls[:3],
         )
-        self.assertEqual(10, len([call for call in calls if call[0] == "bootout"]))
+        self.assertEqual(11, len([call for call in calls if call[0] == "bootout"]))
 
     def test_resume_reopens_admission_and_drains_once_after_install(self):
         scheduler = load_scheduler_module()
@@ -587,10 +604,11 @@ class ScheduleTest(unittest.TestCase):
 
             self.assertEqual(0, result.returncode, result.stderr)
             status = json.loads(result.stdout)
-            self.assertEqual(15, len(status))
+            self.assertEqual(16, len(status))
             self.assertEqual(
                 {entry["skill"] for entry in status},
                 {
+                    "architecture-run",
                     "research-run",
                     "security-run",
                     "product-discovery-run",
@@ -608,7 +626,7 @@ class ScheduleTest(unittest.TestCase):
                     "releaser-run",
                 },
             )
-            self.assertEqual(15, len(calls.read_text(encoding="utf-8").splitlines()))
+            self.assertEqual(16, len(calls.read_text(encoding="utf-8").splitlines()))
 
     def test_launchctl_failure_scrubs_credential_formats_and_limits_stderr(self):
         cases = (

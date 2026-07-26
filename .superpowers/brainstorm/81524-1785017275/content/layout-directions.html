@@ -1,0 +1,155 @@
+<style>
+  .direction-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 24px;
+  }
+  .direction {
+    cursor: pointer;
+    overflow: hidden;
+    border: 2px solid #d7ddd8;
+    border-radius: 18px;
+    background: #fff;
+    transition: 160ms ease;
+  }
+  .direction:hover { transform: translateY(-2px); border-color: #4f8a6b; }
+  .direction.selected { border-color: #146b45; box-shadow: 0 0 0 4px rgba(20,107,69,.12); }
+  .direction-body { padding: 16px; }
+  .direction-body h3 { margin: 0 0 6px; }
+  .direction-body p { margin: 0; color: #5a6860; font-size: 14px; }
+  .preview {
+    height: 330px;
+    padding: 12px;
+    background: #f1f4f1;
+    color: #223029;
+    font: 11px/1.25 ui-sans-serif, system-ui, sans-serif;
+  }
+  .appbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 9px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #183c2c;
+    color: #fff;
+    font-weight: 800;
+  }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#63d39a; margin-right:5px; }
+  .shell { display: grid; grid-template-columns: 58px 1fr; gap: 9px; }
+  .rail { padding: 8px 5px; border-radius: 8px; background:#fff; color:#66736c; }
+  .rail div { margin-bottom: 9px; }
+  .rail .active { color:#146b45; font-weight:800; }
+  .content { display:grid; gap:9px; min-width:0; }
+  .priority {
+    padding: 10px;
+    border: 1px solid #edcc82;
+    border-radius: 9px;
+    background: #fff8e5;
+  }
+  .priority strong { display:block; margin-bottom:5px; font-size:12px; }
+  .task { display:flex; justify-content:space-between; gap:7px; padding:5px 0; border-top:1px solid #ead9aa; }
+  .task:first-of-type { border-top:0; }
+  .action { padding:3px 6px; border-radius:5px; background:#146b45; color:#fff; white-space:nowrap; }
+  .summary-row { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .stat { padding:7px; border-radius:7px; background:#fff; }
+  .stat b { display:block; font-size:16px; }
+  .stat small { color:#6a756f; }
+  .two-col { display:grid; grid-template-columns:1.6fr 1fr; gap:8px; }
+  .panel-mini { padding:9px; border-radius:8px; background:#fff; }
+  .panel-mini > b { display:block; margin-bottom:7px; }
+  .ticket { margin-top:5px; padding:6px; border-left:3px solid #4f8a6b; background:#f4f7f5; }
+  .agent { display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid #edf0ed; }
+  .kanban { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; }
+  .lane { min-height:176px; padding:7px; border-radius:8px; background:#e9eeea; }
+  .lane > b { display:block; margin-bottom:6px; }
+  .card-mini { margin-bottom:6px; padding:7px; border-radius:6px; background:#fff; box-shadow:0 2px 5px rgba(0,0,0,.05); }
+  .healthbar { display:flex; gap:5px; margin-top:8px; }
+  .healthbar span { flex:1; padding:6px; border-radius:6px; background:#fff; text-align:center; }
+  .inbox-row { display:grid; grid-template-columns:55px 1fr auto; gap:7px; align-items:center; padding:8px 0; border-bottom:1px solid #e6ebe7; }
+  .tag { color:#8a5400; font-weight:800; }
+  .tabs { display:flex; gap:5px; margin-bottom:7px; }
+  .tabs span { padding:5px 7px; border-radius:6px; background:#e8ece9; }
+  .tabs .active { background:#183c2c; color:#fff; }
+  .recommended { display:inline-block; margin-top:10px; color:#146b45; font-size:12px; font-weight:800; text-transform:uppercase; letter-spacing:.08em; }
+  @media (max-width: 900px) { .direction-grid { grid-template-columns:1fr; } }
+</style>
+
+<h2>Quelle structure te ferait gagner le plus de temps chaque jour&nbsp;?</h2>
+<p class="subtitle">Les trois gardent les mêmes fonctions. Clique sur la structure qui rend les priorités les plus évidentes.</p>
+
+<div class="direction-grid">
+  <article class="direction" data-choice="a-command-center" onclick="toggleSelect(this)">
+    <div class="preview">
+      <div class="appbar"><span>Pitcrew</span><span><i class="dot"></i>Tout fonctionne</span></div>
+      <div class="shell">
+        <nav class="rail"><div class="active">Vue</div><div>Travail</div><div>Agents</div><div>Historique</div></nav>
+        <div class="content">
+          <div class="priority">
+            <strong>3 actions attendent ta décision</strong>
+            <div class="task"><span>Valider la proposition sécurité</span><span class="action">Examiner</span></div>
+            <div class="task"><span>Répondre au blocage #418</span><span class="action">Décider</span></div>
+          </div>
+          <div class="summary-row">
+            <div class="stat"><b>2</b><small>en cours</small></div>
+            <div class="stat"><b>1</b><small>bloqué</small></div>
+            <div class="stat"><b>4</b><small>à revoir</small></div>
+            <div class="stat"><b>12</b><small>agents sains</small></div>
+          </div>
+          <div class="two-col">
+            <div class="panel-mini"><b>Travail en mouvement</b><div class="ticket">#421 · MR prête à fusionner</div><div class="ticket">#419 · Implémentation en cours</div><div class="ticket">#415 · Validation locale</div></div>
+            <div class="panel-mini"><b>Santé des agents</b><div class="agent"><span>Implementer</span><span>●</span></div><div class="agent"><span>Reviewer</span><span>●</span></div><div class="agent"><span>Validator</span><span>●</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="direction-body">
+      <h3>A · Poste de pilotage</h3>
+      <p>Actions humaines en tête, progression et santé côte à côte. Très équilibré pour le suivi quotidien.</p>
+      <span class="recommended">Recommandé</span>
+    </div>
+  </article>
+
+  <article class="direction" data-choice="b-workflow-board" onclick="toggleSelect(this)">
+    <div class="preview">
+      <div class="appbar"><span>Pitcrew · Travail</span><span><i class="dot"></i>12/13 agents sains</span></div>
+      <div class="priority"><strong>3 interventions requises</strong><div class="task"><span>1 décision · 2 validations</span><span class="action">Ouvrir</span></div></div>
+      <div class="summary-row" style="margin:8px 0">
+        <div class="stat"><b>4</b><small>à faire</small></div><div class="stat"><b>2</b><small>en cours</small></div><div class="stat"><b>3</b><small>en revue</small></div><div class="stat"><b>1</b><small>bloqué</small></div>
+      </div>
+      <div class="kanban">
+        <div class="lane"><b>À faire</b><div class="card-mini">#423 Export CSV</div><div class="card-mini">#422 Relances</div></div>
+        <div class="lane"><b>En cours</b><div class="card-mini">#419 Paiements<br><small>Implementer</small></div></div>
+        <div class="lane"><b>En revue</b><div class="card-mini">#421 Auth<br><small>MR !127</small></div><div class="card-mini">#417 UX</div></div>
+        <div class="lane"><b>Bloqué</b><div class="card-mini">#418 Décision requise</div></div>
+      </div>
+      <div class="healthbar"><span>Agents 12 sains</span><span>1 alerte</span><span>0 échec</span></div>
+    </div>
+    <div class="direction-body">
+      <h3>B · Flux de livraison</h3>
+      <p>Le cycle des tickets devient le centre de gravité. Excellent pour piloter le débit, moins précis sur les agents.</p>
+    </div>
+  </article>
+
+  <article class="direction" data-choice="c-priority-inbox" onclick="toggleSelect(this)">
+    <div class="preview">
+      <div class="appbar"><span>Pitcrew · Boîte de réception</span><span><i class="dot"></i>Synchronisé</span></div>
+      <div class="tabs"><span class="active">À traiter 3</span><span>En cours 5</span><span>Tout</span></div>
+      <div class="panel-mini">
+        <div class="inbox-row"><span class="tag">Décision</span><span><b>#418 Choisir la stratégie de migration</b><br><small>Bloque unblock-run depuis 34 min</small></span><span class="action">Répondre</span></div>
+        <div class="inbox-row"><span class="tag">Proposition</span><span><b>Durcir les permissions OAuth</b><br><small>Security · criticité haute</small></span><span class="action">Examiner</span></div>
+        <div class="inbox-row"><span class="tag">MR</span><span><b>!127 Prête à fusionner</b><br><small>Pipeline vert · reviewer validé</small></span><span class="action">Fusionner</span></div>
+        <div class="inbox-row"><span>Info</span><span><b>#419 Implémentation en cours</b><br><small>Implementer · 12 min</small></span><span>Voir</span></div>
+        <div class="inbox-row"><span>Info</span><span><b>1 agent en alerte</b><br><small>qa-run · dernier passage échoué</small></span><span>Diagnostiquer</span></div>
+      </div>
+      <div class="summary-row" style="margin-top:8px">
+        <div class="stat"><b>3</b><small>à traiter</small></div><div class="stat"><b>5</b><small>en mouvement</small></div><div class="stat"><b>12</b><small>agents sains</small></div><div class="stat"><b>7 j</b><small>historique</small></div>
+      </div>
+    </div>
+    <div class="direction-body">
+      <h3>C · Boîte de priorités</h3>
+      <p>Une liste unique ordonnée par urgence. Très rapide à parcourir, mais la vue globale du flux est moins immédiate.</p>
+    </div>
+  </article>
+</div>

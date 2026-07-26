@@ -20,6 +20,8 @@ profiles pin all roles so model selection stays explicit:
 | Role | Model |
 |---|---|
 | `security-run` | `gpt-5.6-sol` |
+| `architecture-run` | `gpt-5.6-sol` |
+| `preprod-review-run` | `gpt-5.6-sol` |
 | `product-discovery-run` | `gpt-5.6-terra` |
 | `research-run` | `gpt-5.6-terra` |
 | `manager-run` | `gpt-5.6-luna` |
@@ -45,6 +47,66 @@ subtotal. This is API-equivalent metering, not a subscription charge. It exclude
 tools, container execution, regional pricing, and priority pricing.
 
 Pricing snapshot effective 2026-07-24, in USD per million tokens.
+
+## Manual Preprod review (not a scheduled task)
+
+`$pitcrew:preprod-review-run` is manual-only and **never scheduled**. It has no
+LaunchAgent, interval, restart, automatic invocation, or scheduler template. The
+recommended operator path is the local dashboard's confirmed **Lancer la revue
+complète** button. The direct manual CLI path is also supported:
+
+```bash
+./bin/pitcrew-codex.sh preprod-review-run getbill
+```
+
+Both use the locked, ephemeral local execution boundary. `--scheduled`,
+`--coordinated-run`, and `--target` are refused. The global stop switch blocks a
+new run. **Arrêter la revue** sends SIGTERM to the tracked helper; a failure or
+interrupt marks an older local report stale.
+
+The role is fixed to `gpt-5.6-sol` with reasoning effort `xhigh`; neither is a
+role-level configuration choice. Before review, it fetches and captures remote
+`origin/preprod...origin/develop` SHAs and merge-base. It excludes the working
+tree, untracked files, and ignored files. The manifest is exhaustive: every file
+is reviewed exactly once, including deletion, rename, copy, typechange, binary,
+and generated entries, followed by cross-change synthesis.
+
+This is a read-only local report workflow. It never creates a GitLab issue,
+comment, or MR; never commits, branches, pushes, merges, deploys, accesses the
+Preprod environment, or uses a database. Private local writes are limited to the
+manifest, result, report, live marker, and bounded history. The helper alone can
+return `ready` / **PRÊT** after complete valid coverage. High or critical findings
+return `changes_required` / **CORRECTIONS REQUISES**; policy, schema, coverage,
+helper, fetch, or interruption failures return `incomplete` / **INCOMPLET**.
+History is local, bounded to 10 reports, and replaces a previous record for the
+same captured SHA pair.
+
+## Architecture template
+
+`architecture-run` is a weekly role: its configured interval is exactly `604800`
+seconds. It uses `gpt-5.6-sol` with reasoning effort `high`. A manual dashboard
+Trigger is also available; the schedule never causes it to reschedule itself.
+
+Each pass scans one rotating tracked repository area, records at most maximum 3
+high-confidence structured suggestions, and uses the stable architecture category.
+Coverage lives separately in `architecture-state.json`: a valid completed scan,
+including zero findings, advances the selected area; invalid configuration or
+inputs, an incomplete pass, or interruption does not advance coverage state.
+
+Architecture-run is read-only for the repository and tracker. It writes no code,
+MR/PR, issue, merge, deploy, or tracker record. Its only writes are local: the
+proposal ledger and the separate `architecture-state.json` coverage state. Human
+dashboard review is required: the flow is local proposal approval → manager →
+tracker. A dismissal stays local, while the manager paces and deduplicates approved
+or investigate proposals before attaching tracker metadata.
+
+Suggested weekly task prompt:
+
+```text
+Use $pitcrew:architecture-run for project getbill. Perform exactly one bounded,
+read-only architecture scan of the selected rotating area, record at most three
+high-confidence local proposals, and stop. Do not create code or tracker work.
+```
 
 ## Research template
 
@@ -175,10 +237,11 @@ issue an immediate Trigger. A failure stops at that boundary: there is no rollba
 or implicit retry, and the operator sees the actionable error.
 
 These controls invoke only local allowlisted commands with server-resolved
-project and skill values. Release, prod, and preprod controls are absent. The
-dashboard cannot deploy, access a remote environment, or bypass the normal
-approval and scheduling policy. For scripts and terminals, the status CLI
-remains available:
+project and skill values. Release, prod, and preprod environment/deployment
+controls are absent. The explicit exception is the local, read-only,
+manual-only Preprod review panel: it does not deploy, access a remote environment,
+or bypass the normal approval and scheduling policy. For scripts and terminals,
+the status CLI remains available:
 
 ```bash
 python3 bin/pitcrew-schedule.py status --project getbill

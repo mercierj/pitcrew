@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import tempfile
@@ -79,6 +80,11 @@ def runtime_config():
         },
         "repos": [{"name": "getbill", "path": "/tmp/getbill"}],
         "release": {"autonomy": "off"},
+        "preprod_review": {
+            "base_ref": "origin/preprod",
+            "compare_ref": "origin/develop",
+            "history_limit": 10,
+        },
         "agents": {"research-run": {"model": "gpt-5.6-luna"}},
         "safety": {
             "confirm_each_remote_action": [],
@@ -205,6 +211,7 @@ class FakeRunner:
         self.issue_pages = issue_pages or [gitlab_issues()]
         self.merge_request_pages = merge_request_pages or [gitlab_merge_requests()]
         self.schedule = schedule or schedule_status()
+        self.mutation_responses = {}
 
     def __call__(self, args, **kwargs):
         self.calls.append((list(args), kwargs))
@@ -217,6 +224,21 @@ class FakeRunner:
                     17,
                     stdout="",
                     stderr='Authorization: Basic auth-secret\n' + "x" * 3000,
+                )
+            if "-X" in args:
+                path = args[2]
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps(self.mutation_responses.get(path, {})),
+                    stderr="",
+                )
+            if "&page=" not in args[2]:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps(self.mutation_responses.get(args[2], {})),
+                    stderr="",
                 )
             pages = (
                 self.merge_request_pages
@@ -426,6 +448,7 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual("stopped", roles["implementer-run"]["health"])
         self.assertIsNone(roles["implementer-run"]["estimated_next_pass"])
         self.assertEqual("gpt-5.6-luna", research["configured_model"])
+        self.assertEqual("medium", research["configured_reasoning_effort"])
         self.assertEqual("gpt-5.6-terra", research["latest_model"])
         self.assertEqual(1, research["latest_usage"]["measured_runs"])
         self.assertEqual(0, research["latest_usage"]["unmeasured_runs"])
@@ -497,6 +520,25 @@ class DashboardServiceTest(unittest.TestCase):
         )
         self.assertIn("Root cause", pending["findings"])
 
+    def test_decisions_clears_pending_question_when_ticket_is_done(self):
+        self.write_pending_decision()
+        service = self.service(FakeRunner())
+
+        with mock.patch.object(
+            service,
+            "_gitlab_document",
+            return_value={
+                "title": "Already completed",
+                "state": "opened",
+                "labels": ["pitcrew-agent", "pitcrew-state::done"],
+            },
+        ):
+            decision = service.decisions()
+
+        self.assertIsNone(decision["pending"])
+        state = json.loads((self.runtime / "unblock-state.json").read_text())
+        self.assertIsNone(state["pending_question"])
+
     def test_proposals_are_listed_and_rejection_is_persisted(self):
         proposal_path = self.runtime / "proposals.json"
         proposal_path.write_text(json.dumps([{
@@ -511,6 +553,34 @@ class DashboardServiceTest(unittest.TestCase):
         result = service.decide_proposal("feature-1", "reject", "Not in current scope")
         self.assertEqual("dismissed", result["proposal"]["status"])
         self.assertEqual([], service.proposals_snapshot()["proposals"])
+
+    def test_architecture_proposal_approval_is_local_and_queues_manager(self):
+        proposal_path = self.runtime / "proposals.json"
+        proposal_path.write_text(json.dumps([{
+            "id": "architecture-1", "category": "architecture", "severity": "medium",
+            "architecture_category": "couplage framework/persistence", "title": "Tight coupling",
+            "summary": "Module A imports Module B internals.", "where": ["src/A.py:1"],
+            "evidence": ["src/A.py:1"], "recommendation": "Use an interface.",
+            "status": "suggested", "source": "architecture-run",
+        }]), encoding="utf-8")
+        runner = FakeRunner()
+        result = self.service(runner).decide_proposal("architecture-1", "approve")
+        self.assertTrue(result["manager_queued"])
+        self.assertNotIn("tracker", result["proposal"])
+        self.assertFalse(any(call[0][0] == "glab" and "-X" in call[0] for call in runner.calls))
+
+    def test_feature_proposal_approval_still_creates_tracker_issue(self):
+        proposal_path = self.runtime / "proposals.json"
+        proposal_path.write_text(json.dumps([{
+            "id": "feature-remote", "category": "feature", "severity": "low",
+            "title": "Feature", "summary": "Summary", "evidence": ["a:1"],
+            "recommendation": "Recommendation", "status": "suggested", "source": "test",
+        }]), encoding="utf-8")
+        runner = FakeRunner()
+        runner.mutation_responses["projects/getbill1%2Fgetbill/issues"] = {"iid": 9, "web_url": "https://gitlab.com/a/9"}
+        result = self.service(runner).decide_proposal("feature-remote", "approve")
+        self.assertFalse(result["manager_queued"])
+        self.assertEqual(9, result["proposal"]["tracker"]["iid"])
 
     def test_submit_decision_persists_answer_and_triggers_unblock(self):
         self.write_pending_decision()
@@ -727,6 +797,41 @@ class DashboardServiceTest(unittest.TestCase):
             ],
             runner.calls[1][0],
         )
+
+    def test_gitlab_work_keeps_merged_ticket_read_only(self):
+        issue = dict(gitlab_issues()[3])
+        issue.update(
+            {
+                "iid": 3,
+                "title": "Already merged work",
+                "description": "",
+                "labels": ["pitcrew-agent", "pitcrew-state::blocked"],
+                "web_url": "https://gitlab.com/getbill1/getbill/-/issues/3",
+            }
+        )
+        merged_mr = dict(gitlab_merge_requests()[1])
+        merged_mr.update(
+            {
+                "iid": 12,
+                "description": "Closes #3",
+                "state": "merged",
+            }
+        )
+        runner = FakeRunner(
+            issue_pages=[[issue]],
+            merge_request_pages=[[merged_mr]],
+        )
+        runner.mutation_responses = {
+            "/issues/3": issue,
+            "projects/getbill1%2Fgetbill/issues/3/notes?per_page=100": [],
+        }
+
+        work = self.service(runner).gitlab_work(force_refresh=True)
+
+        self.assertEqual("Already merged work", work["groups"]["blocked"][0]["title"])
+        self.assertEqual([], work["groups"]["done"])
+        mutation_args = [call[0] for call in runner.calls if "-X" in call[0]]
+        self.assertEqual([], mutation_args)
 
     def test_gitlab_work_ticket_agent_actions(self):
         work = self.service(FakeRunner()).gitlab_work(force_refresh=True)
@@ -1409,6 +1514,94 @@ class DashboardServiceTest(unittest.TestCase):
             [call[0][2] for call in runner.calls if "pitcrew-schedule.py" in call[0][1]],
         )
 
+    def test_preprod_review_snapshot_reads_latest_report_without_creating_store(self):
+        service = self.service(FakeRunner())
+        report = {
+            "schema_version": 1, "completed_at": "2026-07-24T11:00:00Z",
+            "base_ref": "origin/preprod", "compare_ref": "origin/develop",
+            "base_sha": "a" * 40, "compare_sha": "b" * 40, "merge_base_sha": "c" * 40,
+            "commit_count": 0, "changed_file_count": 0, "files": [], "reviewed_files": [],
+            "findings": [], "synthesis": "No changes between configured refs.", "verdict": "ready",
+            "model": "gpt-5.6-sol", "reasoning_effort": "xhigh", "failure_reason": None,
+        }
+        from scripts.pitcrew_preprod_review import ReportStore
+        ReportStore(self.runtime / "preprod-review-reports.json", 10).save(report)
+
+        snapshot = service.preprod_review_snapshot()
+
+        self.assertEqual("preprod-review-run", snapshot["skill"])
+        self.assertEqual(report, snapshot["latest"])
+        self.assertFalse(snapshot["report_stale"])
+
+    def test_preprod_review_skill_and_dashboard_use_same_report_store(self):
+        service = self.service(FakeRunner())
+        skill = (ROOT / "skills/preprod-review-run/SKILL.md").read_text(encoding="utf-8")
+
+        self.assertEqual(self.runtime / "preprod-review-reports.json", service.preprod_reports.path)
+        self.assertIn("STORE=$CONFIG_DIR/preprod-review-reports.json", skill)
+
+    def test_trigger_preprod_review_uses_manual_locked_runner_argv(self):
+        service = self.service(FakeRunner())
+        with mock.patch("scripts.pitcrew_dashboard.subprocess.Popen") as popen:
+            popen.return_value.pid = 4242
+            result = service.trigger_preprod_review()
+
+        self.assertEqual({"accepted": True, "pid": 4242, "skill": "preprod-review-run"}, result)
+        self.assertEqual(
+            [str(ROOT / "bin/pitcrew-codex.sh"), "preprod-review-run", "getbill"],
+            popen.call_args.args[0],
+        )
+
+    def test_stop_preprod_review_rejects_missing_or_invalid_live_marker(self):
+        service = self.service(FakeRunner())
+        with self.assertRaisesRegex(DashboardError, "not running"):
+            service.stop_preprod_review()
+
+    def test_stop_preprod_review_terminates_tracked_process_before_live_marker(self):
+        service = self.service(FakeRunner())
+        process = mock.Mock(pid=4242)
+        process.poll.return_value = None
+        service._preprod_process = process
+
+        result = service.stop_preprod_review()
+
+        self.assertEqual({"accepted": True, "skill": "preprod-review-run", "pid": 4242}, result)
+        process.terminate.assert_called_once_with()
+        self.assertIsNone(service._preprod_process)
+
+    def test_stop_preprod_review_refuses_stale_marker_for_unrelated_process(self):
+        service = self.service(FakeRunner())
+        live_dir = self.runtime / "live"
+        live_dir.mkdir()
+        (live_dir / "preprod-review-run.json").write_text(json.dumps({
+            "project": "getbill", "skill": "preprod-review-run", "started_at": "2026-07-24T11:00:00Z",
+            "pid": os.getpid(), "phase": "running",
+        }), encoding="utf-8")
+        service._run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout="python unrelated", stderr=""))
+        with mock.patch("scripts.pitcrew_dashboard.os.kill") as kill:
+            with self.assertRaisesRegex(DashboardError, "not running"):
+                service.stop_preprod_review()
+        self.assertNotIn(mock.call(os.getpid(), signal.SIGTERM), kill.call_args_list)
+
+    def test_stop_preprod_review_signals_verified_live_helper(self):
+        service = self.service(FakeRunner())
+        live_dir = self.runtime / "live"
+        live_dir.mkdir()
+        live_path = live_dir / "preprod-review-run.json"
+        live_path.write_text(json.dumps({
+            "project": "getbill", "skill": "preprod-review-run", "started_at": "2026-07-24T11:00:00Z",
+            "pid": os.getpid(), "phase": "running",
+        }), encoding="utf-8")
+        service._run = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0,
+            stdout=f"python3 /tmp/pitcrew_locked_exec.py --project getbill --skill preprod-review-run --live-file {live_path}",
+            stderr="",
+        ))
+        with mock.patch("scripts.pitcrew_dashboard.os.kill") as kill:
+            result = service.stop_preprod_review()
+        self.assertEqual(os.getpid(), result["pid"])
+        self.assertIn(mock.call(os.getpid(), signal.SIGTERM), kill.call_args_list)
+
 
 class FakeDashboardService:
     def __init__(self):
@@ -1426,6 +1619,10 @@ class FakeDashboardService:
     def gitlab_work(self, force_refresh=False):
         self.calls.append(("gitlab", force_refresh))
         return {"degraded": False, "groups": {}}
+
+    def runs_snapshot(self):
+        self.calls.append(("runs_snapshot",))
+        return {"project": "getbill", "runs": [], "capacity": {}, "has_active": False}
 
     def control(self, action, skill):
         self.calls.append(("control", action, skill))
@@ -1455,6 +1652,18 @@ class FakeDashboardService:
         self.calls.append(("decisions",))
         return {"pending": None}
 
+    def preprod_review_snapshot(self):
+        self.calls.append(("preprod_review_snapshot",))
+        return {"skill": "preprod-review-run", "history": []}
+
+    def trigger_preprod_review(self):
+        self.calls.append(("trigger_preprod_review",))
+        return {"accepted": True, "pid": 1234, "skill": "preprod-review-run"}
+
+    def stop_preprod_review(self):
+        self.calls.append(("stop_preprod_review",))
+        return {"accepted": True, "pid": 1234, "skill": "preprod-review-run"}
+
     def submit_decision(self, ticket_id, answer, notes):
         self.calls.append(("submit_decision", ticket_id, answer, notes))
         return {"accepted": True, "pid": 2468}
@@ -1467,7 +1676,7 @@ class FakeDashboardService:
         self.calls.append(("launch_ticket_agent", skill, target))
         if skill not in {"implementer-run", "unblock", "stale-sweep"}:
             raise DashboardError("action rejected")
-        return {"accepted": True, "pid": 9753, "skill": skill, "target": target}
+        return {"run_id": "run-1", "state": "queued", "queue_position": 0, "created": True}
 
 
 class DashboardEntryPointTest(unittest.TestCase):
@@ -1580,6 +1789,38 @@ class DashboardHttpTest(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIsNone(json.loads(payload)["pending"])
         self.assertEqual([("decisions",)], self.service.calls)
+
+    def test_preprod_review_get_requires_session_and_exact_origin(self):
+        status, _, _ = self.request("GET", "/api/preprod-review")
+        self.assertEqual(403, status)
+
+        status, _, payload = self.request(
+            "GET", "/api/preprod-review",
+            headers={"X-Pitcrew-Session": self.token},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("preprod-review-run", json.loads(payload)["skill"])
+        self.assertEqual([("preprod_review_snapshot",)], self.service.calls)
+
+        status, _, _ = self.request(
+            "GET", "/api/preprod-review",
+            headers={"X-Pitcrew-Session": self.token, "Origin": "http://invalid.local"},
+        )
+        self.assertEqual(403, status)
+
+    def test_preprod_review_actions_require_exact_payload(self):
+        headers = {"Content-Type": "application/json", "X-Pitcrew-Session": self.token}
+        status, _, payload = self.request(
+            "POST", "/api/actions", json.dumps({"action": "trigger-preprod-review"}).encode(), headers,
+        )
+        self.assertEqual(202, status)
+        self.assertEqual("preprod-review-run", json.loads(payload)["skill"])
+        self.assertEqual([("trigger_preprod_review",)], self.service.calls)
+
+        status, _, _ = self.request(
+            "POST", "/api/actions", json.dumps({"action": "stop-preprod-review", "skill": "x"}).encode(), headers,
+        )
+        self.assertEqual(400, status)
 
     def test_post_answer_decision_requires_session_and_forwards_payload(self):
         body = json.dumps({
@@ -2287,6 +2528,12 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("ticket-agent-actions", self.javascript)
         self.assertIn('action: "launch-ticket-agent"', self.javascript)
         self.assertIn("pendingTicketActions", self.javascript)
+        self.assertIn("ticketActionStates", self.javascript)
+        self.assertIn("ticket-agent-status", self.javascript)
+        self.assertIn("Lancement…", self.javascript)
+        self.assertIn("Lancement accepté", self.javascript)
+        self.assertIn("actualisation du tableau de bord impossible", self.javascript)
+        self.assertIn("Échec du lancement", self.javascript)
         self.assertIn("Agent indisponible", self.javascript)
         self.assertIn('await refresh({ manual: true });', self.javascript)
         self.assertIn('/api/decisions', self.javascript)
@@ -2325,6 +2572,23 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("metadata.textContent", history)
         self.assertIn("Object.hasOwn(modelCatalog, model)", history)
         self.assertNotIn("innerHTML", history)
+
+    def test_history_requests_share_latest_request_coordinator(self):
+        history = self.modules["history.mjs"]
+        self.assertIn("export function createLatestRequestCoordinator", history)
+        self.assertIn(
+            "const coordinateHistoryRequest = createLatestRequestCoordinator();",
+            self.javascript,
+        )
+        self.assertIn(
+            "coordinateHistoryRequest(() => fetchJson(path))",
+            self.javascript,
+        )
+        self.assertNotIn("fetchJson(historyPath(", self.javascript)
+        self.assertIn("if (!result.applied)", self.javascript)
+        self.assertIn("if (result.error)", self.javascript)
+        self.assertIn("if (history.applied && !history.error)", self.javascript)
+        self.assertIn(".catch(showHistoryError)", self.javascript)
 
     def test_javascript_serializes_controls_per_skill(self):
         agents = self.modules["agents.mjs"]
@@ -2475,6 +2739,39 @@ class DashboardAssetContractTest(unittest.TestCase):
             self.assertIn(selector, self.styles)
         self.assertIn("var(--line)", self.styles)
         self.assertIn("var(--muted)", self.styles)
+
+    def test_preprod_review_panel_is_local_safe_and_has_only_manual_controls(self):
+        for identifier in (
+            "preprod-review", "preprod-review-title", "preprod-review-state",
+            "preprod-review-report", "preprod-review-trigger", "preprod-review-stop",
+            "preprod-review-history", "preprod-review-history-list",
+        ):
+            self.assertIn(f'id="{identifier}"', self.html)
+        self.assertLess(self.html.index('id="preprod-review"'), self.html.index('id="gitlab-work"'))
+        self.assertIn("Revue avant Preprod", self.html)
+        self.assertIn("Contrôle manuel", self.html)
+        self.assertIn("origin/preprod...origin/develop", self.html)
+        self.assertIn("Sol/xhigh", self.html)
+        self.assertIn('fetchJson("/api/preprod-review", {headers: {"X-Pitcrew-Session": sessionToken}})', self.javascript)
+        self.assertIn('headers: {"X-Pitcrew-Session": sessionToken}', self.javascript)
+        self.assertIn("sources.preprod", self.javascript)
+        self.assertIn('runPreprodReviewAction("trigger-preprod-review")', self.javascript)
+        self.assertIn('runPreprodReviewAction("stop-preprod-review")', self.javascript)
+        self.assertIn('await refreshFresh({ manual: true, skipGitLab: true });', self.javascript)
+        self.assertIn("longue et coûteuse", self.javascript)
+        self.assertNotIn("innerHTML", self.javascript)
+        self.assertNotIn("insertAdjacentHTML", self.javascript)
+        for token in (
+            "PRÊT", "CORRECTIONS REQUISES", "INCOMPLET",
+            "Dernier passage interrompu ou échoué : le rapport précédent est obsolète",
+            "Rapport précédent", "critical", "high", "medium", "low",
+        ):
+            self.assertIn(token, self.javascript)
+        self.assertIn("preprodTextList(finding.evidence)", self.javascript)
+        self.assertIn("Revue locale indisponible", self.javascript)
+        self.assertIn("Lancer la revue complète", self.html)
+        self.assertIn(".preprod-review-panel", self.styles)
+        self.assertNotRegex(self.html, r'preprod-review[^>]*(?:model|restart|merge|deploy)')
 
 
 class DashboardRealAssetsHttpTest(unittest.TestCase):

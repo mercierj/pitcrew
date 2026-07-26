@@ -11,6 +11,7 @@ GitHub PR: https://github.com/<owner>/<repo>/pull/<number>
 GitLab MR: https://<host>/<group>/<project>/-/merge_requests/<number>
 Linear issue: https://linear.app/<workspace>/issue/<id>
 GitLab issue: https://<host>/<group>/<project>/-/issues/<number>
+GitLab work item: https://<host>/<group>/<project>/-/work_items/<number>
 Short change: <configured-repo>!<number>
 Short issue: <configured-repo>#<number>
 ```

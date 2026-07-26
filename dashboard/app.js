@@ -33,6 +33,11 @@ const elements = {
   decisionContent: document.querySelector("#decision-content"),
   proposalState: document.querySelector("#proposal-state"),
   proposalList: document.querySelector("#proposal-list"),
+  preprodReviewState: document.querySelector("#preprod-review-state"),
+  preprodReviewReport: document.querySelector("#preprod-review-report"),
+  preprodReviewTrigger: document.querySelector("#preprod-review-trigger"),
+  preprodReviewStop: document.querySelector("#preprod-review-stop"),
+  preprodReviewHistory: document.querySelector("#preprod-review-history-list"),
   globalBanner: document.querySelector("#global-banner"),
   overviewUsageNote: document.querySelector("#overview-usage-note"),
   liveAgentGrid: document.querySelector("#live-agent-grid"),
@@ -71,7 +76,8 @@ const elements = {
   },
 };
 
-const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, work: {}};
+const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, preprod: {}, work: {}};
+const coordinateHistoryRequest = createLatestRequestCoordinator();
 const detailController = createDetailPanel(
   elements.detailPanel,
   elements.detailTitle,
@@ -101,9 +107,11 @@ let refreshPromise = null;
 let lastGitLabRefresh = 0;
 const pendingSkills = new Set();
 const pendingTicketActions = new Set();
+const ticketActionStates = new Map();
 let decisionSubmitting = false;
 let proposalSubmitting = false;
 let mergeSubmitting = false;
+let preprodReviewSubmitting = false;
 
 async function fetchJson(path, options = {}) {
   const response = await fetch(path, {
@@ -124,6 +132,159 @@ async function fetchJson(path, options = {}) {
 function setText(element, value) {
   if (element) {
     element.textContent = value == null ? "" : String(value);
+  }
+}
+
+function preprodText(value, fallback = "Donnée indisponible") {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 800) : fallback;
+}
+
+function preprodTextList(value, fallback = "Donnée indisponible") {
+  const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  const safe = values.map((item) => preprodText(item, "")).filter(Boolean);
+  return safe.length ? safe.join(", ") : fallback;
+}
+
+function preprodCount(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? String(value) : "—";
+}
+
+function preprodSha(value) {
+  return typeof value === "string" && /^[0-9a-f]{7,64}$/i.test(value) ? value.slice(0, 12) : "—";
+}
+
+function preprodVerdict(verdict) {
+  const labels = {
+    ready: ["PRÊT", "preprod-verdict-ready"],
+    changes_required: ["CORRECTIONS REQUISES", "preprod-verdict-changes"],
+    incomplete: ["INCOMPLET", "preprod-verdict-incomplete"],
+  };
+  return labels[verdict] || ["INCOMPLET", "preprod-verdict-incomplete"];
+}
+
+function preprodLine(label, value) {
+  const row = document.createElement("p");
+  const strong = document.createElement("strong");
+  strong.textContent = `${label} : `;
+  row.append(strong, document.createTextNode(value));
+  return row;
+}
+
+function renderPreprodReview(review) {
+  const value = review && typeof review === "object" ? review : {};
+  const unavailable = value.unavailable === true;
+  const running = value.running === true;
+  const stopped = value.global_state === "stopped";
+  const latest = value.latest && typeof value.latest === "object" ? value.latest : null;
+  const stale = value.report_stale === true;
+  const [verdictLabel, verdictClass] = preprodVerdict(latest?.verdict);
+  const state = unavailable ? "Revue locale indisponible" : running ? "Revue en cours" : stopped ? "Arrêt global" : latest ? `Dernier verdict : ${verdictLabel}` : "Aucun rapport disponible";
+  setText(elements.preprodReviewState, state);
+  if (elements.preprodReviewTrigger) elements.preprodReviewTrigger.disabled = unavailable || running || stopped || preprodReviewSubmitting;
+  if (elements.preprodReviewStop) {
+    elements.preprodReviewStop.hidden = !running;
+    elements.preprodReviewStop.disabled = preprodReviewSubmitting;
+  }
+
+  const reportRoot = elements.preprodReviewReport;
+  if (!reportRoot) return;
+  const content = [];
+  if (stale) {
+    const warning = document.createElement("p");
+    warning.className = "preprod-stale";
+    warning.textContent = "Dernier passage interrompu ou échoué : le rapport précédent est obsolète";
+    content.push(warning);
+  }
+  if (unavailable) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "La revue locale est indisponible. Actualisez le tableau de bord pour réessayer.";
+    content.push(empty);
+  } else if (!latest) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = running ? "La revue est en cours. Le rapport sera disponible à la fin du passage." : "Aucun rapport de revue avant Preprod n’est disponible.";
+    content.push(empty);
+  } else {
+    const heading = document.createElement("h3");
+    heading.textContent = stale ? "Rapport précédent" : "Dernier rapport";
+    const badge = document.createElement("p");
+    badge.className = `preprod-verdict ${verdictClass}`;
+    badge.textContent = verdictLabel;
+    content.push(heading, badge);
+    const scope = `${preprodText(latest.base_ref, preprodText(value.base_ref))}...${preprodText(latest.compare_ref, preprodText(value.compare_ref))}`;
+    content.push(
+      preprodLine("Périmètre", scope),
+      preprodLine("SHA", `${preprodSha(latest.base_sha)} → ${preprodSha(latest.compare_sha)}`),
+      preprodLine("Terminé", formatDate(latest.completed_at)),
+      preprodLine("Commits / fichiers", `${preprodCount(latest.commit_count)} / ${preprodCount(latest.changed_file_count)}`),
+      preprodLine("Fichiers relus", preprodCount(Array.isArray(latest.reviewed_files) ? latest.reviewed_files.length : null)),
+      preprodLine("Synthèse", preprodText(latest.synthesis)),
+    );
+    if (latest.failure_reason) content.push(preprodLine("Motif", preprodText(latest.failure_reason)));
+    const findings = Array.isArray(latest.findings) ? latest.findings : [];
+    const findingRoot = document.createElement("div");
+    findingRoot.className = "preprod-findings";
+    for (const severity of ["critical", "high", "medium", "low"]) {
+      const items = findings.filter((item) => item && item.severity === severity);
+      if (!items.length) continue;
+      const group = document.createElement("section");
+      const title = document.createElement("h4");
+      title.textContent = severity;
+      const list = document.createElement("ol");
+      for (const finding of items) {
+        const item = document.createElement("li");
+        item.append(
+          preprodLine("Titre", preprodText(finding.title)),
+          preprodLine("Preuve", preprodTextList(finding.evidence)),
+          preprodLine("Fichiers", preprodTextList(finding.affected_files)),
+          preprodLine("Impact", preprodText(finding.impact)),
+          preprodLine("Recommandation", preprodText(finding.recommendation)),
+        );
+        list.append(item);
+      }
+      group.append(title, list);
+      findingRoot.append(group);
+    }
+    if (findingRoot.childElementCount) content.push(findingRoot);
+  }
+  reportRoot.replaceChildren(...content);
+  const history = Array.isArray(value.history) ? value.history : [];
+  const historyItems = history.slice(0, 10).map((report) => {
+    const item = document.createElement("li");
+    const [label, cssClass] = preprodVerdict(report?.verdict);
+    item.className = `preprod-history-item ${cssClass}`;
+    item.textContent = `${label} · ${preprodSha(report?.base_sha)} → ${preprodSha(report?.compare_sha)} · ${formatDate(report?.completed_at)}`;
+    return item;
+  });
+  if (!historyItems.length) {
+    const item = document.createElement("li");
+    item.textContent = "Aucun passage archivé.";
+    historyItems.push(item);
+  }
+  elements.preprodReviewHistory?.replaceChildren(...historyItems);
+}
+
+async function runPreprodReviewAction(action) {
+  const trigger = action === "trigger-preprod-review";
+  const message = trigger
+    ? "Lancer cette revue longue et coûteuse avec Sol xhigh sur origin/preprod...origin/develop ?"
+    : "Arrêter la revue avant Preprod en cours ?";
+  if (preprodReviewSubmitting || !window.confirm(message)) return;
+  preprodReviewSubmitting = true;
+  renderPreprodReview(sources.preprod);
+  try {
+    await fetchJson("/api/actions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Pitcrew-Session": sessionToken},
+      body: JSON.stringify({ action }),
+    });
+    setText(elements.operationalStatus, trigger ? "Revue avant Preprod lancée." : "Revue avant Preprod arrêtée.");
+  } catch {
+    setText(elements.operationalStatus, "Impossible de contrôler la revue avant Preprod.");
+  } finally {
+    preprodReviewSubmitting = false;
+    await refreshFresh({ manual: true, skipGitLab: true });
   }
 }
 
@@ -217,7 +378,13 @@ function createModelControl(agent, modelCatalog, globalStopped) {
   const latest = document.createElement("p");
   latest.className = "latest-model";
   latest.textContent = `Dernier modèle : ${modelLabel(catalog, agent.latest_model)}`;
-  wrapper.append(label, select, latest);
+  const reasoning = document.createElement("p");
+  reasoning.className = "latest-model";
+  const configuredEffort = typeof agent.configured_reasoning_effort === "string" && agent.configured_reasoning_effort
+    ? agent.configured_reasoning_effort
+    : "hérité";
+  reasoning.textContent = `Raisonnement : ${configuredEffort}`;
+  wrapper.append(label, select, reasoning, latest);
   return wrapper;
 }
 
@@ -581,7 +748,7 @@ function renderGitLab(work) {
         const target = typeof agentAction.target === "string" ? agentAction.target : "";
         const pending = pendingTicketActions.has(target);
         button.disabled = !agentAction.available || pending || !target;
-        button.addEventListener("click", () => launchTicketAgent(issue));
+        button.addEventListener("click", () => launchTicketAgent(issue, button, actions));
         actions.append(button);
         if (!agentAction.available) {
           const unavailable = document.createElement("span");
@@ -589,6 +756,7 @@ function renderGitLab(work) {
           unavailable.textContent = agentAction.unavailable_reason || "Agent indisponible";
           actions.append(unavailable);
         }
+        renderTicketActionState(button, actions, target, agentAction);
         card.append(actions);
       }
       column.append(card);
@@ -625,6 +793,8 @@ async function launchTicketAgent(issue, button, actions) {
     return;
   }
   pendingTicketActions.add(target);
+  ticketActionStates.set(target, { kind: "pending", text: "Lancement…" });
+  renderTicketActionState(button, actions, target, agentAction);
   setText(elements.operationalStatus, `Lancement de ${skill} pour le ticket en cours.`);
   try {
     await fetchJson("/api/actions", {
@@ -632,14 +802,28 @@ async function launchTicketAgent(issue, button, actions) {
       headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
       body: JSON.stringify({ action: "launch-ticket-agent", skill, target }),
     });
+    ticketActionStates.set(target, {
+      kind: "success",
+      text: "Lancement accepté — l’agent travaille sur ce ticket.",
+    });
+    pendingTicketActions.delete(target);
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
-    await refresh({ manual: true });
+    try {
+      await refresh({ manual: true });
+    } catch {
+      setText(elements.operationalStatus, `${skill} lancé ; actualisation du tableau de bord impossible.`);
+    }
     return true;
   } catch {
+    ticketActionStates.set(target, {
+      kind: "error",
+      text: "Échec du lancement — réessayez.",
+    });
     setText(elements.operationalStatus, `Impossible de lancer ${skill} pour ce ticket.`);
     return false;
   } finally {
     pendingTicketActions.delete(target);
+    renderTicketActionState(button, actions, target, agentAction);
   }
 }
 
@@ -1012,7 +1196,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     elements.refreshButton.disabled = true;
     setText(elements.refreshState, "Actualisation en cours…");
     try {
-      const [snapshot, history, decisions, proposals] = await Promise.all([
+      const [snapshot, history, decisions, proposals, preprod] = await Promise.all([
         fetchJson("/api/status").then((payload) => {
           sources.snapshot = payload;
           syncHistorySkills(elements.historySkill, payload?.agents);
@@ -1032,15 +1216,24 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
           sources.proposals = payload;
           return payload;
         }),
+        fetchJson("/api/preprod-review", {headers: {"X-Pitcrew-Session": sessionToken}}).then((payload) => {
+          sources.preprod = payload;
+          return payload;
+        }).catch(() => {
+          const unavailable = {unavailable: true};
+          sources.preprod = unavailable;
+          return unavailable;
+        }),
       ]);
       renderOverview(snapshot);
       renderLiveAgents(snapshot);
-      renderAgents(snapshot);
+      renderAgents(sources.snapshot);
       if (history.applied && !history.error) {
         renderHistory(elements.activityList, history.data, snapshot?.model_catalog);
       }
       renderDecision(decisions);
       renderProposals(proposals);
+      renderPreprodReview(preprod);
       renderPilotageView();
 
       const now = Date.now();
@@ -1076,6 +1269,8 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
 elements.refreshButton.addEventListener("click", () => refresh({ manual: true }));
 elements.globalStopButton?.addEventListener("click", () => globalControl("stop-all"));
 elements.globalResumeButton?.addEventListener("click", () => globalControl("resume-all"));
+elements.preprodReviewTrigger?.addEventListener("click", () => runPreprodReviewAction("trigger-preprod-review"));
+elements.preprodReviewStop?.addEventListener("click", () => runPreprodReviewAction("stop-preprod-review"));
 elements.workflowSearch?.addEventListener("input", renderPilotageView);
 elements.workflowRole?.addEventListener("change", renderPilotageView);
 elements.historyFilters.addEventListener("submit", (event) => {

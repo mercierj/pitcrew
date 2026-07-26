@@ -37,10 +37,48 @@ In a Codex thread:
 $pitcrew:research-run
 ```
 
+For a manual, read-only architecture review:
+
+```text
+$pitcrew:architecture-run
+```
+
+For the manual-only review of work not yet merged to Preprod, use the local
+dashboard's confirmed **Lancer la revue complète** button as the recommended
+operator path for:
+
+```text
+$pitcrew:preprod-review-run
+```
+
+The direct manual CLI path is also supported:
+
+```bash
+./bin/pitcrew-codex.sh preprod-review-run getbill
+```
+
+Both paths use the locked, ephemeral local execution boundary. `--scheduled`,
+`--coordinated-run`, and `--target` are refused.
+
+It is read-only and never scheduled: no LaunchAgent, automatic trigger, GitLab
+issue/comment/MR/merge, commit, branch, push, deploy, Preprod environment, or
+database action is allowed. It is fixed to `gpt-5.6-sol` with reasoning effort
+`xhigh`, captures remote `origin/preprod...origin/develop` SHAs and merge-base,
+and excludes working-tree, untracked, and ignored content. The helper requires
+every manifest file exactly once, including rename/deletion/copy/typechange/binary
+and generated entries, plus cross-change synthesis, before it can report `ready`.
+High/critical findings report `changes_required`; invalid coverage, policy, schema,
+helper failure, or interruption reports `incomplete` and makes an old report stale.
+Only private local manifest/result/report/live/history files are written; history
+is limited to 10 reports and replaces the same captured SHA pair. The dashboard
+Stop action SIGTERMs the tracked helper, while the global stop switch blocks a new
+trigger.
+
 Ask for project `getbill` and one bounded pass. For headless inspection:
 
 ```bash
 ./bin/pitcrew-codex.sh research-run getbill --dry-run
+./bin/pitcrew-codex.sh architecture-run getbill --dry-run
 ```
 
 The runner validates the project with `scripts/pitcrew_config.py`, rejects
@@ -68,6 +106,12 @@ scheduling is disabled for GetBill. Every prod or preprod action requires a new
 explicit approval and remote actions must not be chained.
 
 See [scheduled task guidance](../references/SCHEDULED-TASKS.md).
+
+`$pitcrew:architecture-run` has a weekly `604800`-second schedule and remains
+available for a manual dashboard Trigger for human review. It uses `gpt-5.6-sol`
+with high reasoning effort, scans one rotating area, and writes only local state: a
+proposal ledger plus separate `architecture-state.json` coverage state; it never
+writes repository code or creates tracker work.
 
 ## Providers and network access
 

@@ -1,12 +1,14 @@
-"""Deterministic repository-area rotation for the research agent."""
+"""Deterministic repository-area rotation for discovery agents."""
 
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import secrets
+import stat
 import subprocess
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +77,105 @@ def discover_fingerprints(repo_path: Path, areas: list[str]) -> dict[str, str]:
     return {area: fingerprint for area in areas if (fingerprint := _git_fingerprint(repo_path, area))}
 
 
+def _reject_symlinked_path(path: Path) -> None:
+    """Refuse state paths containing a symlinked component."""
+    absolute_path = Path(os.path.abspath(path))
+    component = Path(absolute_path.anchor)
+    for part in absolute_path.parts[1:]:
+        component /= part
+        try:
+            mode = os.lstat(component).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise OSError(f"cannot safely inspect state path: {path}") from error
+        if stat.S_ISLNK(mode):
+            raise OSError(f"refusing symlinked state path: {path}")
+
+
+def _open_state_parent(path: Path) -> tuple[int, str]:
+    """Open or create the state parent without following path-component symlinks."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("O_NOFOLLOW is required for safe state writes")
+    absolute_path = Path(os.path.abspath(path))
+    parts = absolute_path.parts
+    if len(parts) < 2:
+        raise OSError(f"invalid state path: {path}")
+    directory_fd = os.open(absolute_path.anchor, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for part in parts[1:-1]:
+            try:
+                os.mkdir(part, 0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(
+                part,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = next_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    try:
+        os.fchmod(directory_fd, 0o700)
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd, parts[-1]
+
+
+def _atomic_write_json(state: dict[str, Any], path: Path) -> None:
+    """Atomically persist state without following symlinks during path traversal."""
+    directory_fd, final_name = _open_state_parent(path)
+    temporary_name: str | None = None
+    try:
+        try:
+            final_mode = os.stat(final_name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(final_mode):
+                raise OSError(f"refusing symlinked state path: {path}")
+
+        for _ in range(10):
+            candidate = f".{final_name}.{secrets.token_hex(16)}"
+            try:
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        else:
+            raise OSError("unable to allocate private state temporary file")
+
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, final_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary_name = None
+        try:
+            os.fsync(directory_fd)
+        except OSError as error:
+            unsupported_fsync_errors = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+            if error.errno not in unsupported_fsync_errors:
+                raise
+    finally:
+        if temporary_name is not None:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
 def _valid_coverage(value: Any, areas: list[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {"areas": areas[:], "next_area": areas[0], "epoch": 0, "visited": {}, "fingerprints": {}}
@@ -126,6 +227,8 @@ def update_cell_state(
     current_fingerprints: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Record a completed scan and optionally atomically persist the state."""
+    if path is not None:
+        _reject_symlinked_path(path)
     cells = state.setdefault("cells", {})
     cell = cells.setdefault(cell_key, {})
     coverage = _valid_coverage(cell.get("coverage"), areas)
@@ -138,16 +241,7 @@ def update_cell_state(
     coverage.pop("selected_at", None)
     cell["coverage"] = coverage
     if path is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(state, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _atomic_write_json(state, path)
     return state
 
 
@@ -176,7 +270,16 @@ def main() -> int:
     if args.command == "discover":
         print(json.dumps(areas))
         return 0
-    state = json.loads(args.state.read_text(encoding="utf-8")) if args.state.exists() else {"cells": {}, "history": []}
+    try:
+        _reject_symlinked_path(args.state)
+    except OSError as error:
+        parser.error(str(error))
+    try:
+        state = json.loads(args.state.read_text(encoding="utf-8")) if args.state.exists() else {"cells": {}, "history": []}
+    except json.JSONDecodeError as error:
+        parser.error(f"invalid JSON state: {error.msg}")
+    except UnicodeDecodeError:
+        parser.error("invalid state encoding: expected UTF-8")
     if args.command == "select":
         cell = state.get("cells", {}).get(args.cell, {})
         fingerprints = discover_fingerprints(args.repo, areas)

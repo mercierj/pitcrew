@@ -37,8 +37,12 @@ COMMANDS_DIR="$HOME/.claude/commands"
 PROJECT_DIR="$HOME/.claude/agent-loop/$PROJECT"
 DEFAULT_FILE="$HOME/.claude/agent-loop/default.txt"
 
-# The 12 agent-loop skills. Each is a directory under skills/ with SKILL.md inside.
+# The Codex skills. Each is a directory under skills/ with SKILL.md inside.
 SKILLS=(
+  "architecture-run"
+  "preprod-review-run"
+  "security-run"
+  "product-discovery-run"
   "research-run"
   "qa-run"
   "implementer-run"
@@ -59,7 +63,7 @@ echo "  This wires pitcrew (this repo) into Claude Code. Your project repos are"
 echo "  untouched — they're only referenced by path in the config."
 echo
 echo "  pitcrew repo:  $REPO_ROOT"
-echo "  commands dir:  $COMMANDS_DIR   (where the 13 skills get symlinked)"
+echo "  commands dir:  $COMMANDS_DIR   (where the 16 skills get symlinked)"
 echo "  project:       $PROJECT"
 echo "  runtime dir:   $PROJECT_DIR   (config + state live here, never in this repo)"
 echo

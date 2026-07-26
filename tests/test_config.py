@@ -31,6 +31,16 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def test_profiles_configure_architecture_manager_source(self):
+        getbill = json.loads((ROOT / "profiles/getbill.json").read_text(encoding="utf-8"))
+        source = next(item for item in getbill["manager"]["sources"] if item["name"] == "architecture")
+        self.assertEqual("architecture-proposals-v1", source["format"])
+        self.assertEqual("pitcrew-source::architecture", source["label"])
+        self.assertEqual(2, source["target_depth"])
+        self.assertEqual(1, source["investigate_wip"])
+        generic = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        self.assertEqual("$CONFIG_DIR/proposals.json", generic["proposals"]["ledger"])
+        self.assertEqual("architecture-proposals-v1", generic["manager"]["sources"][0]["format"])
     def test_profiles_and_example_pin_the_complete_default_agent_mapping(self):
         for relative in (
             "profiles/getbill.json",
@@ -39,11 +49,46 @@ class ConfigTest(unittest.TestCase):
         ):
             profile = json.loads((ROOT / relative).read_text(encoding="utf-8"))
             self.assertEqual(
-                {role: {"model": model} for role, model in DEFAULT_MODELS.items()},
-                profile["agents"],
+                set(DEFAULT_MODELS),
+                set(profile["agents"]),
                 relative,
             )
+            for role, model in DEFAULT_MODELS.items():
+                with self.subTest(profile=relative, role=role):
+                    self.assertEqual(model, profile["agents"][role]["model"])
+            self.assertEqual(
+                "high", profile["agents"]["architecture-run"]["reasoning_effort"]
+            )
+            self.assertEqual(
+                {"base_ref": "origin/preprod", "compare_ref": "origin/develop", "history_limit": 10},
+                profile["preprod_review"],
+            )
+            self.assertEqual(
+                {"model": "gpt-5.6-sol", "reasoning_effort": "xhigh"},
+                profile["agents"]["preprod-review-run"],
+            )
             validate(profile)
+
+    def test_preprod_review_config_rejects_invalid_refs_history_and_fixed_agent_overrides(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        for update, message in (
+            ({"base_ref": "preprod"}, "preprod_review.base_ref"),
+            ({"compare_ref": "origin/preprod"}, "preprod_review refs must differ"),
+            ({"history_limit": 0}, "preprod_review.history_limit"),
+            ({"history_limit": 51}, "preprod_review.history_limit"),
+            ({"history_limit": True}, "preprod_review.history_limit"),
+        ):
+            with self.subTest(update=update):
+                candidate = json.loads(json.dumps(profile))
+                candidate["preprod_review"].update(update)
+                with self.assertRaisesRegex(ConfigError, message):
+                    validate(candidate)
+        for field, value in (("model", "gpt-5.6-terra"), ("reasoning_effort", "high")):
+            with self.subTest(field=field):
+                candidate = json.loads(json.dumps(profile))
+                candidate["agents"]["preprod-review-run"][field] = value
+                with self.assertRaisesRegex(ConfigError, f"agents.preprod-review-run.{field}"):
+                    validate(candidate)
 
     def test_update_runtime_model_replaces_only_requested_agent_and_preserves_content(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -440,6 +485,27 @@ class ConfigTest(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, message):
                     validate(invalid)
 
+    def test_architecture_interval_is_optional_but_when_set_must_be_weekly(self):
+        profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        validate(profile)
+        self.assertEqual(604800, profile["architecture"]["interval_seconds"])
+
+        legacy = {key: value for key, value in profile.items() if key != "architecture"}
+        validate(legacy)
+
+        for architecture, message in (
+            ([], "architecture must be an object"),
+            ({}, "architecture.interval_seconds must be exactly 604800"),
+            ({"interval_seconds": 60}, "architecture.interval_seconds must be exactly 604800"),
+            ({"interval_seconds": True}, "architecture.interval_seconds must be exactly 604800"),
+            ({"interval_seconds": 604800.0}, "architecture.interval_seconds must be exactly 604800"),
+            ({"interval_seconds": 604800, "extra": True}, "architecture.extra is unsupported"),
+        ):
+            with self.subTest(architecture=architecture):
+                invalid = {**profile, "architecture": architecture}
+                with self.assertRaisesRegex(ConfigError, message):
+                    validate(invalid)
+
     def test_cli_resolves_reasoning_effort_and_routing_mode(self):
         with tempfile.TemporaryDirectory() as temp:
             codex_home = str(Path(temp).resolve())
@@ -457,6 +523,21 @@ class ConfigTest(unittest.TestCase):
                     sys.executable,
                     str(SCRIPT),
                     "reasoning",
+                    "--project",
+                    "example",
+                    "--skill",
+                    "research-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=command_env,
+            )
+            reasoning_effort = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "reasoning-effort",
                     "--project",
                     "example",
                     "--skill",
@@ -486,6 +567,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(
             (0, "high\n", ""),
             (reasoning.returncode, reasoning.stdout, reasoning.stderr),
+        )
+        self.assertEqual(
+            (reasoning.returncode, reasoning.stdout, reasoning.stderr),
+            (
+                reasoning_effort.returncode,
+                reasoning_effort.stdout,
+                reasoning_effort.stderr,
+            ),
         )
         self.assertEqual(
             (0, "fixed\n", ""),

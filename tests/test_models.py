@@ -24,6 +24,8 @@ class ModelCatalogTest(unittest.TestCase):
     def test_every_role_has_a_supported_default(self):
         self.assertEqual(
             {
+                "architecture-run": "gpt-5.6-sol",
+                "preprod-review-run": "gpt-5.6-sol",
                 "security-run": "gpt-5.6-sol",
                 "product-discovery-run": "gpt-5.6-terra",
                 "research-run": "gpt-5.6-terra",
@@ -62,6 +64,8 @@ class ModelCatalogTest(unittest.TestCase):
         self.assertEqual(set(DEFAULT_MODELS), set(DEFAULT_REASONING_EFFORTS))
         self.assertEqual(
             {
+                "architecture-run": "high",
+                "preprod-review-run": "xhigh",
                 "security-run": "high",
                 "product-discovery-run": "medium",
                 "research-run": "medium",

@@ -6,8 +6,8 @@ umask 077
 
 readonly SKILLS=(
   coverage-run dev-verify-run implementer-run investigate-run manager-run ops-run
-  qa-run releaser-run research-run reviewer-run stale-sweep unblock validator-run
-  product-discovery-run security-run
+  architecture-run qa-run releaser-run research-run reviewer-run stale-sweep unblock validator-run
+  product-discovery-run preprod-review-run security-run
 )
 
 usage() {
@@ -65,6 +65,18 @@ while (($#)); do
   esac
   shift
 done
+
+if [[ "$SKILL" == "preprod-review-run" ]] && { "$SCHEDULED" || [[ -n "$COORDINATED_RUN" || -n "$TARGET" ]]; }; then
+  echo "pitcrew-codex: preprod-review-run is manual-only; scheduled, coordinated, and directed execution are refused" >&2
+  exit 2
+fi
+
+# Preprod review is deliberately manual-only, but it still needs the private
+# lock, live marker, history and ephemeral execution boundary used by workers.
+LOCKED_RUN=false
+if "$SCHEDULED" || [[ "$SKILL" == "preprod-review-run" ]]; then
+  LOCKED_RUN=true
+fi
 
 CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME or CODEX_HOME is required}/.codex}"
 RUNTIME_ROOT="$CODEX_HOME_DIR/pitcrew"
@@ -199,7 +211,7 @@ if [[ "$SKILL" == "implementer-run" ]]; then
   SANDBOX_MODE="danger-full-access"
 fi
 
-if "$SCHEDULED"; then
+if "$LOCKED_RUN"; then
   LOCK_ROOT="${PITCREW_LOCK_ROOT:-$RUNTIME_ROOT/$PROJECT/locks}"
   SUMMARY_DIR="$RUNTIME_ROOT/$PROJECT/logs"
   LIVE_DIR="$RUNTIME_ROOT/$PROJECT/live"
@@ -236,7 +248,7 @@ fi
 
 CODEX_ARGS+=("$PROMPT")
 
-if "$SCHEDULED"; then
+if "$LOCKED_RUN"; then
   set +e
   LOCKED_ARGS=(
     python3 "$REPO_ROOT/scripts/pitcrew_locked_exec.py"
@@ -267,14 +279,17 @@ if "$SCHEDULED"; then
   if [[ -n "$COORDINATED_RUN" ]]; then
     PITCREW_RUN_ID="$COORDINATED_RUN" "${LOCKED_ARGS[@]}"
   else
+    if [[ "$SKILL" == "preprod-review-run" ]]; then
+      exec "${LOCKED_ARGS[@]}"
+    fi
     "${LOCKED_ARGS[@]}"
   fi
   EXIT_CODE=$?
   set -e
-  if [[ -f "$SUMMARY_FILE" ]] && rg -qi 'authentication|invalid_grant|oauth grant' "$SUMMARY_FILE"; then
+  if "$SCHEDULED" && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'authentication|invalid_grant|oauth grant' "$SUMMARY_FILE"; then
     python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-provider-failure \
       --project "$PROJECT" --reason "provider authentication failure" >/dev/null || true
-  elif [[ -f "$SUMMARY_FILE" ]] && rg -qi 'no eligible item|nothing missing|no permissions required' "$SUMMARY_FILE"; then
+  elif "$SCHEDULED" && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'no eligible item|nothing missing|no permissions required' "$SUMMARY_FILE"; then
     python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-noop \
       --project "$PROJECT" --skill "$SKILL" --reason "no eligible item" >/dev/null || true
   fi

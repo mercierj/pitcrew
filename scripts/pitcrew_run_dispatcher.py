@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import quote, urlsplit
 
 try:
     from scripts.pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
@@ -22,11 +23,144 @@ except ImportError:
     from pitcrew_runtime_state import read_state
 
 
+PROVIDER_TIMEOUT_SECONDS = 15
+
+
+class TargetValidationUnavailable(Exception):
+    pass
+
+
+def default_provider_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    invocation = list(command)
+    if invocation[:1] == ["glab"]:
+        invocation[0] = os.environ.get("GLAB_BIN", "glab")
+    return subprocess.run(
+        invocation,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=PROVIDER_TIMEOUT_SECONDS,
+    )
+
+
+def _required_labels(skill: str, tracker: Mapping[str, Any]) -> tuple[frozenset[str], ...] | None:
+    labels = tracker.get("labels")
+    states = tracker.get("states")
+    if not isinstance(labels, Mapping) or not isinstance(states, Mapping):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    try:
+        agent = labels["agent"]
+        investigate = labels["investigate"]
+        todo = states["todo"]
+        review = states["review"]
+        blocked = states["blocked"]
+        done = states["done"]
+    except KeyError as error:
+        raise TargetValidationUnavailable("target validation is unavailable") from error
+    values = (agent, investigate, todo, review, blocked, done)
+    if any(not isinstance(value, str) or not value for value in values):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    roles = {
+        "implementer-run": (frozenset((agent, todo)), frozenset((agent, review))),
+        "validator-run": (frozenset((agent, review)),),
+        "reviewer-run": (frozenset((agent, review)),),
+        "investigate-run": (frozenset((agent, investigate, todo)),),
+        "unblock": (frozenset((agent, blocked)),),
+        "stale-sweep": (frozenset((agent, done)),),
+    }
+    return roles.get(skill)
+
+
+def validate_queued_target(
+    row: dict[str, Any],
+    provider_run: Callable[[list[str]], subprocess.CompletedProcess[str]],
+) -> bool:
+    config = load_runtime_config(row["project"])
+    providers = config.get("providers")
+    gitlab = config.get("gitlab")
+    if (
+        not isinstance(providers, Mapping)
+        or providers.get("forge") != "gitlab"
+        or providers.get("tracker") != "gitlab"
+        or not isinstance(gitlab, Mapping)
+    ):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    host = gitlab.get("host")
+    project_path = gitlab.get("project_path")
+    project_id = gitlab.get("project_id")
+    tracker = gitlab.get("tracker")
+    if (
+        not isinstance(host, str)
+        or not host
+        or not isinstance(project_path, str)
+        or not project_path
+        or not isinstance(project_id, int)
+        or isinstance(project_id, bool)
+        or project_id <= 0
+        or not isinstance(tracker, Mapping)
+    ):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    required = _required_labels(str(row["skill"]), tracker)
+    if required is None:
+        return False
+
+    target = row.get("target")
+    if not isinstance(target, str):
+        return False
+    parsed = urlsplit(target)
+    prefix = f"/{project_path}/-/issues/"
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != host
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(prefix)
+    ):
+        return False
+    raw_iid = parsed.path.removeprefix(prefix)
+    if not raw_iid.isdigit() or int(raw_iid) <= 0:
+        return False
+    iid = int(raw_iid)
+    endpoint = f"projects/{quote(str(project_id), safe='')}/issues/{iid}"
+    try:
+        completed = provider_run(["glab", "api", "--hostname", host, endpoint])
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise TargetValidationUnavailable("target validation is unavailable") from error
+    if completed.returncode != 0:
+        raise TargetValidationUnavailable("target validation is unavailable")
+    try:
+        issue = json.loads(completed.stdout)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise TargetValidationUnavailable("target validation is unavailable") from error
+    if not isinstance(issue, dict):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    response_iid = issue.get("iid")
+    state = issue.get("state")
+    issue_labels = issue.get("labels")
+    if (
+        not isinstance(response_iid, int)
+        or isinstance(response_iid, bool)
+        or response_iid != iid
+        or not isinstance(state, str)
+        or not isinstance(issue_labels, list)
+        or any(not isinstance(label, str) for label in issue_labels)
+    ):
+        raise TargetValidationUnavailable("target validation is unavailable")
+    if state != "opened":
+        return False
+    actual = frozenset(issue_labels)
+    return any(expected.issubset(actual) for expected in required)
+
+
 class RunDispatcher:
     def __init__(self, store: RunStore, runner: str, process_factory: Callable[..., Any] = subprocess.Popen,
                  target_validator: Callable[[dict[str, Any]], bool] | None = None,
-                 killpg: Callable[[int, int], None] = os.killpg, sleep: Callable[[float], None] = time.sleep):
+                 killpg: Callable[[int, int], None] = os.killpg, sleep: Callable[[float], None] = time.sleep,
+                 provider_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None):
         self.store, self.runner, self.process_factory = store, runner, process_factory
+        if target_validator is None:
+            provider_run = provider_runner if provider_runner is not None else default_provider_run
+            target_validator = lambda row: validate_queued_target(row, provider_run)
         self.target_validator, self.killpg, self.sleep = target_validator, killpg, sleep
 
     def drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, list[dict[str, Any]]]:
