@@ -132,6 +132,61 @@ def fix_autonomy(config: Mapping[str, Any]) -> str:
     return delivery.get("fix_autonomy", "off")
 
 
+def _non_empty_string(mapping: Mapping[str, Any], key: str, field: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{field} must be a non-empty string")
+    return value
+
+
+def _validate_native_github(config: Mapping[str, Any]) -> None:
+    github = _mapping(config, "github")
+    host = _non_empty_string(github, "host", "github.host")
+    _non_empty_string(github, "user", "github.user")
+    owner = _non_empty_string(github, "owner", "github.owner")
+    repository = _non_empty_string(
+        github, "repository", "github.repository"
+    )
+    repository_parts = repository.split("/")
+    github_slug = re.compile(
+        r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+    )
+    if (
+        host.startswith(("http://", "https://"))
+        or "/" in host
+        or "/" in owner
+        or len(repository_parts) != 2
+        or repository_parts[0] != owner
+        or not repository_parts[1]
+        or github_slug.fullmatch(owner) is None
+        or github_slug.fullmatch(repository_parts[1]) is None
+        or "://" in repository
+    ):
+        raise ConfigError("github binding must use host plus owner/repository")
+
+    tracker = github.get("tracker")
+    if not isinstance(tracker, Mapping):
+        raise ConfigError("github.tracker must be an object")
+    _non_empty_string(
+        tracker, "ticket_prefix", "github.tracker.ticket_prefix"
+    )
+    assignee = tracker.get("assignee_login")
+    if assignee is not None and (not isinstance(assignee, str) or not assignee):
+        raise ConfigError(
+            "github.tracker.assignee_login must be a non-empty string when set"
+        )
+    labels = tracker.get("labels")
+    states = tracker.get("states")
+    if not isinstance(labels, Mapping):
+        raise ConfigError("github.tracker.labels must be an object")
+    if not isinstance(states, Mapping):
+        raise ConfigError("github.tracker.states must be an object")
+    for key in ("agent", "investigate", "quick_win", "bug", "improvement"):
+        _non_empty_string(labels, key, f"github.tracker.labels.{key}")
+    for key in ("todo", "processing", "review", "blocked", "done"):
+        _non_empty_string(states, key, f"github.tracker.states.{key}")
+
+
 def validate(config: Mapping[str, Any]) -> None:
     if not isinstance(config, Mapping):
         raise ConfigError("config must be an object")
@@ -140,6 +195,12 @@ def validate(config: Mapping[str, Any]) -> None:
         raise ConfigError("providers.forge must be github or gitlab")
     if providers.get("tracker") not in TRACKERS:
         raise ConfigError("providers.tracker is unsupported")
+    if providers.get("tracker") == "github":
+        if providers.get("forge") != "github":
+            raise ConfigError(
+                "native github tracker requires providers.forge=github"
+            )
+        _validate_native_github(config)
     if "gitlab" in {providers.get("forge"), providers.get("tracker")}:
         gitlab = _mapping(config, "gitlab")
         for key in ("host", "user", "owner", "project_path"):

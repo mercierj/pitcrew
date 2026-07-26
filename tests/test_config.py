@@ -1,4 +1,5 @@
 import fcntl
+import copy
 import json
 import os
 import subprocess
@@ -37,6 +38,100 @@ SCRIPT = ROOT / "scripts/pitcrew_config.py"
 
 
 class ConfigTest(unittest.TestCase):
+    def native_github_config(self):
+        config = copy.deepcopy(
+            json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
+        )
+        config["providers"] = {"forge": "github", "tracker": "github"}
+        config["github"] = {
+            "host": "github.com",
+            "user": "octocat",
+            "owner": "acme",
+            "repository": "acme/payments",
+            "tracker": {
+                "assignee_login": "octocat",
+                "ticket_prefix": "acme/payments#",
+                "labels": {
+                    "agent": "pitcrew-agent",
+                    "investigate": "pitcrew-investigate",
+                    "quick_win": "pitcrew-quick-win",
+                    "bug": "bug",
+                    "improvement": "enhancement",
+                },
+                "states": {
+                    "todo": "pitcrew-state-todo",
+                    "processing": "pitcrew-state-processing",
+                    "review": "pitcrew-state-review",
+                    "blocked": "pitcrew-state-blocked",
+                    "done": "pitcrew-state-done",
+                },
+            },
+        }
+        config["repos"] = [{
+            "name": "payments",
+            "path": "/workspace/payments",
+            "default_branch": "main",
+            "lang": "python",
+            "tags": ["api"],
+        }]
+        return config
+
+    def test_native_github_tracker_requires_explicit_complete_binding(self):
+        config = self.native_github_config()
+        validate(config)
+
+        required_paths = (
+            ("host",),
+            ("user",),
+            ("owner",),
+            ("repository",),
+            ("tracker", "ticket_prefix"),
+            ("tracker", "labels", "agent"),
+            ("tracker", "labels", "investigate"),
+            ("tracker", "labels", "quick_win"),
+            ("tracker", "labels", "bug"),
+            ("tracker", "labels", "improvement"),
+            ("tracker", "states", "todo"),
+            ("tracker", "states", "processing"),
+            ("tracker", "states", "review"),
+            ("tracker", "states", "blocked"),
+            ("tracker", "states", "done"),
+        )
+        for path in required_paths:
+            broken = copy.deepcopy(config)
+            cursor = broken["github"]
+            for key in path[:-1]:
+                cursor = cursor[key]
+            del cursor[path[-1]]
+            with self.subTest(path=path):
+                with self.assertRaises(ConfigError):
+                    validate(broken)
+
+    def test_native_github_binding_rejects_repository_mismatch_and_bad_shapes(self):
+        config = self.native_github_config()
+        for owner, repository in (
+            ("acme", "other/payments"),
+            ("acme", "acme"),
+            ("acme", "https://github.com/acme/payments"),
+            ("acme/team", "acme/team/payments"),
+            ("acme", "acme/../payments"),
+            ("acme", "acme/payments\ninjected"),
+        ):
+            broken = copy.deepcopy(config)
+            broken["github"]["owner"] = owner
+            broken["github"]["repository"] = repository
+            with self.subTest(owner=owner, repository=repository):
+                with self.assertRaises(ConfigError):
+                    validate(broken)
+
+    def test_non_github_tracker_does_not_require_native_github_block(self):
+        config = json.loads(
+            (ROOT / "profiles/generic.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("linear", config["providers"]["tracker"])
+        self.assertNotIn("github", config)
+        validate(config)
+
     def test_delivery_fix_autonomy_defaults_off_and_accepts_known_values(self):
         profile = json.loads((ROOT / "profiles/generic.json").read_text(encoding="utf-8"))
 
