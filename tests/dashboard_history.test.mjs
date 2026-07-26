@@ -1,0 +1,106 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  historyPath,
+  renderHistory,
+  syncHistorySkills,
+} from "../dashboard/history.mjs";
+
+class FakeElement {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.className = "";
+    this.dateTime = "";
+    this.textContent = "";
+    this.value = "";
+  }
+
+  append(...children) {
+    this.children.push(...children);
+  }
+
+  replaceChildren(...children) {
+    this.children = children;
+  }
+
+  set innerHTML(_value) {
+    throw new Error("innerHTML must not be used");
+  }
+}
+
+globalThis.document = {
+  createElement(tagName) {
+    return new FakeElement(tagName);
+  },
+};
+
+test("historyPath keeps role and outcome filters in URLSearchParams", () => {
+  assert.equal(historyPath("", ""), "/api/history");
+  assert.equal(
+    historyPath("qa run/équipe", "failed"),
+    "/api/history?skill=qa+run%2F%C3%A9quipe&outcome=failed",
+  );
+});
+
+test("renderHistory builds safe text nodes with known model usage", () => {
+  const root = new FakeElement("ol");
+  renderHistory(root, [{
+    skill: "qa-run",
+    outcome: "success",
+    finished_at: "2026-07-26T08:00:00Z",
+    summary: "<img src=x onerror=alert(1)>",
+    model: "gpt-safe",
+    usage: {
+      input_tokens: 100,
+      cached_input_tokens: 10,
+      cache_write_tokens: 5,
+      output_tokens: 20,
+      total_tokens: 135,
+    },
+  }], {
+    "gpt-safe": {label: "Modèle sûr"},
+  });
+
+  assert.equal(root.children.length, 1);
+  const [top, date, summary, metadata] = root.children[0].children;
+  assert.equal(top.children[0].textContent, "qa-run");
+  assert.equal(top.children[1].textContent, "success");
+  assert.equal(date.dateTime, "2026-07-26T08:00:00Z");
+  assert.equal(summary.textContent, "<img src=x onerror=alert(1)>");
+  assert.match(metadata.textContent, /^Modèle : gpt-safe · Modèle sûr · Total : 135 jetons$/);
+});
+
+test("renderHistory falls back when model or usage metadata is unsafe", () => {
+  const root = new FakeElement("ol");
+  renderHistory(root, [{
+    skill: "research-run",
+    outcome: "failed",
+    model: "unknown-model",
+    usage: {total_tokens: 42},
+  }], {});
+
+  assert.equal(
+    root.children[0].children.at(-1).textContent,
+    "Modèle/usage indisponibles",
+  );
+});
+
+test("syncHistorySkills keeps a valid selection after a snapshot", () => {
+  const select = new FakeElement("select");
+  select.value = "qa-run";
+
+  syncHistorySkills(select, [
+    {skill: "research-run"},
+    {skill: "qa-run"},
+    {skill: "qa-run"},
+    {skill: ""},
+  ]);
+
+  assert.deepEqual(
+    select.children.map((option) => option.value),
+    ["", "qa-run", "research-run"],
+  );
+  assert.equal(select.value, "qa-run");
+});

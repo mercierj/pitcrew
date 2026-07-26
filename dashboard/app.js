@@ -3,6 +3,7 @@ import {createDetailPanel} from "./detail-panel.mjs";
 import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
 import {renderAgents as renderAgentRows} from "./agents.mjs";
 import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
+import {historyPath, renderHistory, syncHistorySkills} from "./history.mjs";
 
 const POLL_INTERVAL_MS = 10_000;
 const GITLAB_REFRESH_MS = 60_000;
@@ -354,83 +355,6 @@ function renderAgents(snapshot) {
       ),
     },
   );
-  refreshSkillFilter(Array.isArray(snapshot?.agents) ? snapshot.agents : []);
-}
-
-function refreshSkillFilter(agents) {
-  const selected = elements.historySkill.value;
-  const fragment = document.createDocumentFragment();
-  const all = document.createElement("option");
-  all.value = "";
-  all.textContent = "Tous les agents";
-  fragment.append(all);
-  agents.forEach((agent) => {
-    const option = document.createElement("option");
-    option.value = agent.skill;
-    option.textContent = agent.skill;
-    fragment.append(option);
-  });
-  elements.historySkill.replaceChildren(fragment);
-  if ([...elements.historySkill.options].some((option) => option.value === selected)) {
-    elements.historySkill.value = selected;
-  }
-}
-
-function historyMetadata(record, modelCatalog) {
-  const model = record?.model;
-  const usage = record?.usage;
-  const usageFields = [
-    "input_tokens",
-    "cached_input_tokens",
-    "cache_write_tokens",
-    "output_tokens",
-    "total_tokens",
-  ];
-  if (
-    typeof model !== "string"
-    || !modelCatalog
-    || typeof modelCatalog !== "object"
-    || !Object.hasOwn(modelCatalog, model)
-    || !usage
-    || typeof usage !== "object"
-    || usageFields.some((field) => formatTokens(usage[field]) === "Données indisponibles")
-  ) {
-    return "Modèle/usage indisponibles";
-  }
-  return `Modèle : ${modelLabel(modelCatalog, model)} · Total : ${formatTokens(usage.total_tokens)} jetons`;
-}
-
-function renderHistory(records, modelCatalog) {
-  const history = Array.isArray(records) ? records : [];
-  elements.activityList.replaceChildren();
-  if (history.length === 0) {
-    const empty = document.createElement("li");
-    empty.className = "empty-state";
-    empty.textContent = "Aucune activité ne correspond à ces filtres.";
-    elements.activityList.append(empty);
-    return;
-  }
-  history.forEach((record) => {
-    const item = document.createElement("li");
-    const top = document.createElement("div");
-    const skill = document.createElement("strong");
-    skill.textContent = record.skill || "Agent inconnu";
-    const outcome = document.createElement("span");
-    outcome.className = `badge badge-${record.outcome === "failed" ? "failed" : "healthy"}`;
-    outcome.textContent = record.outcome || "inconnu";
-    top.append(skill, outcome);
-
-    const date = document.createElement("time");
-    date.dateTime = record.finished_at || "";
-    date.textContent = formatDate(record.finished_at);
-    const summary = document.createElement("p");
-    summary.textContent = record.summary || "Aucun résumé.";
-    const metadata = document.createElement("p");
-    metadata.className = "history-metadata";
-    metadata.textContent = historyMetadata(record, modelCatalog);
-    item.append(top, date, summary, metadata);
-    elements.activityList.append(item);
-  });
 }
 
 function safeExternalLink(value, label) {
@@ -1030,16 +954,17 @@ async function changeModel(skill, model, previous, select) {
   }
 }
 
-function historyPath() {
-  const query = new URLSearchParams();
-  if (elements.historySkill.value) {
-    query.set("skill", elements.historySkill.value);
-  }
-  if (elements.historyOutcome.value) {
-    query.set("outcome", elements.historyOutcome.value);
-  }
-  const suffix = query.toString();
-  return suffix ? `/api/history?${suffix}` : "/api/history";
+async function refreshHistory() {
+  const history = await fetchJson(historyPath(
+    elements.historySkill.value,
+    elements.historyOutcome.value,
+  ));
+  sources.history = history;
+  renderHistory(
+    elements.activityList,
+    history,
+    sources.snapshot?.model_catalog,
+  );
 }
 
 async function refreshFresh(options = {}) {
@@ -1061,9 +986,13 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
       const [snapshot, history, decisions, proposals] = await Promise.all([
         fetchJson("/api/status").then((payload) => {
           sources.snapshot = payload;
+          syncHistorySkills(elements.historySkill, payload?.agents);
           return payload;
         }),
-        fetchJson(historyPath()).then((payload) => {
+        fetchJson(historyPath(
+          elements.historySkill.value,
+          elements.historyOutcome.value,
+        )).then((payload) => {
           sources.history = payload;
           return payload;
         }),
@@ -1079,7 +1008,7 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
       renderOverview(snapshot);
       renderLiveAgents(snapshot);
       renderAgents(snapshot);
-      renderHistory(history, snapshot?.model_catalog);
+      renderHistory(elements.activityList, history, snapshot?.model_catalog);
       renderDecision(decisions);
       renderProposals(proposals);
       renderPilotageView();
@@ -1121,7 +1050,7 @@ elements.workflowSearch?.addEventListener("input", renderPilotageView);
 elements.workflowRole?.addEventListener("change", renderPilotageView);
 elements.historyFilters.addEventListener("submit", (event) => {
   event.preventDefault();
-  refresh();
+  refreshHistory();
 });
 
 refresh({ manual: true });

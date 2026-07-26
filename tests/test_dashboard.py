@@ -2178,7 +2178,6 @@ class DashboardAssetContractTest(unittest.TestCase):
             "renderOverview",
             "renderLiveAgents",
             "renderAgents",
-            "renderHistory",
             "renderGitLab",
             "renderMergeRequests",
             "mergeMergeRequest",
@@ -2193,17 +2192,17 @@ class DashboardAssetContractTest(unittest.TestCase):
                 rf"(?:async\s+)?function\s+{function_name}\b",
             )
 
-    def test_history_renders_model_and_total_tokens_as_safe_text_metadata(self):
-        history_source = self.javascript.split("function renderHistory", 1)[1].split(
-            "function safeExternalLink", 1
-        )[0]
-
-        self.assertIn('metadata.className = "history-metadata";', history_source)
-        self.assertIn("metadata.textContent", history_source)
-        self.assertIn("Modèle/usage indisponibles", self.javascript)
-        self.assertIn("total_tokens", self.javascript)
-        self.assertIn("Object.hasOwn(modelCatalog, model)", self.javascript)
-        self.assertNotIn("innerHTML", history_source)
+    def test_history_module_keeps_filters_and_safe_metadata(self):
+        history = self.modules["history.mjs"]
+        self.assertIn("export function renderHistory", history)
+        self.assertIn("export function historyPath", history)
+        self.assertIn("URLSearchParams", history)
+        self.assertIn("total_tokens", history)
+        self.assertIn("Modèle/usage indisponibles", history)
+        self.assertIn('metadata.className = "history-metadata";', history)
+        self.assertIn("metadata.textContent", history)
+        self.assertIn("Object.hasOwn(modelCatalog, model)", history)
+        self.assertNotIn("innerHTML", history)
 
     def test_javascript_serializes_controls_per_skill(self):
         agents = self.modules["agents.mjs"]
@@ -2224,7 +2223,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         control_source = self.javascript.split(
             "async function control",
             1,
-        )[1].split("function historyPath", 1)[0]
+        )[1].split("async function globalControl", 1)[0]
         self.assertLess(
             control_source.index("pendingSkills.has(skill)"),
             control_source.index("fetchJson"),
@@ -2331,7 +2330,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertNotIn('"change-model"', self.javascript.split("const ACTIONS", 1)[1].split(";", 1)[0])
         self.assertIn("restoreModelSelect", self.javascript)
         self.assertIn("await refreshFresh({ manual: true, skipGitLab: true });", self.javascript)
-        change_source = self.javascript.split("async function changeModel", 1)[1].split("function historyPath", 1)[0]
+        change_source = self.javascript.split("async function changeModel", 1)[1].split("async function refreshHistory", 1)[0]
         self.assertLess(
             change_source.index("restoreModelSelect(select, previous);"),
             change_source.index("void refresh({ manual: true });"),
