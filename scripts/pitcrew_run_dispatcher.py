@@ -15,92 +15,23 @@ from typing import Any, Callable, Mapping
 from urllib.parse import quote, urlsplit
 
 try:
-    from scripts.pitcrew_config import ConfigError, EVENT_DRIVEN_ROLES, load_runtime_config, max_concurrent_for, runtime_root
-    from scripts.pitcrew_run_store import RunConflict, RunPaused, RunStateError, RunStore, RunStoreError
+    from scripts.pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from scripts.pitcrew_run_store import RunPaused, RunStateError, RunStore, RunStoreError
     from scripts.pitcrew_runtime_state import read_state
 except ImportError:
-    from pitcrew_config import ConfigError, EVENT_DRIVEN_ROLES, load_runtime_config, max_concurrent_for, runtime_root
-    from pitcrew_run_store import RunConflict, RunPaused, RunStateError, RunStore, RunStoreError
+    from pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
+    from pitcrew_run_store import RunPaused, RunStateError, RunStore, RunStoreError
     from pitcrew_runtime_state import read_state
 
 
 PROVIDER_TIMEOUT_SECONDS = 15
 MAX_PROVIDER_ERROR_CHARS = 4096
 MAX_CLAIMS_PER_DRAIN = 100
-MAX_COMPLETION_PAYLOAD_BYTES = 64 * 1024
 HTTP_STATUS_SUFFIX = re.compile(r"\(HTTP ([1-5][0-9]{2})\)\s*\Z")
-CHAIN_SUCCESSORS = {
-    "proposal_approved": "manager-run",
-    "todo_or_recoverable_processing": "implementer-run",
-    "open_change": "reviewer-run",
-    "reviewer_signed_off": "validator-run",
-    "review_finding": "implementer-run",
-    "validation_failed": "implementer-run",
-    "human_decision_answered": "unblock",
-    "marked_investigate": "investigate-run",
-}
 
 
 class TargetValidationUnavailable(Exception):
     pass
-
-
-def _read_completion_object(path: Path) -> dict[str, Any]:
-    try:
-        raw = path.read_bytes()
-    except OSError as error:
-        raise ValueError("completion payload is unavailable") from error
-    if len(raw) > MAX_COMPLETION_PAYLOAD_BYTES:
-        raise ValueError("completion payload is too large")
-    try:
-        value = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError("completion payload is invalid") from error
-    if not isinstance(value, dict):
-        raise ValueError("completion payload is invalid")
-    return value
-
-
-def _strict_terminal_result(value: Mapping[str, Any]) -> bool:
-    fields = {
-        "status", "reason", "project", "skill", "target_id", "did_work",
-        "work_kind", "quality_outcome", "next_action",
-    }
-    work_kinds = {
-        "none", "implementation", "review", "validation", "investigation",
-        "triage", "research", "security", "product", "operations", "release",
-        "cleanup",
-    }
-    return bool(
-        set(value) == fields
-        and value.get("status") in {"success", "noop", "blocked", "failed"}
-        and all(isinstance(value.get(field), str) and value[field] for field in (
-            "reason", "project", "skill", "quality_outcome", "next_action",
-        ))
-        and (value.get("target_id") is None or isinstance(value["target_id"], str))
-        and isinstance(value.get("did_work"), bool)
-        and value.get("work_kind") in work_kinds
-    )
-
-
-def _strict_completion_evidence(value: Mapping[str, Any], outcome: str) -> bool:
-    fields = {"authoritative", "target"}
-    if outcome == "reviewer_signed_off":
-        fields |= {"reviewed_sha", "current_sha"}
-    return bool(
-        set(value) == fields
-        and value.get("authoritative") is True
-        and isinstance(value.get("target"), str)
-        and value["target"]
-        and (
-            outcome != "reviewer_signed_off"
-            or (
-                isinstance(value.get("reviewed_sha"), str)
-                and value["reviewed_sha"]
-                and value.get("current_sha") == value["reviewed_sha"]
-            )
-        )
-    )
 
 
 def default_provider_run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -273,88 +204,6 @@ class RunDispatcher:
             target_validator = lambda row: validate_queued_target(row, provider_run)
         self.target_validator, self.killpg, self.sleep = target_validator, killpg, sleep
 
-    def admit_successor(
-        self,
-        completed_run: Mapping[str, Any],
-        result: Mapping[str, Any],
-        evidence: Mapping[str, Any],
-        capacities: Mapping[str, int],
-    ) -> dict[str, Any] | None:
-        """Admit and immediately drain an explicit, authoritative transition.
-
-        A malformed result or evidence is a normal no-op.  No prose fields are
-        examined, so a model summary cannot cause lifecycle work to be guessed.
-        """
-        if (
-            not isinstance(completed_run, Mapping)
-            or not isinstance(result, Mapping)
-            or not isinstance(evidence, Mapping)
-        ):
-            return None
-        project = completed_run.get("project")
-        source_run_id = completed_run.get("run_id")
-        if not isinstance(project, str) or not isinstance(source_run_id, str):
-            return None
-        if set(result) != {"outcome"} or not isinstance(result.get("outcome"), str):
-            return None
-        outcome = result["outcome"]
-        successor_skill = CHAIN_SUCCESSORS.get(outcome)
-        if successor_skill not in EVENT_DRIVEN_ROLES:
-            return None
-        if not isinstance(evidence.get("target"), str) or evidence.get("authoritative") is not True:
-            return None
-        if outcome == "reviewer_signed_off":
-            if (
-                not isinstance(evidence.get("reviewed_sha"), str)
-                or not evidence["reviewed_sha"]
-                or evidence.get("current_sha") != evidence["reviewed_sha"]
-            ):
-                return None
-        try:
-            successor = self.store.admit_successor(
-                project=project,
-                source_run_id=source_run_id,
-                skill=successor_skill,
-                target=evidence["target"],
-            )
-        except (RunConflict, RunPaused):
-            return None
-        return {"successor": successor, "drain": self.drain(project, capacities)}
-
-    def complete(
-        self,
-        project: str,
-        run_id: str,
-        result: Mapping[str, Any],
-        evidence: Mapping[str, Any],
-        capacities: Mapping[str, int],
-    ) -> dict[str, Any] | None:
-        """Consume a strict terminal worker payload without interpreting prose."""
-        if not _strict_terminal_result(result):
-            raise ValueError("structured result is invalid")
-        outcome = result["quality_outcome"]
-        if not _strict_completion_evidence(evidence, outcome):
-            raise ValueError("completion evidence is invalid")
-        completed_run = self.store.get(run_id)
-        if (
-            completed_run is None
-            or completed_run.get("project") != project
-            or result["project"] != project
-            or completed_run.get("skill") != result["skill"]
-            or completed_run.get("target") != result["target_id"]
-            or completed_run.get("target") != evidence["target"]
-            or completed_run.get("state") != "succeeded"
-        ):
-            raise ValueError("completion does not match its terminal run")
-        if result["status"] != "success":
-            return None
-        return self.admit_successor(
-            completed_run,
-            {"outcome": outcome},
-            evidence,
-            capacities,
-        )
-
     def drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, list[dict[str, Any]]]:
         claimed: list[dict[str, Any]] = []
         spawned: list[dict[str, Any]] = []; cancelled: list[dict[str, Any]] = []; failed: list[dict[str, Any]] = []
@@ -518,11 +367,6 @@ def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | No
     enqueue.add_argument("--gate-fingerprint")
     bind = commands.add_parser("bind-target"); bind.add_argument("--project", required=True); bind.add_argument("--run-id", required=True); bind.add_argument("--target", required=True)
     drain = commands.add_parser("drain"); drain.add_argument("--project", required=True)
-    complete = commands.add_parser("complete")
-    complete.add_argument("--project", required=True)
-    complete.add_argument("--run-id", required=True)
-    complete.add_argument("--result-file", required=True, type=Path)
-    complete.add_argument("--evidence-file", required=True, type=Path)
     try:
         args = parser.parse_args(argv)
         store, capacities = runtime_factory(args.project, getattr(args, "skill", None))
@@ -552,11 +396,6 @@ def main(argv: list[str] | None = None, runtime_factory: Callable[[str, str | No
             # terminal before a target is attached to a queued run.
             store.reconcile(args.project)
             print(json.dumps(dispatcher.bind_target(args.project, args.run_id, args.target), separators=(",", ":")))
-        elif args.command == "complete":
-            result = _read_completion_object(args.result_file)
-            evidence = _read_completion_object(args.evidence_file)
-            admitted = dispatcher.complete(args.project, args.run_id, result, evidence, capacities)
-            print(json.dumps(admitted if admitted is not None else {"admitted": False}, separators=(",", ":")))
         else:
             print(json.dumps(dispatcher.reconcile_and_drain(args.project, capacities), separators=(",", ":")))
         return 0
