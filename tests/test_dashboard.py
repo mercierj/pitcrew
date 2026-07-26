@@ -2261,6 +2261,38 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn(".global-state-blocked", self.styles)
         self.assertIn("text-align: left", self.styles)
 
+    def test_compact_agent_rows_have_laptop_and_mobile_layouts(self):
+        for selector in (
+            ".agent-row",
+            ".agent-row-main",
+            ".agent-fact",
+            ".agent-detail-grid",
+            ".agent-controls",
+        ):
+            self.assertIn(f"{selector} {{", self.styles)
+        self.assertRegex(
+            self.styles,
+            r"(?s)\.agent-row-main\s*{[^}]*display:\s*grid;"
+            r"[^}]*grid-template-columns:",
+        )
+        self.assertRegex(
+            self.styles,
+            r"(?s)\.agent-controls\s*{[^}]*display:\s*flex;"
+            r"[^}]*flex-wrap:\s*wrap;",
+        )
+        self.assertRegex(
+            self.styles,
+            r"(?s)\.agent-row details\s*{[^}]*border-top:"
+            r".*?\.agent-row summary\s*{[^}]*cursor:\s*pointer;",
+        )
+        mobile = self.styles.split("@media (max-width: 620px)", 1)[1]
+        for selector in (".agent-row-main", ".agent-detail-grid"):
+            self.assertRegex(
+                mobile,
+                rf"(?s){re.escape(selector)}\s*{{[^}}]*"
+                r"grid-template-columns:\s*1fr;",
+            )
+
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
         formatters = self.modules["format.mjs"]
         for identifier in ("metric-tokens-7d", "metric-cost-7d"):
