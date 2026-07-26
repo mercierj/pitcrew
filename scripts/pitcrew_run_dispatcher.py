@@ -16,11 +16,11 @@ from urllib.parse import quote, urlsplit
 
 try:
     from scripts.pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
-    from scripts.pitcrew_run_store import RunStateError, RunStore, RunStoreError
+    from scripts.pitcrew_run_store import RunPaused, RunStateError, RunStore, RunStoreError
     from scripts.pitcrew_runtime_state import read_state
 except ImportError:
     from pitcrew_config import ConfigError, load_runtime_config, max_concurrent_for, runtime_root
-    from pitcrew_run_store import RunStateError, RunStore, RunStoreError
+    from pitcrew_run_store import RunPaused, RunStateError, RunStore, RunStoreError
     from pitcrew_runtime_state import read_state
 
 
@@ -188,8 +188,15 @@ class RunDispatcher:
     def drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, list[dict[str, Any]]]:
         claimed: list[dict[str, Any]] = []
         spawned: list[dict[str, Any]] = []; cancelled: list[dict[str, Any]] = []; failed: list[dict[str, Any]] = []
+        paused = False
         for _claim_number in range(self.max_claims_per_drain):
-            ready = self.store.claim_ready(project=project, capacities=capacities)
+            try:
+                ready = self.store.claim_ready(
+                    project=project,
+                    capacities=capacities,
+                )
+            except RunPaused:
+                break
             if not ready:
                 break
             claimed.extend(ready)
@@ -217,26 +224,23 @@ class RunDispatcher:
                 if row.get("gate_fingerprint") is not None:
                     args += ["--gate-fingerprint", row["gate_fingerprint"]]
                 args += ["--scheduled", "--coordinated-run", row["run_id"]]
+                process = None
                 try:
-                    process = self.process_factory(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                                   stderr=subprocess.DEVNULL, start_new_session=True)
-                    try:
-                        marked = self.store.mark_pid(row["run_id"], process.pid)
-                        # A global stop may request cancellation after claim
-                        # but before Popen/mark_pid.  In that interleaving its
-                        # initial PID snapshot is empty, so the spawning side
-                        # must terminate the just-recorded process itself.
-                        if marked["cancel_requested"]:
-                            try: self.killpg(process.pid, signal.SIGTERM)
-                            except OSError: pass
-                            self.sleep(0.1)
-                            try: self.killpg(process.pid, signal.SIGKILL)
-                            except OSError: pass
-                            try: process.wait(timeout=1)
-                            except Exception: pass
-                        else:
-                            spawned.append(marked)
-                    except (RunStateError, RunStoreError):
+                    with self.store.launch_guard(row["run_id"]) as guard:
+                        process = self.process_factory(
+                            args,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        marked = guard.mark_pid(process.pid)
+                    spawned.append(marked)
+                except RunPaused:
+                    paused = True
+                    break
+                except (RunStateError, RunStoreError):
+                    if process is not None:
                         try: self.killpg(process.pid, signal.SIGTERM)
                         except OSError: pass
                         self.sleep(0.1)
@@ -246,6 +250,8 @@ class RunDispatcher:
                         except Exception: pass
                 except OSError:
                     failed.append(self.store.finish(row["run_id"], state="failed", error_code="spawn_failed", error_message="worker could not be started"))
+            if paused:
+                break
         return {"claimed": claimed, "spawned": spawned, "cancelled": cancelled, "failed": failed}
 
     def reconcile_and_drain(self, project: str, capacities: Mapping[str, int]) -> dict[str, Any]:

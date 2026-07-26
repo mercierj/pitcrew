@@ -8,7 +8,8 @@ import sqlite3
 import stat
 import sys
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,40 @@ class RunStateError(RunStoreError):
 
 class RunPaused(RunStoreError):
     """The project control prevents new work from being admitted or claimed."""
+
+
+class _LaunchGuard:
+    """Record the launched PID while holding the admission transaction."""
+
+    def __init__(self, connection: sqlite3.Connection, run_id: str):
+        self._connection = connection
+        self._run_id = run_id
+        self.marked = False
+
+    def mark_pid(self, pid: int) -> dict[str, Any]:
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or pid <= 0
+        ):
+            raise RunStoreError("pid must be a positive integer")
+        if self.marked:
+            raise RunStateError("launch PID is already recorded")
+        changed = self._connection.execute(
+            "UPDATE runs SET pid=? "
+            "WHERE run_id=? AND state='running' AND cancel_requested=0",
+            (pid, self._run_id),
+        ).rowcount
+        if changed != 1:
+            raise RunStateError("run is not launchable")
+        row = self._connection.execute(
+            "SELECT * FROM runs WHERE run_id=?",
+            (self._run_id,),
+        ).fetchone()
+        if row is None:
+            raise RunStateError("run is not launchable")
+        self.marked = True
+        return dict(row)
 
 
 class RunStore:
@@ -769,6 +804,44 @@ class RunStore:
         except sqlite3.Error as error:
             connection.rollback(); raise RunStoreError("database operation failed") from error
         finally: connection.close()
+
+    @contextmanager
+    def launch_guard(self, run_id: str) -> Iterator[_LaunchGuard]:
+        run_id = self._public(run_id, "run_id", 64)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None or row["state"] != "running":
+                raise RunStateError("run is not launchable")
+            control = self._control(connection, row["project"])
+            if (
+                row["cancel_requested"]
+                or (
+                    control is not None
+                    and control["state"] == "stopped"
+                )
+            ):
+                raise RunPaused(f"project {row['project']} is stopped")
+            guard = _LaunchGuard(connection, run_id)
+            yield guard
+            if not guard.marked:
+                raise RunStateError("launch PID was not recorded")
+            connection.commit()
+        except RunStoreError:
+            connection.rollback()
+            raise
+        except sqlite3.Error as error:
+            connection.rollback()
+            raise RunStoreError("database operation failed") from error
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def mark_pid(self, run_id: str, pid: int) -> dict[str, Any]:
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0: raise RunStoreError("pid must be a positive integer")

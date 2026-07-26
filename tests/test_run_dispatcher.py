@@ -4,6 +4,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from unittest import mock
@@ -789,20 +790,29 @@ class RunDispatcherTest(unittest.TestCase):
             with mock.patch("sys.stderr", error): self.assertEqual(2, dispatcher_module.main(["enqueue", "--project", "getbill", "--skill", "implementer-run"], dispatcher_factory=NoSpawn))
             self.assertIn("global stop is active", error.getvalue())
 
-    def test_mark_pid_race_reaps_spawned_process(self):
+    def test_launch_guard_mark_failure_reaps_spawned_process(self):
         run = self.enqueue("race")
         signals = []
+
         class Process:
             pid = 456
             def __init__(self): self.waited = False
             def wait(self, timeout=None): self.waited = True; raise TimeoutError()
+
         process = Process()
         def popen(*args, **kwargs): return process
-        original = self.store.mark_pid
-        def race(run_id, pid):
-            self.store.finish(run_id, state="cancelled")
-            raise __import__("scripts.pitcrew_run_store", fromlist=["RunStateError"]).RunStateError("race")
-        self.store.mark_pid = race
+        original = self.store.launch_guard
+
+        @contextmanager
+        def broken_mark(run_id):
+            with original(run_id) as guard:
+                class BrokenGuard:
+                    def mark_pid(self, pid):
+                        raise RunStateError("race")
+
+                yield BrokenGuard()
+
+        self.store.launch_guard = broken_mark
         dispatcher = RunDispatcher(
             self.store,
             "/runner",
@@ -813,8 +823,9 @@ class RunDispatcherTest(unittest.TestCase):
         )
         self.assertEqual([], dispatcher.drain("demo", {"qa-run": 1})["spawned"])
         self.assertEqual([(456, __import__("signal").SIGTERM), (456, __import__("signal").SIGKILL)], signals)
-        self.assertTrue(process.waited); self.assertEqual("cancelled", self.store.get(run["run_id"])["state"])
-        self.store.mark_pid = original
+        self.assertTrue(process.waited)
+        self.assertEqual("running", self.store.get(run["run_id"])["state"])
+        self.store.launch_guard = original
 
     def test_bind_target_requires_project(self):
         run = self.store.enqueue(project="other", skill="qa-run", source="scheduled")
@@ -885,32 +896,59 @@ class RunDispatcherTest(unittest.TestCase):
             process_factory=lambda *args, **kwargs: spawned.append((args, kwargs)),
             target_validator=lambda row: True,
         )
-        with self.assertRaises(RunPaused):
-            dispatcher.drain("demo", {"qa-run": 1})
+        result = dispatcher.drain("demo", {"qa-run": 1})
         self.assertEqual([], spawned)
+        self.assertEqual([], result["spawned"])
 
-    def test_stop_between_claim_and_mark_pid_terminates_spawned_worker(self):
+    def test_stop_winning_after_claim_prevents_popen(self):
+        self.enqueue("race")
+        claimed = threading.Event()
+        allow_guard = threading.Event()
+        original_claim = self.store.claim_ready
+
+        def claim_then_wait(*, project, capacities):
+            ready = original_claim(project=project, capacities=capacities)
+            claimed.set()
+            self.assertTrue(allow_guard.wait(timeout=2))
+            return ready
+
+        self.store.claim_ready = claim_then_wait
+        spawned = []
+        results = []
+        worker = threading.Thread(
+            target=lambda: results.append(
+                RunDispatcher(
+                    self.store,
+                    "/runner",
+                    process_factory=lambda *args, **kwargs: (
+                        spawned.append((args, kwargs)) or FakeProcess()
+                    ),
+                    target_validator=lambda row: True,
+                ).drain("demo", {"qa-run": 1})
+            ),
+        )
+        worker.start()
+        self.assertTrue(claimed.wait(timeout=2))
+        self.store.set_project_state("demo", "stopped")
+        allow_guard.set()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], spawned)
+        self.assertEqual([], results[0]["spawned"])
+
+    def test_launch_guard_linearizes_spawn_before_stop_and_exposes_pid_to_cancel(self):
         run = self.enqueue("race")
+        popen_started = threading.Event()
+        allow_popen = threading.Event()
+        stop_started = threading.Event()
+        stop_finished = threading.Event()
+        errors = []
         signals = []
-        after_stop_reread = threading.Event()
-        allow_stop_finish = threading.Event()
-        worker_started = threading.Event()
-        original_get = self.store.get
-
-        def get_after_stop_reread(run_id):
-            row = original_get(run_id)
-            if row is not None and row["cancel_requested"]:
-                after_stop_reread.set()
-                self.assertTrue(allow_stop_finish.wait(timeout=2))
-            return row
-
-        self.store.get = get_after_stop_reread
 
         def popen(*args, **kwargs):
-            # The stopper has already reread pid=None and is paused before
-            # finish. Popen/mark_pid now takes the formerly leaky path.
-            worker_started.set()
-            self.assertTrue(after_stop_reread.wait(timeout=2))
+            popen_started.set()
+            self.assertTrue(allow_popen.wait(timeout=2))
             return FakeProcess(456)
 
         dispatcher = RunDispatcher(
@@ -921,25 +959,97 @@ class RunDispatcherTest(unittest.TestCase):
             killpg=lambda pid, sig: signals.append((pid, sig)),
             sleep=lambda _: None,
         )
-        worker_result = []
         worker = threading.Thread(
-            target=lambda: worker_result.append(dispatcher.drain("demo", {"qa-run": 1})),
+            target=lambda: dispatcher.drain("demo", {"qa-run": 1}),
         )
         worker.start()
-        self.assertTrue(worker_started.wait(timeout=2))
-        stopper = threading.Thread(
-            target=lambda: dispatcher.cancel_running("demo", grace_seconds=0),
-        )
+        self.assertTrue(popen_started.wait(timeout=2))
+
+        def stop_project():
+            try:
+                stop_started.set()
+                self.store.set_project_state("demo", "stopped")
+                dispatcher.cancel_running("demo", grace_seconds=0)
+                stop_finished.set()
+            except Exception as error:
+                errors.append(error)
+
+        stopper = threading.Thread(target=stop_project)
         stopper.start()
-        self.assertTrue(after_stop_reread.wait(timeout=2))
+        self.assertTrue(stop_started.wait(timeout=2))
+        stop_blocked_by_launch = not stop_finished.wait(timeout=0.1)
+        allow_popen.set()
         worker.join(timeout=2)
-        self.assertFalse(worker.is_alive())
-        allow_stop_finish.set()
         stopper.join(timeout=2)
+
+        self.assertTrue(stop_blocked_by_launch)
+        self.assertFalse(worker.is_alive())
         self.assertFalse(stopper.is_alive())
-        self.assertEqual([], worker_result[0]["spawned"])
+        self.assertEqual([], errors)
         self.assertEqual(
-            [(456, __import__("signal").SIGTERM), (456, __import__("signal").SIGKILL)],
+            [(456, signal.SIGTERM), (456, signal.SIGKILL)],
             signals,
         )
+        self.assertEqual("cancelled", self.store.get(run["run_id"])["state"])
+
+    def test_cancel_requested_run_never_reaches_popen(self):
+        run = self.enqueue("race")
+        claimed = self.store.claim_ready(
+            project="demo",
+            capacities={"qa-run": 1},
+        )[0]
+        self.store.request_cancel("demo")
+        claim_calls = 0
+
+        def claimed_before_cancel(*, project, capacities):
+            nonlocal claim_calls
+            claim_calls += 1
+            return [claimed] if claim_calls == 1 else []
+
+        self.store.claim_ready = claimed_before_cancel
+        spawned = []
+        result = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=lambda *args, **kwargs: (
+                spawned.append((args, kwargs)) or FakeProcess()
+            ),
+            target_validator=lambda row: True,
+        ).drain("demo", {"qa-run": 1})
+
+        self.assertEqual([], spawned)
+        self.assertEqual([], result["spawned"])
         self.assertEqual(1, self.store.get(run["run_id"])["cancel_requested"])
+
+    def test_spawn_oserror_rolls_back_launch_guard_before_terminalizing(self):
+        run = self.enqueue("race")
+        original_guard = self.store.launch_guard
+        events = []
+
+        @contextmanager
+        def traced_guard(run_id):
+            events.append("guard")
+            try:
+                with original_guard(run_id) as guard:
+                    yield guard
+            except OSError:
+                events.append("rollback")
+                raise
+
+        self.store.launch_guard = traced_guard
+        result = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=mock.Mock(side_effect=OSError("spawn failed")),
+            target_validator=lambda row: True,
+        ).drain("demo", {"qa-run": 1})
+
+        self.assertEqual(["guard", "rollback"], events)
+        self.assertEqual([run["run_id"]], [row["run_id"] for row in result["failed"]])
+        self.assertEqual(
+            ("failed", "spawn_failed"),
+            (
+                self.store.get(run["run_id"])["state"],
+                self.store.get(run["run_id"])["error_code"],
+            ),
+        )
