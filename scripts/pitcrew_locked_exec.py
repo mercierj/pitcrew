@@ -23,6 +23,31 @@ MAX_SUMMARY_BYTES = 64 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
 NO_SUMMARY = "No bounded final summary was produced."
 STRUCTURED_STATUSES = {"success", "noop", "blocked", "failed"}
+STRUCTURED_FIELDS = {
+    "status",
+    "reason",
+    "project",
+    "skill",
+    "target_id",
+    "did_work",
+    "work_kind",
+    "quality_outcome",
+    "next_action",
+}
+WORK_KINDS = {
+    "none",
+    "implementation",
+    "review",
+    "validation",
+    "investigation",
+    "triage",
+    "research",
+    "security",
+    "product",
+    "operations",
+    "release",
+    "cleanup",
+}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -71,12 +96,32 @@ def read_summary(path: Path) -> str:
     return decoded or NO_SUMMARY
 
 
-def parse_structured_result(summary: str) -> dict | None:
+def parse_structured_result(summary: str, *, strict: bool = False) -> dict | None:
     try:
         value = json.loads(summary)
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     if not isinstance(value, dict) or value.get("status") not in STRUCTURED_STATUSES:
+        return None
+    if strict and (
+        set(value) != STRUCTURED_FIELDS
+        or any(
+            not isinstance(value.get(field), str) or not value[field]
+            for field in (
+                "reason",
+                "project",
+                "skill",
+                "quality_outcome",
+                "next_action",
+            )
+        )
+        or (
+            value.get("target_id") is not None
+            and not isinstance(value["target_id"], str)
+        )
+        or not isinstance(value.get("did_work"), bool)
+        or value.get("work_kind") not in WORK_KINDS
+    ):
         return None
     return value
 
@@ -445,7 +490,10 @@ def main() -> int:
                 signal.signal(signum, handler)
 
         summary = read_summary(args.summary_file)
-        structured_result = parse_structured_result(summary)
+        structured_result = parse_structured_result(
+            summary,
+            strict=args.require_structured_result,
+        )
         outcome = normalized_outcome(
             return_code,
             structured_result,
@@ -483,6 +531,12 @@ def main() -> int:
             )
         finally:
             clear_live_status(args.live_file)
+        if (
+            return_code == 0
+            and args.require_structured_result
+            and structured_result is None
+        ):
+            return 1
         return return_code
 
 

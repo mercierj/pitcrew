@@ -586,6 +586,56 @@ class LockedExecHistoryTest(unittest.TestCase):
                 "human supplied directed target", record["gate_reason"]
             )
 
+    def test_locked_helper_rejects_incomplete_or_mistyped_strict_results(self):
+        valid = {
+            "status": "success",
+            "reason": "completed",
+            "project": "getbill",
+            "skill": "research-run",
+            "target_id": None,
+            "did_work": True,
+            "work_kind": "research",
+            "quality_outcome": "validated",
+            "next_action": "review results",
+        }
+        cases = {
+            "incomplete": {"status": "success"},
+            "mistyped": {**valid, "did_work": "true"},
+            "additional-property": {**valid, "unexpected": "value"},
+        }
+
+        for name, payload in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                summary = json.dumps(payload, separators=(",", ":"))
+
+                result = self._run_helper(
+                    root,
+                    summary,
+                    "--require-structured-result",
+                )
+
+                self.assertNotEqual(0, result.returncode, result.stderr)
+                record = json.loads(
+                    (root / "history.jsonl").read_text(encoding="utf-8").strip()
+                )
+                self.assertEqual("failed", record["outcome"])
+                self.assertEqual(0, record["exit_code"])
+                self.assertEqual(summary, record["summary"])
+
+    def test_locked_helper_keeps_manual_legacy_success_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            result = self._run_helper(root, "legacy bounded summary")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            record = json.loads(
+                (root / "history.jsonl").read_text(encoding="utf-8").strip()
+            )
+            self.assertEqual("success", record["outcome"])
+            self.assertEqual("legacy bounded summary", record["summary"])
+
     def test_locked_helper_marks_overlap_as_not_invoked(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

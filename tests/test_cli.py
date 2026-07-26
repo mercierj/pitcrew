@@ -626,6 +626,90 @@ class CliTest(unittest.TestCase):
             self.assertEqual("noop", json.loads(second.stdout)["status"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
 
+    def test_structured_noop_without_legacy_phrase_opens_skill_cooldown(self):
+        self._assert_structured_status_opens_skill_cooldown("noop")
+
+    def test_structured_blocked_without_legacy_phrase_opens_skill_cooldown(self):
+        self._assert_structured_status_opens_skill_cooldown("blocked")
+
+    def _assert_structured_status_opens_skill_cooldown(self, status):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            marker = root / "codex-started"
+            env = {
+                **os.environ,
+                "HOME": str(root),
+                "CODEX_HOME": str(root / ".codex"),
+                "FAKE_CODEX_MARKER": str(marker),
+                "FAKE_RESULT_STATUS": status,
+            }
+            configured = self.run_cli(
+                "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+            )
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "arguments = sys.argv[1:]\n"
+                "summary = Path(arguments[arguments.index('--output-last-message') + 1])\n"
+                "status = os.environ['FAKE_RESULT_STATUS']\n"
+                "payload = {\n"
+                "    'status': status,\n"
+                "    'reason': f'{status} capacity window closed',\n"
+                "    'project': 'getbill',\n"
+                "    'skill': 'research-run',\n"
+                "    'target_id': None,\n"
+                "    'did_work': False,\n"
+                "    'work_kind': 'none',\n"
+                "    'quality_outcome': 'not-applicable',\n"
+                "    'next_action': 'retry later',\n"
+                "}\n"
+                "summary.write_text(json.dumps(payload, separators=(',', ':')), encoding='utf-8')\n"
+                "Path(os.environ['FAKE_CODEX_MARKER']).touch()\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+
+            first = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, first.returncode, first.stderr)
+            circuit = root / ".codex/pitcrew/getbill/state/provider-circuit.json"
+            deadline = time.monotonic() + 3
+            while not circuit.is_file() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(circuit.is_file())
+            state = json.loads(circuit.read_text(encoding="utf-8"))
+            self.assertEqual(
+                f"{status} capacity window closed",
+                state["skills"]["research-run"]["reason"],
+            )
+            marker.unlink()
+
+            second = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, second.returncode, second.stderr)
+            payload = json.loads(second.stdout)
+            self.assertEqual("noop", payload["status"])
+            self.assertIn("cooldown", payload["reason"])
+            self.assertFalse(marker.exists())
+
     def run_cli(self, *args, env=None):
         return subprocess.run(
             [str(ROOT / args[0]), *args[1:]],
@@ -1008,7 +1092,15 @@ class CliTest(unittest.TestCase):
             fake_codex = root / "fake-codex"
             captured = root / "run-id"
             fake_codex.write_text(
-                "#!/usr/bin/env bash\nprintf '%s' \"${PITCREW_RUN_ID-unset}\" > \"$FAKE_CODEX_ENV\"\n",
+                "#!/usr/bin/env bash\n"
+                "printf '%s' \"${PITCREW_RUN_ID-unset}\" > \"$FAKE_CODEX_ENV\"\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"environment captured\",\"project\":\"getbill\",\"skill\":\"implementer-run\",\"target_id\":null,\"did_work\":false,\"work_kind\":\"none\",\"quality_outcome\":\"not-applicable\",\"next_action\":\"finish\"}' > \"$argument\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n",
                 encoding="utf-8",
             )
             fake_codex.chmod(0o755)

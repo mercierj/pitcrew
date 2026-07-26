@@ -286,10 +286,51 @@ if "$LOCKED_RUN"; then
   fi
   EXIT_CODE=$?
   set -e
-  if "$SCHEDULED" && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'authentication|invalid_grant|oauth grant' "$SUMMARY_FILE"; then
+  STRUCTURED_STATUS=""
+  SUMMARY_PARSE_CODE=2
+  if "$SCHEDULED" && [[ -f "$SUMMARY_FILE" ]]; then
+    if STRUCTURED_STATUS="$(python3 -c '
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from pitcrew_locked_exec import parse_structured_result, read_summary
+
+summary = read_summary(Path(sys.argv[2]))
+try:
+    decoded = json.loads(summary)
+except (json.JSONDecodeError, TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(decoded, dict):
+    raise SystemExit(2)
+result = parse_structured_result(summary, strict=True)
+if result is None:
+    raise SystemExit(1)
+print(result["status"])
+' "$REPO_ROOT/scripts" "$SUMMARY_FILE")"; then
+      SUMMARY_PARSE_CODE=0
+    else
+      SUMMARY_PARSE_CODE=$?
+    fi
+  fi
+  if "$SCHEDULED" && [[ "$SUMMARY_PARSE_CODE" -eq 0 ]] && { [[ "$STRUCTURED_STATUS" == "noop" ]] || [[ "$STRUCTURED_STATUS" == "blocked" ]]; }; then
+    STRUCTURED_REASON="$(python3 -c '
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from pitcrew_locked_exec import parse_structured_result, read_summary
+
+result = parse_structured_result(read_summary(Path(sys.argv[2])), strict=True)
+print(result["reason"])
+' "$REPO_ROOT/scripts" "$SUMMARY_FILE")"
+    python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-noop \
+      --project "$PROJECT" --skill "$SKILL" --reason "$STRUCTURED_REASON" >/dev/null || true
+  elif "$SCHEDULED" && [[ "$SUMMARY_PARSE_CODE" -eq 2 ]] && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'authentication|invalid_grant|oauth grant' "$SUMMARY_FILE"; then
     python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-provider-failure \
       --project "$PROJECT" --reason "provider authentication failure" >/dev/null || true
-  elif "$SCHEDULED" && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'no eligible item|nothing missing|no permissions required' "$SUMMARY_FILE"; then
+  elif "$SCHEDULED" && [[ "$SUMMARY_PARSE_CODE" -eq 2 ]] && [[ -f "$SUMMARY_FILE" ]] && rg -qi 'no eligible item|nothing missing|no permissions required' "$SUMMARY_FILE"; then
     python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" record-noop \
       --project "$PROJECT" --skill "$SKILL" --reason "no eligible item" >/dev/null || true
   fi
