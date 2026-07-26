@@ -630,6 +630,12 @@ class CliTest(unittest.TestCase):
             self.assertEqual("noop", json.loads(result.stdout)["status"])
             self.assertIn("global stop", json.loads(result.stdout)["reason"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("stopped", record["gate_decision"])
 
     def test_runner_refuses_to_start_during_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -670,6 +676,12 @@ class CliTest(unittest.TestCase):
             self.assertIn("cooldown", payload["reason"])
             self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
             self.assertFalse((root / ".codex/pitcrew/getbill/runs.sqlite3").exists())
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("cooldown", record["gate_decision"])
 
     def test_authentication_failure_opens_provider_cooldown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -809,6 +821,302 @@ class CliTest(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def configured_scheduled_env(self, root, *, skill, target_id=None):
+        env = {
+            **os.environ,
+            "HOME": str(root),
+            "CODEX_HOME": str(root / ".codex"),
+            "FAKE_CODEX_MARKER": str(root / "codex-started"),
+            "FAKE_CODEX_ARGS": str(root / "codex-args"),
+            "FAKE_RESULT_SKILL": skill,
+            "FAKE_RESULT_TARGET": target_id or "",
+        }
+        configured = self.run_cli(
+            "bin/configure.sh", "getbill", "--profile", "getbill", env=env
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+        fake_codex = root / "fake-codex"
+        fake_codex.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "pathlib.Path(os.environ['FAKE_CODEX_MARKER']).touch()\n"
+            "pathlib.Path(os.environ['FAKE_CODEX_ARGS']).write_text("
+            "'\\n'.join(sys.argv[1:]), encoding='utf-8')\n"
+            "summary = None\n"
+            "for index, value in enumerate(sys.argv):\n"
+            "    if value == '--output-last-message':\n"
+            "        summary = pathlib.Path(sys.argv[index + 1])\n"
+            "if summary is not None:\n"
+            "    target = os.environ['FAKE_RESULT_TARGET'] or None\n"
+            "    summary.write_text(json.dumps({"
+            "'status':'noop','reason':'no eligible item',"
+            "'project':'getbill','skill':os.environ['FAKE_RESULT_SKILL'],"
+            "'target_id':target,'did_work':False,'work_kind':'none',"
+            "'quality_outcome':'not-applicable','next_action':'wait'"
+            "}), encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        fake_codex.chmod(0o755)
+        env["CODEX_BIN"] = str(fake_codex)
+        return env
+
+    def write_fake_glab(self, root, *, stdout="", exit_code=0):
+        fake_glab = root / "fake-glab"
+        fake_glab.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_GLAB_CALLS\"\n"
+            f"printf '%s' {stdout!r}\n"
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
+        fake_glab.chmod(0o755)
+        return fake_glab
+
+    def wait_for_path(self, path, timeout=5):
+        deadline = time.monotonic() + timeout
+        while not path.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertTrue(path.exists(), f"timed out waiting for {path}")
+
+    def assert_coordinated_bind_prompt(self, args, *, run_id, target):
+        command = (
+            f"python3 {ROOT}/scripts/pitcrew_run_dispatcher.py bind-target "
+            f"--project getbill --run-id {run_id} --target {target}"
+        )
+        mutation_guard = "before the first tracker mutation or checkout write"
+        self.assertIn(command, args)
+        self.assertIn(mutation_guard, args)
+        self.assertLess(args.index(command), args.index(mutation_guard))
+        self.assertIn("conflict", args)
+        self.assertIn("stale", args)
+        self.assertIn("unavailable", args)
+        self.assertNotIn("already bound it to that target", args)
+
+    def test_scheduled_empty_gate_skips_dispatch_and_records_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = self.configured_scheduled_env(root, skill="reviewer-run")
+            env["FAKE_GLAB_CALLS"] = str(root / "glab-calls")
+            env["GLAB_BIN"] = str(self.write_fake_glab(root, stdout="[]"))
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "reviewer-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("noop", json.loads(result.stdout)["status"])
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("empty", record["gate_decision"])
+
+    def test_scheduled_unavailable_gate_runs_worker_with_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = self.configured_scheduled_env(root, skill="reviewer-run")
+            env["FAKE_GLAB_CALLS"] = str(root / "glab-calls")
+            env["GLAB_BIN"] = str(self.write_fake_glab(root, exit_code=1))
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "reviewer-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.wait_for_path(Path(env["FAKE_CODEX_MARKER"]))
+            args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
+            self.assert_coordinated_bind_prompt(
+                args,
+                run_id=payload["run_id"],
+                target="<canonical-url>",
+            )
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            self.wait_for_path(history)
+            deadline = time.monotonic() + 5
+            record = None
+            while time.monotonic() < deadline:
+                records = history.read_text(encoding="utf-8").splitlines()
+                if records:
+                    record = json.loads(records[-1])
+                    break
+                time.sleep(.02)
+            self.assertIsNotNone(record)
+            self.assertTrue(record["model_invoked"])
+            self.assertEqual("unavailable", record["gate_decision"])
+
+    def test_scheduled_eligible_target_keeps_provenance_through_dispatcher(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            target = "getbill1/getbill!7"
+            env = self.configured_scheduled_env(
+                root,
+                skill="reviewer-run",
+                target_id=target,
+            )
+            env["FAKE_GLAB_CALLS"] = str(root / "glab-calls")
+            env["GLAB_BIN"] = str(
+                self.write_fake_glab(root, stdout='[{"iid":7}]')
+            )
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "reviewer-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.wait_for_path(Path(env["FAKE_CODEX_MARKER"]))
+            args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
+            self.assertIn("eligibility probe preselected this target", args)
+            self.assertNotIn("directed target", args)
+            self.assert_coordinated_bind_prompt(
+                args,
+                run_id=payload["run_id"],
+                target=target,
+            )
+            calls = Path(env["FAKE_GLAB_CALLS"]).read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(1, len(calls))
+
+    def test_scheduled_directed_target_bypasses_eligibility_collection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            target = "https://gitlab.com/getbill1/getbill/-/issues/7"
+            env = self.configured_scheduled_env(
+                root,
+                skill="implementer-run",
+                target_id=target,
+            )
+            env["FAKE_GLAB_CALLS"] = str(root / "glab-calls")
+            issue = json.dumps(
+                {
+                    "iid": 7,
+                    "state": "opened",
+                    "labels": ["pitcrew-agent", "pitcrew-state::todo"],
+                }
+            )
+            env["GLAB_BIN"] = str(self.write_fake_glab(root, stdout=issue))
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "implementer-run",
+                "getbill",
+                "--target",
+                target,
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.wait_for_path(Path(env["FAKE_CODEX_MARKER"]))
+            args = Path(env["FAKE_CODEX_ARGS"]).read_text(encoding="utf-8")
+            self.assertIn(f"directed target: {target}", args)
+            self.assertNotIn("eligibility probe preselected", args)
+            self.assert_coordinated_bind_prompt(
+                args,
+                run_id=payload["run_id"],
+                target=target,
+            )
+            calls = Path(env["FAKE_GLAB_CALLS"]).read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(1, len(calls))
+            self.assertIn("projects/59043683/issues/7", calls[0])
+            self.assertNotIn("issues?", calls[0])
+
+    def test_scheduled_pre_model_error_records_failed_no_model_attempt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = self.configured_scheduled_env(root, skill="research-run")
+            state = root / ".codex/pitcrew/getbill/execution-state.json"
+            state.write_text("{not-json", encoding="utf-8")
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "research-run",
+                "getbill",
+                "--scheduled",
+                env=env,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+            history = root / ".codex/pitcrew/getbill/history.jsonl"
+            record = json.loads(
+                history.read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertEqual("failed", record["outcome"])
+            self.assertFalse(record["model_invoked"])
+            self.assertEqual("error", record["gate_decision"])
+
+    def test_coordinated_worker_rejects_forged_gate_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            target = "getbill1/getbill!7"
+            env = self.configured_scheduled_env(
+                root,
+                skill="reviewer-run",
+                target_id=target,
+            )
+            from scripts.pitcrew_run_store import RunStore
+
+            runtime = root / ".codex/pitcrew/getbill"
+            runtime.chmod(0o700)
+            store = RunStore(runtime / "runs.sqlite3")
+            run = store.enqueue(
+                project="getbill",
+                skill="reviewer-run",
+                source="scheduled",
+                target=target,
+                target_source="eligibility",
+                gate_decision="eligible",
+                gate_reason="an authored merge request requires review",
+                gate_fingerprint="sha256:abc",
+            )
+            store.claim_ready(
+                project="getbill",
+                capacities={"reviewer-run": 1},
+            )
+
+            result = self.run_cli(
+                "bin/pitcrew-codex.sh",
+                "reviewer-run",
+                "getbill",
+                "--target",
+                target,
+                "--scheduled",
+                "--coordinated-run",
+                run["run_id"],
+                env=env,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("coordinated run is invalid", result.stderr)
+            self.assertFalse(Path(env["FAKE_CODEX_MARKER"]).exists())
+            record = json.loads(
+                (runtime / "history.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()[-1]
+            )
+            self.assertEqual("failed", record["outcome"])
+            self.assertFalse(record["model_invoked"])
 
     def test_configure_getbill_writes_under_codex_home(self):
         with tempfile.TemporaryDirectory() as temp:

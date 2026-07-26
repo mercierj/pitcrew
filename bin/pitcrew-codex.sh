@@ -35,6 +35,10 @@ PROJECT=""
 DRY_RUN=false
 SCHEDULED=false
 TARGET=""
+TARGET_SOURCE=""
+GATE_DECISION=""
+GATE_REASON=""
+GATE_FINGERPRINT=""
 COORDINATED_RUN=""
 while (($#)); do
   case "$1" in
@@ -48,6 +52,26 @@ while (($#)); do
       shift
       [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
       TARGET="$1"
+      ;;
+    --target-source)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      TARGET_SOURCE="$1"
+      ;;
+    --gate-decision)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      GATE_DECISION="$1"
+      ;;
+    --gate-reason)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      GATE_REASON="$1"
+      ;;
+    --gate-fingerprint)
+      shift
+      [[ $# -gt 0 && "$1" != --* ]] || { usage; exit 2; }
+      GATE_FINGERPRINT="$1"
       ;;
     --coordinated-run)
       shift
@@ -90,32 +114,154 @@ if [[ -n "$COORDINATED_RUN" && "$SCHEDULED" != true ]]; then
   echo "pitcrew-codex: --coordinated-run requires --scheduled" >&2
   exit 2
 fi
-if ! EXECUTION_STATE="$(python3 "$REPO_ROOT/scripts/pitcrew_runtime_state.py" status --project "$PROJECT")"; then
-  echo "pitcrew-codex: execution state is unavailable" >&2
+if {
+  [[ -n "$TARGET_SOURCE" ]] ||
+    [[ -n "$GATE_DECISION" ]] ||
+    [[ -n "$GATE_REASON" ]] ||
+    [[ -n "$GATE_FINGERPRINT" ]]
+} && [[ -z "$COORDINATED_RUN" ]]; then
+  echo "pitcrew-codex: internal gate metadata requires a coordinated run" >&2
   exit 2
 fi
+if [[ -n "$TARGET_SOURCE" ]] && [[ -z "$TARGET" ]]; then
+  echo "pitcrew-codex: target source requires a target" >&2
+  exit 2
+fi
+if [[ -n "$TARGET_SOURCE" ]] &&
+  [[ "$TARGET_SOURCE" != "directed" && "$TARGET_SOURCE" != "eligibility" ]]; then
+  echo "pitcrew-codex: target source is invalid" >&2
+  exit 2
+fi
+HISTORY_FILE="$RUNTIME_ROOT/$PROJECT/history.jsonl"
+
+record_gate() {
+  local decision="$1"
+  local reason="$2"
+  local outcome="$3"
+  local target_id="${4:-}"
+  local fingerprint="${5:-}"
+  local args=(
+    record-gate
+    --project "$PROJECT"
+    --skill "$SKILL"
+    --decision "$decision"
+    --reason "$reason"
+    --outcome "$outcome"
+  )
+  if [[ -n "$target_id" ]]; then
+    args+=(--target-id "$target_id")
+  fi
+  if [[ -n "$fingerprint" ]]; then
+    args+=(--fingerprint "$fingerprint")
+  fi
+  python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" "${args[@]}"
+}
+
+fail_pre_model() {
+  local reason="$1"
+  if "$SCHEDULED"; then
+    record_gate error "$reason" failed "$TARGET" "$GATE_FINGERPRINT" \
+      >/dev/null 2>&1 || true
+  fi
+  echo "pitcrew-codex: $reason" >&2
+  exit 2
+}
+
+if ! EXECUTION_STATE="$(python3 "$REPO_ROOT/scripts/pitcrew_runtime_state.py" status --project "$PROJECT")"; then
+  fail_pre_model "execution state is unavailable"
+fi
 if [[ "$EXECUTION_STATE" == "stopped" ]]; then
-  printf '%s\n' '{"status":"noop","reason":"global stop is active"}'
+  if "$SCHEDULED"; then
+    record_gate stopped "global stop is active" noop "$TARGET" \
+      "$GATE_FINGERPRINT"
+  else
+    printf '%s\n' '{"status":"noop","reason":"global stop is active"}'
+  fi
   exit 0
 fi
 CONFIG="$RUNTIME_ROOT/$PROJECT/config.json"
+
+if [[ -z "$COORDINATED_RUN" ]]; then
+  if [[ -n "$TARGET" ]]; then
+    TARGET_SOURCE="directed"
+    GATE_DECISION="directed"
+    GATE_REASON="human supplied directed target"
+  else
+    GATE_DECISION="not-checked"
+    GATE_REASON="scheduled eligibility was not checked"
+  fi
+fi
+
 # Preflight belongs to the public entry point: a noop must not leave a claimed
 # coordinated row behind.  The internal worker has already passed this gate.
 if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]]; then
   PREFLIGHT="$(python3 "$REPO_ROOT/scripts/pitcrew_preflight.py" check --project "$PROJECT" --skill "$SKILL")" || {
-    echo "pitcrew-codex: preflight is unavailable" >&2
-    exit 2
+    fail_pre_model "preflight is unavailable"
   }
-  if [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["decision"])' <<<"$PREFLIGHT")" == "noop" ]]; then
+  PREFLIGHT_DECISION="$(python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["decision"])' \
+    <<<"$PREFLIGHT")" || {
+    fail_pre_model "preflight response is invalid"
+  }
+  if [[ "$PREFLIGHT_DECISION" == "noop" ]]; then
+    PREFLIGHT_REASON="$(python3 -c \
+      'import json,sys; print(json.load(sys.stdin)["reason"])' \
+      <<<"$PREFLIGHT")" || {
+      fail_pre_model "preflight response is invalid"
+    }
+    record_gate cooldown "$PREFLIGHT_REASON" noop >/dev/null
     printf '%s\n' "$PREFLIGHT" | python3 -c '
 import json, sys
 value = json.load(sys.stdin)
 value["status"] = "noop"
-value["next_action"] = value.get("next_action", "retry after the provider cooldown")
+value["next_action"] = value.get(
+    "next_action",
+    "retry after the provider cooldown",
+)
 value.pop("decision", None)
 print(json.dumps(value, separators=(",", ":")))
 '
     exit 0
+  elif [[ "$PREFLIGHT_DECISION" != "run" ]]; then
+    fail_pre_model "preflight response is invalid"
+  fi
+
+  if [[ -z "$TARGET" ]]; then
+    ELIGIBILITY="$(python3 "$REPO_ROOT/scripts/pitcrew_eligibility.py" \
+      check --project "$PROJECT" --skill "$SKILL")" || {
+      fail_pre_model "eligibility probe is unavailable"
+    }
+    GATE_DECISION="$(python3 -c \
+      'import json,sys; print(json.load(sys.stdin)["decision"])' \
+      <<<"$ELIGIBILITY")" || {
+      fail_pre_model "eligibility response is invalid"
+    }
+    GATE_REASON="$(python3 -c \
+      'import json,sys; print(json.load(sys.stdin)["reason"])' \
+      <<<"$ELIGIBILITY")" || {
+      fail_pre_model "eligibility response is invalid"
+    }
+    GATE_FINGERPRINT="$(python3 -c \
+      'import json,sys; print(json.load(sys.stdin).get("fingerprint") or "")' \
+      <<<"$ELIGIBILITY")" || {
+      fail_pre_model "eligibility response is invalid"
+    }
+    if [[ "$GATE_DECISION" == "empty" ]]; then
+      record_gate empty "$GATE_REASON" noop "" "$GATE_FINGERPRINT"
+      exit 0
+    elif [[ "$GATE_DECISION" == "eligible" ]]; then
+      TARGET="$(python3 -c \
+        'import json,sys; print(json.load(sys.stdin).get("target_id") or "")' \
+        <<<"$ELIGIBILITY")" || {
+        fail_pre_model "eligibility response is invalid"
+      }
+      if [[ -z "$TARGET" ]]; then
+        fail_pre_model "eligibility response is invalid"
+      fi
+      TARGET_SOURCE="eligibility"
+    elif [[ "$GATE_DECISION" != "unavailable" ]]; then
+      fail_pre_model "eligibility response is invalid"
+    fi
   fi
 fi
 
@@ -130,7 +276,36 @@ if "$SCHEDULED" && [[ -z "$COORDINATED_RUN" ]] && [[ "$DRY_RUN" != true ]]; then
   if [[ -n "$TARGET" ]]; then
     DISPATCH_ARGS+=(--target "$TARGET")
   fi
-  exec "${DISPATCH_ARGS[@]}"
+  if [[ -n "$TARGET_SOURCE" ]]; then
+    DISPATCH_ARGS+=(--target-source "$TARGET_SOURCE")
+  fi
+  if [[ -n "$GATE_DECISION" ]] && [[ "$GATE_DECISION" != "not-checked" ]]; then
+    DISPATCH_ARGS+=(
+      --gate-decision "$GATE_DECISION"
+      --gate-reason "$GATE_REASON"
+    )
+  fi
+  if [[ -n "$GATE_FINGERPRINT" ]]; then
+    DISPATCH_ARGS+=(--gate-fingerprint "$GATE_FINGERPRINT")
+  fi
+  DISPATCH_RESULT="$("${DISPATCH_ARGS[@]}")" || {
+    fail_pre_model "dispatcher is unavailable"
+  }
+  DISPATCH_STATE="$(python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["state"])' \
+    <<<"$DISPATCH_RESULT")" || {
+    fail_pre_model "dispatcher response is invalid"
+  }
+  if [[ "$DISPATCH_STATE" == "failed" || "$DISPATCH_STATE" == "cancelled" ]]; then
+    record_gate error "dispatcher rejected the scheduled run" failed \
+      "$TARGET" "$GATE_FINGERPRINT" >/dev/null
+  elif [[ "$DISPATCH_STATE" != "queued" &&
+    "$DISPATCH_STATE" != "running" &&
+    "$DISPATCH_STATE" != "succeeded" ]]; then
+    fail_pre_model "dispatcher response is invalid"
+  fi
+  printf '%s\n' "$DISPATCH_RESULT"
+  exit 0
 fi
 
 RUN_DB=""
@@ -139,10 +314,21 @@ if [[ -n "$COORDINATED_RUN" ]]; then
   if ! python3 -c '
 import sys, uuid
 from pathlib import Path
-sys.path.insert(0, sys.argv[6])
+sys.path.insert(0, sys.argv[10])
 from scripts.pitcrew_run_store import RunStore, RunStoreError
 
-database, project, skill, target, run_id, _repo_root = sys.argv[1:]
+(
+    database,
+    project,
+    skill,
+    target,
+    run_id,
+    target_source,
+    gate_decision,
+    gate_reason,
+    gate_fingerprint,
+    _repo_root,
+) = sys.argv[1:]
 try:
     uuid.UUID(run_id)
     row = RunStore(Path(database)).get(run_id)
@@ -150,37 +336,54 @@ except (ValueError, RunStoreError):
     raise SystemExit(1)
 if row is None or row["project"] != project or row["skill"] != skill:
     raise SystemExit(1)
-if (row["target"] or "") != target or row["state"] != "running":
+if (
+    (row["target"] or "") != target
+    or (row["target_source"] or "") != target_source
+    or (row["gate_decision"] or "") != gate_decision
+    or (row["gate_reason"] or "") != gate_reason
+    or (row["gate_fingerprint"] or "") != gate_fingerprint
+    or row["state"] != "running"
+):
     raise SystemExit(1)
-' "$RUN_DB" "$PROJECT" "$SKILL" "$TARGET" "$COORDINATED_RUN" "$REPO_ROOT"; then
-    echo "pitcrew-codex: coordinated run is invalid" >&2
-    exit 2
+' "$RUN_DB" "$PROJECT" "$SKILL" "$TARGET" "$COORDINATED_RUN" \
+    "$TARGET_SOURCE" "$GATE_DECISION" "$GATE_REASON" "$GATE_FINGERPRINT" \
+    "$REPO_ROOT"; then
+    fail_pre_model "coordinated run is invalid"
   fi
 fi
-MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")"
-REASONING_EFFORT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" reasoning --project "$PROJECT" --skill "$SKILL")"
-ROUTING_MODE="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" routing-mode --project "$PROJECT" --skill "$SKILL")"
+MODEL="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" model --project "$PROJECT" --skill "$SKILL")" ||
+  fail_pre_model "model resolution is unavailable"
+REASONING_EFFORT="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" reasoning --project "$PROJECT" --skill "$SKILL")" ||
+  fail_pre_model "reasoning resolution is unavailable"
+ROUTING_MODE="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" routing-mode --project "$PROJECT" --skill "$SKILL")" ||
+  fail_pre_model "routing resolution is unavailable"
 CANDIDATE_MODEL="$MODEL"
 ROUTING_REASON="baseline retained during observation"
-if [[ -n "$TARGET" ]]; then
-  GATE_DECISION="directed"
-  GATE_REASON="human supplied directed target"
-else
+if [[ -z "$GATE_DECISION" ]]; then
   GATE_DECISION="not-checked"
   GATE_REASON="scheduled eligibility not checked"
 fi
-REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")"
+REPO="$(python3 "$REPO_ROOT/scripts/pitcrew_config.py" repo --project "$PROJECT")" ||
+  fail_pre_model "repository resolution is unavailable"
 [[ -n "$REPO" && -d "$REPO" ]] || {
-  echo "pitcrew-codex: configured repository is unavailable: $REPO" >&2
-  exit 2
+  fail_pre_model "configured repository is unavailable: $REPO"
 }
 
 PROMPT="Use \$pitcrew:$SKILL for project '$PROJECT'. Read $CONFIG, perform exactly one bounded pass in $REPO, then stop. The Pitcrew coverage helper is at $REPO_ROOT/scripts/research_coverage.py; use it when the research skill requires coverage rotation. Fail closed when a configured provider or permission is unavailable."
-if [[ -n "$TARGET" ]]; then
+if [[ -n "$TARGET" && "$TARGET_SOURCE" == "directed" ]]; then
   PROMPT+=" Operate on exactly this directed target: $TARGET. Validate it with references/DIRECTED-TARGET.md before any provider lookup."
+elif [[ -n "$TARGET" && "$TARGET_SOURCE" == "eligibility" ]]; then
+  PROMPT+=" The read-only eligibility probe preselected this target: $TARGET. Revalidate that exact target against the skill's authoritative source before any mutation; if it is stale, return a structured noop."
 fi
 if [[ -n "$COORDINATED_RUN" ]]; then
-  PROMPT+=" This execution is coordinated as PITCREW_RUN_ID=$COORDINATED_RUN. Before the first tracker mutation or checkout write, bind the selected canonical ticket with: python3 $REPO_ROOT/scripts/pitcrew_run_dispatcher.py bind-target --project $PROJECT --run-id $COORDINATED_RUN --target <canonical-url>. If binding reports a conflict, select another eligible ticket or return a structured no-op without mutating the provider."
+  if [[ -n "$TARGET" ]]; then
+    BIND_TARGET="$TARGET"
+    BIND_SELECTION="Even though the dispatcher preselected or directed this target,"
+  else
+    BIND_TARGET="<canonical-url>"
+    BIND_SELECTION="After selecting one canonical target,"
+  fi
+  PROMPT+=" This execution is coordinated as PITCREW_RUN_ID=$COORDINATED_RUN. $BIND_SELECTION run exactly: python3 $REPO_ROOT/scripts/pitcrew_run_dispatcher.py bind-target --project $PROJECT --run-id $COORDINATED_RUN --target $BIND_TARGET before the first tracker mutation or checkout write. This bind is idempotent. If binding reports a conflict, reports the target stale, or is unavailable, select another eligible ticket or return a structured no-op without a tracker mutation or checkout write."
 fi
 if "$SCHEDULED" && [[ "$SKILL" == "unblock" ]]; then
   PROMPT+=" This is an unattended scheduled run. When a human decision is required, do not leave the question only in the final response: atomically persist the exact pending question, choices, ticket context, and status=blocked in $RUNTIME_ROOT/$PROJECT/unblock-state.json as required by skills/unblock/SKILL.md, then stop. The dashboard reads that file and cannot read this log."
@@ -215,7 +418,6 @@ if "$LOCKED_RUN"; then
   LOCK_ROOT="${PITCREW_LOCK_ROOT:-$RUNTIME_ROOT/$PROJECT/locks}"
   SUMMARY_DIR="$RUNTIME_ROOT/$PROJECT/logs"
   LIVE_DIR="$RUNTIME_ROOT/$PROJECT/live"
-  HISTORY_FILE="$RUNTIME_ROOT/$PROJECT/history.jsonl"
   if [[ -n "$COORDINATED_RUN" ]]; then
     LOCK_FILE="$LOCK_ROOT/runs/$COORDINATED_RUN.lock"
     SUMMARY_FILE="$SUMMARY_DIR/runs/$COORDINATED_RUN.last.txt"
