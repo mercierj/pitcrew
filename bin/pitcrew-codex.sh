@@ -135,6 +135,7 @@ fi
 CODEX_HOME_DIR="${CODEX_HOME:-${HOME:?HOME or CODEX_HOME is required}/.codex}"
 RUNTIME_ROOT="$CODEX_HOME_DIR/pitcrew"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PITCREW_REPO="$REPO_ROOT"
 if [[ -n "$PROJECT" ]]; then
   PROJECT="$(PITCREW_PROJECT="$PROJECT" python3 "$REPO_ROOT/scripts/pitcrew_config.py" project)"
 else

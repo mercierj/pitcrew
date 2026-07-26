@@ -9,11 +9,14 @@ class ReferenceContractTest(unittest.TestCase):
     def test_manager_admits_each_new_agent_ticket_to_the_local_dispatcher(self):
         manager = (ROOT / "skills/manager-run/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("ADMIT_NEW_AGENT_TICKET", manager)
-        self.assertIn("python3 $REPO_ROOT/scripts/pitcrew_run_dispatcher.py enqueue", manager)
+        self.assertIn('python3 "$PITCREW_REPO/scripts/pitcrew_run_dispatcher.py" enqueue', manager)
         self.assertIn("--skill implementer-run", manager)
         self.assertIn('--target "<canonical ticket URL>"', manager)
-        self.assertIn("only for a newly created agent-route ticket", manager)
+        self.assertIn("created or deduplicated matching", manager)
+        self.assertIn("agent-route ticket", manager)
         self.assertIn("Never admit an investigate-route ticket", manager)
+        runner = (ROOT / "bin/pitcrew-codex.sh").read_text(encoding="utf-8")
+        self.assertIn('export PITCREW_REPO="$REPO_ROOT"', runner)
 
     def test_manager_architecture_proposal_contract(self):
         self.assert_markers(
