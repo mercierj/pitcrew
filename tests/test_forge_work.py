@@ -2,7 +2,9 @@ import unittest
 
 from scripts.pitcrew_forge_work import (
     ForgeWorkError,
+    GitHubForgeWork,
     GitLabForgeWork,
+    canonical_issue_target,
     normalize_change,
     normalize_issue,
 )
@@ -169,3 +171,77 @@ class GitLabForgeWorkTest(unittest.TestCase):
         work = GitLabForgeWork(gitlab_config(), GitLabRunner(malformed=True)).collect()
         self.assertTrue(work["degraded"])
         self.assertEqual([], work["groups"]["todo"])
+
+
+class GitHubRunner:
+    def __init__(self, malformed=False):
+        self.calls = []
+        self.malformed = malformed
+
+    def __call__(self, args, **kwargs):
+        import json
+        import subprocess
+
+        self.calls.append(list(args))
+        endpoint = args[-1]
+        if self.malformed:
+            payload = {"not": "a list"}
+        elif "/pulls?" in endpoint:
+            payload = [{
+                "number": 7, "title": "Fix stale payment", "html_url": "https://github.com/acme/payments/pull/7",
+                "state": "open", "head": {"ref": "fix/one", "sha": "a" * 40},
+                "base": {"ref": "main"}, "user": {"login": "octocat"}, "body": "Closes #1",
+            }]
+        elif "check-runs" in endpoint:
+            payload = {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+        else:
+            payload = [
+                {"number": index, "title": state, "body": "", "state": "open", "html_url": f"https://github.com/acme/payments/issues/{index}",
+                 "labels": [{"name": "pitcrew-agent"}, {"name": f"pitcrew-state::{state}"}]}
+                for index, state in enumerate(("todo", "processing", "review", "blocked", "done"), 1)
+            ] + [{"number": 99, "pull_request": {}, "labels": []}]
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+
+class GitHubForgeWorkTest(unittest.TestCase):
+    def setUp(self):
+        self.config = {
+            "providers": {"forge": "github", "tracker": "github"},
+            "github": {
+                "host": "github.com", "user": "octocat", "owner": "acme", "repository": "acme/payments",
+                "tracker": {"labels": {"agent": "pitcrew-agent"}},
+            },
+        }
+
+    def test_collects_normalized_paginated_github_work(self):
+        runner = GitHubRunner()
+        work = GitHubForgeWork(self.config, runner).collect()
+        self.assertEqual("github", work["provider"])
+        self.assertEqual(set(GitLabForgeWork(gitlab_config(), GitLabRunner()).collect()), set(work))
+        self.assertEqual({"todo", "processing", "review", "blocked", "done"}, set(work["groups"]))
+        self.assertEqual(1, work["groups"]["todo"][0]["number"])
+        self.assertEqual("pull_request", work["changes"][0]["kind"])
+        self.assertEqual("passing", work["changes"][0]["checks_status"])
+        self.assertEqual(5, sum(len(group) for group in work["groups"].values()))
+        for args in runner.calls:
+            self.assertIn("--hostname", args)
+            self.assertIn("github.com", args)
+
+    def test_degrades_on_malformed_github_response(self):
+        self.assertTrue(GitHubForgeWork(self.config, GitHubRunner(malformed=True)).collect()["degraded"])
+
+    def test_canonical_issue_target_validates_provider_binding(self):
+        self.assertEqual(
+            "https://github.com/acme/payments/issues/12",
+            canonical_issue_target(self.config, "https://github.com/acme/payments/issues/12"),
+        )
+        for value in (
+            "http://github.com/acme/payments/issues/12",
+            "https://github.com/other/payments/issues/12",
+            "https://github.com/acme/payments/pull/12",
+            "https://github.com/acme/payments/issues/0",
+            "https://github.com/acme/payments/issues/12?x=1",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ForgeWorkError):
+                    canonical_issue_target(self.config, value)

@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 import json
 import re
 import subprocess
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 
 LIFECYCLES = ("todo", "processing", "review", "blocked", "done")
@@ -173,6 +173,186 @@ class GitLabForgeWork:
             }
         except ForgeWorkError as error:
             return self._empty(str(error))
+
+
+class GitHubForgeWork:
+    """Read and normalize GitHub issues and pull requests without mutations."""
+
+    def __init__(self, config: Mapping[str, object], command_runner: Callable):
+        self.config = config
+        self.command_runner = command_runner
+        github = config.get("github")
+        if not isinstance(github, Mapping):
+            raise ForgeWorkError("github configuration is required")
+        self.host = _string_field(github.get("host"), "github.host")
+        self.user = _string_field(github.get("user"), "github.user")
+        self.owner = _string_field(github.get("owner"), "github.owner")
+        self.repository = _string_field(github.get("repository"), "github.repository")
+        tracker = github.get("tracker")
+        labels = tracker.get("labels") if isinstance(tracker, Mapping) else None
+        self.agent_label = _string_field(
+            labels.get("agent") if isinstance(labels, Mapping) else None,
+            "github.tracker.labels.agent",
+        )
+
+    def _empty(self, error: str) -> dict:
+        return {
+            "provider": "github",
+            "degraded": True,
+            "error": error,
+            "groups": {state: [] for state in LIFECYCLES},
+            "changes": [],
+        }
+
+    def _list(self, endpoint: str) -> list[Mapping[str, object]]:
+        args = ["gh", "api", "--hostname", self.host, "--paginate", endpoint]
+        try:
+            result = self.command_runner(args, text=True, capture_output=True, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ForgeWorkError("GitHub command is unavailable") from error
+        if result.returncode:
+            raise ForgeWorkError("GitHub request failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ForgeWorkError("GitHub returned invalid JSON") from error
+        if not isinstance(payload, list) or not all(isinstance(item, Mapping) for item in payload):
+            raise ForgeWorkError("GitHub returned invalid JSON")
+        return payload
+
+    def _checks(self, head_sha: str) -> str:
+        endpoint = f"repos/{self.repository}/commits/{head_sha}/check-runs"
+        args = ["gh", "api", "--hostname", self.host, endpoint]
+        try:
+            result = self.command_runner(args, text=True, capture_output=True, check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ForgeWorkError("GitHub command is unavailable") from error
+        if result.returncode:
+            raise ForgeWorkError("GitHub checks request failed")
+        try:
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise ForgeWorkError("GitHub returned invalid JSON") from error
+        runs = payload.get("check_runs") if isinstance(payload, Mapping) else None
+        if not isinstance(runs, list) or not all(isinstance(run, Mapping) for run in runs):
+            raise ForgeWorkError("GitHub returned invalid JSON")
+        if not runs:
+            return "absent"
+        statuses = [run.get("status") for run in runs]
+        conclusions = [run.get("conclusion") for run in runs]
+        if any(status != "completed" for status in statuses):
+            return "pending"
+        if any(conclusion not in {"success", "neutral", "skipped"} for conclusion in conclusions):
+            return "failing"
+        return "passing"
+
+    @staticmethod
+    def _labels(raw: object) -> list[str]:
+        if not isinstance(raw, list):
+            raise ForgeWorkError("GitHub issue labels are invalid")
+        labels = []
+        for label in raw:
+            if not isinstance(label, Mapping) or not isinstance(label.get("name"), str):
+                raise ForgeWorkError("GitHub issue labels are invalid")
+            labels.append(label["name"])
+        return labels
+
+    def _change(self, raw: Mapping[str, object]) -> dict:
+        head = raw.get("head")
+        base = raw.get("base")
+        user = raw.get("user")
+        if not isinstance(head, Mapping) or not isinstance(base, Mapping):
+            raise ForgeWorkError("GitHub pull request is invalid")
+        head_sha = _string_field(head.get("sha"), "pull_request.head.sha")
+        return normalize_change(
+            provider="github",
+            kind="pull_request",
+            number=_number(raw.get("number")),
+            title=str(raw.get("title", "")),
+            canonical_url=_https_url(raw.get("html_url"), "canonical_url"),
+            state=str(raw.get("state", "")),
+            source_branch=str(head.get("ref", "")),
+            target_branch=str(base.get("ref", "")),
+            author=str(user.get("login", "")) if isinstance(user, Mapping) else "",
+            checks_status=self._checks(head_sha),
+            head_sha=head_sha,
+        )
+
+    def _related_urls(self, issue: Mapping[str, object], changes: Sequence[dict]) -> list[str]:
+        number = issue.get("number")
+        text = " ".join(str(issue.get(key, "")) for key in ("body", "html_url"))
+        related = set()
+        for change in changes:
+            if f"#{change['number']}" in text or (isinstance(number, int) and f"#{number}" in str(change)):
+                related.add(change["canonical_url"])
+        return sorted(related)
+
+    def collect(self) -> dict:
+        try:
+            issues_endpoint = (
+                f"repos/{self.repository}/issues?state=all&labels="
+                f"{quote(self.agent_label, safe='')}&per_page=100"
+            )
+            raw_issues = self._list(issues_endpoint)
+            raw_changes = self._list(f"repos/{self.repository}/pulls?state=all&per_page=100")
+            changes = [self._change(change) for change in raw_changes]
+            groups = {state: [] for state in LIFECYCLES}
+            for raw in raw_issues:
+                if "pull_request" in raw:
+                    continue
+                labels = self._labels(raw.get("labels"))
+                lifecycle = _label_value(labels, "pitcrew-state::")
+                if lifecycle not in groups:
+                    continue
+                groups[lifecycle].append(normalize_issue(
+                    provider="github",
+                    number=_number(raw.get("number")),
+                    title=str(raw.get("title", "")),
+                    body=str(raw.get("body", "")),
+                    labels=labels,
+                    state=str(raw.get("state", "")),
+                    canonical_url=_https_url(raw.get("html_url"), "canonical_url"),
+                    lifecycle=lifecycle,
+                    route=_label_value(labels, "pitcrew-route::"),
+                    source=_label_value(labels, "pitcrew-source::"),
+                    related_change_urls=self._related_urls(raw, changes),
+                    bugfix=None,
+                ))
+            return {"provider": "github", "degraded": False, "error": None, "groups": groups, "changes": changes}
+        except ForgeWorkError as error:
+            return self._empty(str(error))
+
+
+def canonical_issue_target(config: Mapping[str, object], target: object) -> str:
+    value = _https_url(target, "target")
+    parsed = urlsplit(value)
+    providers = config.get("providers")
+    if not isinstance(providers, Mapping):
+        raise ForgeWorkError("tracker does not expose native issues")
+    provider = providers.get("tracker")
+    if parsed.query or parsed.fragment:
+        raise ForgeWorkError("ticket target must not contain query or fragment")
+    if provider == "github":
+        binding = config.get("github")
+        path_key = "repository"
+        prefix_suffix = "/issues/"
+    elif provider == "gitlab":
+        binding = config.get("gitlab")
+        path_key = "project_path"
+        prefix_suffix = "/-/issues/"
+    else:
+        raise ForgeWorkError("tracker does not expose native issues")
+    if not isinstance(binding, Mapping):
+        raise ForgeWorkError("ticket target does not match configured binding")
+    host = _string_field(binding.get("host"), "provider.host")
+    project = _string_field(binding.get(path_key), "provider.project")
+    expected = f"/{project}{prefix_suffix}"
+    if parsed.netloc != host or not parsed.path.startswith(expected):
+        raise ForgeWorkError("ticket target does not match configured binding")
+    number = parsed.path.removeprefix(expected)
+    if not number.isdigit() or int(number) <= 0:
+        raise ForgeWorkError("ticket target number is invalid")
+    return value
 
 
 def _string_field(value: object, field: str) -> str:
