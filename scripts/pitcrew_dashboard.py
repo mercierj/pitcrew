@@ -742,6 +742,7 @@ class DashboardService:
                 "basis": "API standard token pricing estimate",
             },
             "usage_7d": _present_usage(aggregate_usage(records)),
+            "usage_total": _present_usage(self.history_store.usage_total(now=self._now().isoformat())),
         }
 
     def _schedule_entries(self, force_refresh: bool = False) -> list[dict]:

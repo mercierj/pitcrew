@@ -28,6 +28,7 @@ from scripts.pitcrew_dashboard import DashboardError, DashboardService
 ASSET_ROOT = ROOT / "dashboard"
 MAX_BODY_BYTES = 8192
 READ_TIMEOUT_SECONDS = 5.0
+MAX_CONCURRENT_REQUESTS = 32
 ASSET_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/agents.mjs": ("agents.mjs", "text/javascript; charset=utf-8"),
@@ -47,6 +48,35 @@ ASSET_ROUTES = {
 class DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
+    max_concurrent_requests = MAX_CONCURRENT_REQUESTS
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._request_slots = threading.BoundedSemaphore(
+            self.max_concurrent_requests
+        )
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            thread = threading.Thread(
+                target=self._process_request_with_slot,
+                args=(request, client_address),
+            )
+            thread.daemon = self.daemon_threads
+            thread.start()
+        except Exception:
+            self._request_slots.release()
+            self.shutdown_request(request)
+            raise
+
+    def _process_request_with_slot(self, request, client_address) -> None:
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def create_server(

@@ -487,6 +487,10 @@ class DashboardServiceTest(unittest.TestCase):
         self.assertEqual(1, snapshot["usage_7d"]["unmeasured_runs"])
         self.assertEqual("125", snapshot["usage_7d"]["tokens"]["input_tokens"])
         self.assertEqual("0.000544", snapshot["usage_7d"]["estimated_cost_usd"])
+        self.assertEqual(4, snapshot["usage_total"]["measured_runs"])
+        self.assertEqual(1, snapshot["usage_total"]["unmeasured_runs"])
+        self.assertEqual("125", snapshot["usage_total"]["tokens"]["input_tokens"])
+        self.assertEqual("0.000544", snapshot["usage_total"]["estimated_cost_usd"])
         self.assertEqual(
             [
                 "python3",
@@ -2798,6 +2802,65 @@ class DashboardHttpTest(unittest.TestCase):
         self.assertLess(elapsed, 1)
         self.server = None
 
+    def test_saturated_server_rejects_connections_and_recovers_capacity(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        with mock.patch.object(
+            SERVER.DashboardHTTPServer,
+            "max_concurrent_requests",
+            1,
+            create=True,
+        ):
+            self.server = SERVER.create_server(
+                "127.0.0.1", 0, self.service, self.token
+            )
+        self.port = self.server.server_address[1]
+        self.host = f"127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+
+        first = socket.create_connection(("127.0.0.1", self.port), timeout=1)
+        first.settimeout(1)
+        first.sendall(b"GET")
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            slots = getattr(self.server, "_request_slots", None)
+            if slots is not None and not slots.acquire(blocking=False):
+                break
+            if slots is not None:
+                slots.release()
+            time.sleep(0.01)
+        else:
+            self.fail("partial request did not occupy the only request slot")
+
+        with socket.create_connection(("127.0.0.1", self.port), timeout=1) as second:
+            second.settimeout(1)
+            second.sendall(
+                f"GET /api/status HTTP/1.1\r\nHost: {self.host}\r\n\r\n".encode()
+            )
+            try:
+                rejected = second.recv(4096)
+            except ConnectionResetError:
+                rejected = b""
+            self.assertEqual(b"", rejected)
+        self.assertEqual([], self.service.calls)
+
+        first.close()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            slots = getattr(self.server, "_request_slots", None)
+            if slots is not None and slots.acquire(blocking=False):
+                slots.release()
+                break
+            time.sleep(0.01)
+        else:
+            self.fail("request slot was not released after connection close")
+
+        status, _, _ = self.request("GET", "/api/status")
+        self.assertEqual(200, status)
+        self.assertEqual([("snapshot",)], self.service.calls)
+
     def test_incomplete_headers_time_out_without_blocking_shutdown(self):
         request = (
             "GET /api/status HTTP/1.1\r\n"
@@ -3437,7 +3500,7 @@ class DashboardAssetContractTest(unittest.TestCase):
 
     def test_model_controls_and_usage_metrics_are_rendered_from_safe_dom_apis(self):
         formatters = self.modules["format.mjs"]
-        for identifier in ("metric-tokens-7d", "metric-cost-7d"):
+        for identifier in ("metric-tokens-7d", "metric-cost-7d", "metric-cost-total"):
             self.assertIn(f'id="{identifier}"', self.html)
         self.assertIn('document.createElement("select")', self.javascript)
         self.assertIn("select.dataset.skill = skill;", self.javascript)
@@ -3446,6 +3509,8 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("Sous-total mesuré", self.javascript)
         self.assertIn("formatTokens", self.javascript)
         self.assertIn("formatUsd", self.javascript)
+        self.assertIn("usage_total", self.javascript)
+        self.assertIn("passage(s) mesuré(s) depuis le début de l’historique", self.javascript)
         self.assertIn('typeof value === "string" && /^\\d+$/.test(value)', formatters)
         self.assertIn("BigInt(value)", formatters)
         self.assertNotIn("Number(value)", formatters)

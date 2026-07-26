@@ -106,6 +106,78 @@ class HistoryStoreTest(unittest.TestCase):
             self.assertEqual("", path.read_text(encoding="utf-8"))
             self.assertEqual(0o600, path.stat().st_mode & 0o777)
 
+    def test_usage_total_survives_detail_history_retention(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl", retention_days=7)
+            store.append(
+                _record(
+                    "research-run",
+                    "2026-07-24T12:00:00Z",
+                    model="gpt-5.6-luna",
+                    usage={
+                        "input_tokens": 10,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 10,
+                    },
+                ),
+                now="2026-07-24T12:00:00Z",
+            )
+
+            self.assertEqual(1, store.usage_total(now="2026-07-24T12:00:00Z")["measured_runs"])
+            self.assertEqual([], store.read(now="2026-08-01T12:00:01Z"))
+            total = store.usage_total(now="2026-08-01T12:00:01Z")
+
+            self.assertEqual(1, total["measured_runs"])
+            self.assertEqual(10, total["tokens"]["input_tokens"])
+
+    def test_usage_total_recovers_from_non_finite_sidecar_cost(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl")
+            store.usage_total_path.write_text(
+                json.dumps({
+                    "measured_runs": 0,
+                    "unmeasured_runs": 0,
+                    "tokens": {
+                        "input_tokens": 0,
+                        "cached_input_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                    },
+                    "estimated_cost_usd": "Infinity",
+                }),
+                encoding="utf-8",
+            )
+
+            total = store.usage_total(now="2026-07-24T12:00:00Z")
+
+            self.assertEqual("0.000000", total["estimated_cost_usd"])
+
+    def test_failed_history_write_rolls_back_usage_total(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = HistoryStore(Path(temp) / "history.jsonl")
+            record = _record(
+                "research-run",
+                "2026-07-24T12:00:00Z",
+                model="gpt-5.6-luna",
+                usage={
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 10,
+                },
+            )
+            with mock.patch.object(store, "_replace", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    store.append(record, now="2026-07-24T12:00:00Z")
+
+            store.append(record, now="2026-07-24T12:00:00Z")
+
+            self.assertEqual(1, store.usage_total(now="2026-07-24T12:00:00Z")["measured_runs"])
+
     def test_read_rewrites_only_when_a_valid_record_expires(self):
         with tempfile.TemporaryDirectory() as temp:
             store = HistoryStore(Path(temp) / "history.jsonl", retention_days=7)

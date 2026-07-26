@@ -92,6 +92,7 @@ const elements = {
     failed: document.querySelector("#metric-failed"),
     tokens7d: document.querySelector("#metric-tokens-7d"),
     cost7d: document.querySelector("#metric-cost-7d"),
+    costTotal: document.querySelector("#metric-cost-total"),
   },
 };
 
@@ -478,6 +479,7 @@ function renderOverview(snapshot) {
   };
   Object.entries(values).forEach(([key, value]) => setText(elements.metrics[key], value));
   const usage = snapshot?.usage_7d;
+  const totalUsage = snapshot?.usage_total;
   if (usageMeasured(usage) === 0) {
     setText(elements.metrics.tokens7d, "—");
     setText(elements.metrics.cost7d, "—");
@@ -485,7 +487,14 @@ function renderOverview(snapshot) {
     setText(elements.metrics.tokens7d, formatTokens(usage?.tokens?.total_tokens));
     setText(elements.metrics.cost7d, formatUsd(usage?.estimated_cost_usd));
   }
-  setText(elements.overviewUsageNote, usageNote(usage));
+  setText(
+    elements.metrics.costTotal,
+    usageMeasured(totalUsage) === 0 ? "—" : formatUsd(totalUsage?.estimated_cost_usd),
+  );
+  const totalNote = usageMeasured(totalUsage) > 0
+    ? `${usageMeasured(totalUsage)} passage(s) mesuré(s) depuis le début de l’historique`
+    : "";
+  setText(elements.overviewUsageNote, [totalNote, usageNote(totalUsage)].filter(Boolean).join(" · "));
 
   elements.globalBanner.className = "banner";
   const globalStopped = snapshot?.global_state === "stopped";
