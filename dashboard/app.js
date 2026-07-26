@@ -1,6 +1,8 @@
 import {createNavigation} from "./navigation.mjs";
 import {createDetailPanel} from "./detail-panel.mjs";
 import {renderActionList, renderItemDetail, renderPilotage} from "./pilotage.mjs";
+import {createApi} from "./api.mjs";
+import {createSourceStore} from "./source-store.mjs";
 import {renderAgents as renderAgentRows} from "./agents.mjs";
 import {dateFormatter, formatCost, formatDate, formatTokens} from "./format.mjs";
 import {
@@ -21,6 +23,7 @@ const navigation = createNavigation(document.querySelector("#app-navigation"), {
 });
 
 const sessionToken = document.querySelector('meta[name="pitcrew-session"]')?.content ?? "";
+const api = createApi(sessionToken);
 
 const elements = {
   refreshButton: document.querySelector("#refresh-button"),
@@ -29,6 +32,9 @@ const elements = {
   globalResumeButton: document.querySelector("#global-resume-button"),
   globalState: document.querySelector("#global-state"),
   operationalStatus: document.querySelector("#operational-status"),
+  pilotageSourceState: document.querySelector("#pilotage-source-state"),
+  agentsSourceState: document.querySelector("#agents-source-state"),
+  historySourceState: document.querySelector("#history-source-state"),
   decisionBanner: document.querySelector("#decision-banner"),
   decisionContent: document.querySelector("#decision-content"),
   proposalState: document.querySelector("#proposal-state"),
@@ -65,6 +71,7 @@ const elements = {
   detailTitle: document.querySelector("#detail-title"),
   detailContent: document.querySelector("#detail-content"),
   detailClose: document.querySelector("#detail-close"),
+  detailActionStatus: document.querySelector("#detail-action-status"),
   metrics: {
     active: document.querySelector("#metric-active"),
     stopped: document.querySelector("#metric-stopped"),
@@ -77,6 +84,7 @@ const elements = {
 };
 
 const sources = {snapshot: {}, history: [], decisions: {}, proposals: {}, preprod: {}, work: {}};
+const sourceStore = createSourceStore();
 const coordinateHistoryRequest = createLatestRequestCoordinator();
 const detailController = createDetailPanel(
   elements.detailPanel,
@@ -107,32 +115,55 @@ let refreshPromise = null;
 let lastGitLabRefresh = 0;
 const pendingSkills = new Set();
 const pendingTicketActions = new Set();
-const ticketActionStates = new Map();
+const actionStates = new Map();
 let decisionSubmitting = false;
 let proposalSubmitting = false;
 let mergeSubmitting = false;
 let preprodReviewSubmitting = false;
 
-async function fetchJson(path, options = {}) {
-  const response = await fetch(path, {
-    cache: "no-store",
-    credentials: "same-origin",
-    ...options,
-  });
-  if (!response.ok) {
-    throw new Error(`Requête refusée (${response.status})`);
-  }
-  const payload = await response.json();
-  if (path.startsWith("/api/gitlab")) {
-    sources.work = payload;
-  }
-  return payload;
-}
+const fetchJson = (path, options = {}) => api.get(path, options);
 
 function setText(element, value) {
   if (element) {
     element.textContent = value == null ? "" : String(value);
   }
+}
+
+function setActionState(key, kind, message) {
+  actionStates.set(key, {kind, message, text: message});
+  if (elements.detailActionStatus) {
+    elements.detailActionStatus.className = `action-state action-state-${kind}`;
+    elements.detailActionStatus.textContent = message;
+  }
+}
+
+async function runAction(key, messages, operation) {
+  setActionState(key, "pending", messages.pending);
+  try {
+    const result = await operation();
+    setActionState(key, "success", messages.success);
+    return result;
+  } catch (error) {
+    setActionState(key, "error", messages.error);
+    throw error;
+  }
+}
+
+function issueActionKey(issue) {
+  const identity = issue?.canonical_url
+    || issue?.web_url
+    || issue?.agent_action?.target
+    || "unknown";
+  return `issue:${identity}`;
+}
+
+function appendActionState(root, key) {
+  const state = actionStates.get(key);
+  if (!root || !state) return;
+  const status = document.createElement("p");
+  status.className = `action-state action-state-${state.kind}`;
+  status.textContent = state.message;
+  root.append(status);
 }
 
 function preprodText(value, fallback = "Donnée indisponible") {
@@ -274,11 +305,7 @@ async function runPreprodReviewAction(action) {
   preprodReviewSubmitting = true;
   renderPreprodReview(sources.preprod);
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: {"Content-Type": "application/json", "X-Pitcrew-Session": sessionToken},
-      body: JSON.stringify({ action }),
-    });
+    await api.action({action});
     setText(elements.operationalStatus, trigger ? "Revue avant Preprod lancée." : "Revue avant Preprod arrêtée.");
   } catch {
     setText(elements.operationalStatus, "Impossible de contrôler la revue avant Preprod.");
@@ -385,6 +412,8 @@ function createModelControl(agent, modelCatalog, globalStopped) {
     : "hérité";
   reasoning.textContent = `Raisonnement : ${configuredEffort}`;
   wrapper.append(label, select, reasoning, latest);
+  appendActionState(wrapper, `model:${skill}`);
+  appendActionState(wrapper, `agent:${skill}`);
   return wrapper;
 }
 
@@ -603,6 +632,7 @@ function renderDecision(payload) {
     choices.append(button);
   });
   elements.decisionContent.append(choices);
+  appendActionState(elements.decisionContent, `decision:${pending.ticket_id}`);
 }
 
 function renderProposals(payload) {
@@ -655,6 +685,7 @@ function renderProposals(payload) {
       actions.append(button);
     });
     card.append(actions);
+    appendActionState(card, `proposal:${proposal.id}`);
     elements.proposalList.append(card);
   });
 }
@@ -665,11 +696,20 @@ async function decideProposal(proposal, decision) {
   if (decision === "reject" && (!reason || !reason.trim())) return;
   proposalSubmitting = true;
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
-      body: JSON.stringify({ action: "decide-proposal", proposal_id: proposal.id, decision, reason: reason || "" }),
-    });
+    await runAction(
+      `proposal:${proposal.id}`,
+      {
+        pending: `Décision en cours pour ${proposal.title || "la proposition"}…`,
+        success: `Décision enregistrée pour ${proposal.title || "la proposition"}.`,
+        error: "Impossible d’enregistrer la décision sur la proposition.",
+      },
+      () => api.action({
+        action: "decide-proposal",
+        proposal_id: proposal.id,
+        decision,
+        reason: reason || "",
+      }),
+    );
     await refresh({ manual: true });
   } catch {
     setText(elements.operationalStatus, "Impossible d’enregistrer la décision sur la proposition.");
@@ -684,11 +724,20 @@ async function submitDecision(pending, answer) {
   renderDecision({ pending });
   setText(elements.operationalStatus, "Transmission de votre décision…");
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
-      body: JSON.stringify({ action: "answer-decision", ticket_id: pending.ticket_id, answer, notes: "" }),
-    });
+    await runAction(
+      `decision:${pending.ticket_id}`,
+      {
+        pending: "Transmission de votre décision…",
+        success: "Décision enregistrée ; unblock est lancé.",
+        error: "Impossible d’enregistrer la décision.",
+      },
+      () => api.action({
+        action: "answer-decision",
+        ticket_id: pending.ticket_id,
+        answer,
+        notes: "",
+      }),
+    );
     setText(elements.operationalStatus, "Décision enregistrée ; unblock est lancé.");
     await refresh({ manual: true });
   } catch {
@@ -699,6 +748,7 @@ async function submitDecision(pending, answer) {
 }
 
 function renderGitLab(work) {
+  if (!work) return;
   elements.gitlabGroups.replaceChildren();
   renderMergeRequests(work);
   if (work?.degraded) {
@@ -756,7 +806,7 @@ function renderGitLab(work) {
           unavailable.textContent = agentAction.unavailable_reason || "Agent indisponible";
           actions.append(unavailable);
         }
-        renderTicketActionState(button, actions, target, agentAction);
+        renderTicketActionState(button, actions, issue);
         card.append(actions);
       }
       column.append(card);
@@ -765,14 +815,16 @@ function renderGitLab(work) {
   });
 }
 
-function renderTicketActionState(button, actions, target, agentAction) {
-  const state = ticketActionStates.get(target);
+function renderTicketActionState(button, actions, issue) {
+  const agentAction = issue?.agent_action;
+  const target = typeof agentAction?.target === "string" ? agentAction.target : "";
   const pending = pendingTicketActions.has(target);
+  const actionState = actionStates.get(issueActionKey(issue));
   button.disabled = !agentAction.available || pending || !target;
   button.textContent = pending ? "Lancement…" : agentAction.label || "Lancer l’agent";
   button.setAttribute("aria-busy", pending ? "true" : "false");
   let status = actions.querySelector(".ticket-agent-status");
-  if (!state) {
+  if (!pending && !actionState) {
     status?.remove();
     return;
   }
@@ -781,8 +833,15 @@ function renderTicketActionState(button, actions, target, agentAction) {
     status.className = "ticket-agent-status";
     actions.append(status);
   }
-  status.className = `ticket-agent-status ticket-agent-status-${state.kind}`;
-  status.textContent = state.text;
+  if (pending) {
+    status.className = "ticket-agent-status ticket-agent-status-pending";
+    status.textContent = "Lancement…";
+  } else if (actionState) {
+    status.className = `ticket-agent-status ticket-agent-status-${actionState.kind}`;
+    status.textContent = actionState.message;
+  } else {
+    status.remove();
+  }
 }
 
 async function launchTicketAgent(issue, button, actions) {
@@ -793,37 +852,33 @@ async function launchTicketAgent(issue, button, actions) {
     return;
   }
   pendingTicketActions.add(target);
-  ticketActionStates.set(target, { kind: "pending", text: "Lancement…" });
-  renderTicketActionState(button, actions, target, agentAction);
   setText(elements.operationalStatus, `Lancement de ${skill} pour le ticket en cours.`);
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
-      body: JSON.stringify({ action: "launch-ticket-agent", skill, target }),
-    });
-    ticketActionStates.set(target, {
-      kind: "success",
-      text: "Lancement accepté — l’agent travaille sur ce ticket.",
-    });
+    const operation = runAction(
+      issueActionKey(issue),
+      {
+        pending: "Lancement…",
+        success: "Lancement accepté — l’agent travaille sur ce ticket.",
+        error: "Échec du lancement — réessayez.",
+      },
+      () => api.action({action: "launch-ticket-agent", skill, target}),
+    );
+    renderTicketActionState(button, actions, issue);
+    await operation;
     pendingTicketActions.delete(target);
     setText(elements.operationalStatus, `${skill} lancé pour le ticket sélectionné.`);
     try {
-      await refresh({ manual: true });
+      await refresh({manual: true});
     } catch {
       setText(elements.operationalStatus, `${skill} lancé ; actualisation du tableau de bord impossible.`);
     }
     return true;
   } catch {
-    ticketActionStates.set(target, {
-      kind: "error",
-      text: "Échec du lancement — réessayez.",
-    });
     setText(elements.operationalStatus, `Impossible de lancer ${skill} pour ce ticket.`);
     return false;
   } finally {
     pendingTicketActions.delete(target);
-    renderTicketActionState(button, actions, target, agentAction);
+    renderTicketActionState(button, actions, issue);
   }
 }
 
@@ -870,6 +925,7 @@ function renderMergeRequests(work) {
     button.disabled = mergeSubmitting;
     button.addEventListener("click", () => mergeMergeRequest(mergeRequest, work));
     actions.append(button);
+    appendActionState(actions, `merge_request:${mergeRequest.canonical_url || mergeRequest.web_url || mergeRequest.iid}`);
     card.append(actions);
     elements.mergeRequestList.append(card);
   });
@@ -883,11 +939,15 @@ async function mergeMergeRequest(mergeRequest, work) {
   renderMergeRequests(work);
   setText(elements.operationalStatus, `Fusion de la MR !${mergeRequest.iid} en cours.`);
   try {
-    const result = await fetchJson("/api/actions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Pitcrew-Session": sessionToken },
-      body: JSON.stringify({ action: "merge-merge-request", iid: mergeRequest.iid }),
-    });
+    const result = await runAction(
+      `merge_request:${mergeRequest.canonical_url || mergeRequest.web_url || mergeRequest.iid}`,
+      {
+        pending: `Fusion de !${mergeRequest.iid}…`,
+        success: `MR !${mergeRequest.iid} fusionnée.`,
+        error: `Impossible de fusionner la MR !${mergeRequest.iid}.`,
+      },
+      () => api.action({action: "merge-merge-request", iid: mergeRequest.iid}),
+    );
     setText(
       elements.operationalStatus,
       result?.partial
@@ -952,6 +1012,7 @@ function actionForEntry(entry) {
       .map((answer) => ({
         label: answer,
         disabled: decisionSubmitting,
+        state: actionStates.get(`decision:${resource.ticket_id}`),
         run: () => submitDecision(resource, answer),
       }));
   }
@@ -964,6 +1025,7 @@ function actionForEntry(entry) {
       label,
       className,
       disabled: proposalSubmitting,
+      state: actionStates.get(`proposal:${resource.id}`),
       run: () => decideProposal(resource, decision),
     }));
   }
@@ -972,12 +1034,14 @@ function actionForEntry(entry) {
       label: "Fusionner et supprimer la branche",
       className: "button button-danger",
       disabled: mergeSubmitting,
+      state: actionStates.get(`merge_request:${resource.canonical_url || resource.web_url || resource.iid}`),
       run: () => mergeMergeRequest(resource, sources.work),
     }];
   }
   if (entry?.kind === "agent-failure") {
     return [{
       label: "Voir les agents",
+      state: actionStates.get(`agent:${resource.skill}`),
       run: () => {
         detailController.close();
         navigation.show("agents", {historyMode: "push"});
@@ -996,6 +1060,7 @@ function actionForEntry(entry) {
       disabled: pendingTicketActions.has(target),
       singleUse: true,
       successLabel: "Lancement accepté",
+      state: actionStates.get(issueActionKey(resource)),
       run: (button, actions) => launchTicketAgent(resource, button, actions),
     }];
   }
@@ -1057,14 +1122,15 @@ async function control(action, skill) {
   syncSkillButtons(skill);
   setText(elements.operationalStatus, `Action ${action} en cours pour ${skill}.`);
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Pitcrew-Session": sessionToken,
+    await runAction(
+      `agent:${skill}`,
+      {
+        pending: `Action ${action} en cours pour ${skill}.`,
+        success: `Action ${action} acceptée pour ${skill}.`,
+        error: `Impossible d’exécuter l’action pour ${skill}.`,
       },
-      body: JSON.stringify({ action, skill }),
-    });
+      () => api.action({action, skill}),
+    );
     setText(elements.operationalStatus, `Action ${action} acceptée pour ${skill}.`);
     await refresh({ manual: true });
   } catch {
@@ -1087,14 +1153,7 @@ async function globalControl(action) {
   if (elements.globalResumeButton) elements.globalResumeButton.disabled = true;
   setText(elements.operationalStatus, isStop ? "Arrêt global en cours." : "Réactivation des agents en cours.");
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Pitcrew-Session": sessionToken,
-      },
-      body: JSON.stringify({ action }),
-    });
+    await api.action({action});
     setText(elements.operationalStatus, isStop ? "Exécutions bloquées." : "Agents réactivés.");
     await refresh({ manual: true });
   } catch {
@@ -1124,14 +1183,15 @@ async function changeModel(skill, model, previous, select) {
   syncSkillButtons(skill);
   setText(elements.operationalStatus, `Changement de modèle en cours pour ${skill}.`);
   try {
-    await fetchJson("/api/actions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Pitcrew-Session": sessionToken,
+    await runAction(
+      `model:${skill}`,
+      {
+        pending: `Changement de modèle en cours pour ${skill}.`,
+        success: `Changement de modèle accepté pour ${skill}.`,
+        error: `Impossible de changer le modèle pour ${skill}.`,
       },
-      body: JSON.stringify({ action: "change-model", skill, model }),
-    });
+      () => api.action({action: "change-model", skill, model}),
+    );
     setText(elements.operationalStatus, `Changement de modèle accepté pour ${skill}.`);
   } catch {
     restoreModelSelect(select, previous);
@@ -1149,10 +1209,22 @@ async function loadHistory() {
     elements.historyOutcome.value,
   );
   const result = await coordinateHistoryRequest(() => fetchJson(path));
-  if (result.applied && !result.error) {
-    sources.history = result.data;
+  if (!result.applied) {
+    return result;
   }
-  return result;
+  const state = await sourceStore.load("history", async () => {
+    if (result.error) throw result.error;
+    return result.data;
+  });
+  if (result.applied && !result.error && state.data != null) {
+    sources.history = state.data;
+  }
+  return {
+    applied: true,
+    data: state.data,
+    error: state.error ? result.error ?? new Error(state.error) : undefined,
+    state,
+  };
 }
 
 function showHistoryError() {
@@ -1169,6 +1241,7 @@ async function refreshHistory() {
   }
   if (result.error) {
     showHistoryError();
+    renderSourceStates();
     return;
   }
   renderHistory(
@@ -1178,6 +1251,7 @@ async function refreshHistory() {
   );
   renderOverview(sources.snapshot);
   setText(elements.operationalStatus, "Historique actualisé.");
+  renderSourceStates();
 }
 
 async function refreshFresh(options = {}) {
@@ -1185,6 +1259,134 @@ async function refreshFresh(options = {}) {
     await refreshPromise;
   }
   return refresh(options);
+}
+
+async function refreshLocal() {
+  const [snapshot, history] = await Promise.all([
+    sourceStore.load("snapshot", () => api.get("/api/status")),
+    loadHistory(),
+  ]);
+
+  if (snapshot.data) {
+    sources.snapshot = snapshot.data;
+    syncHistorySkills(elements.historySkill, snapshot.data?.agents);
+    document.body.dataset.globalState = snapshot.data.global_state || "running";
+    if (elements.globalStopButton) {
+      elements.globalStopButton.hidden = snapshot.data.global_state === "stopped";
+    }
+    if (elements.globalResumeButton) {
+      elements.globalResumeButton.hidden = snapshot.data.global_state !== "stopped";
+    }
+  }
+  renderOverview(sources.snapshot);
+  renderLiveAgents(sources.snapshot);
+  renderAgents(sources.snapshot);
+  if (history.applied && !history.error && history.data != null) {
+    renderHistory(
+      elements.activityList,
+      history.data,
+      sources.snapshot?.model_catalog,
+    );
+  }
+  renderSourceStates();
+}
+
+async function refreshHumanActions() {
+  const [decisions, proposals] = await Promise.all([
+    sourceStore.load("decisions", () => api.get("/api/decisions")),
+    sourceStore.load("proposals", () => api.get("/api/proposals")),
+  ]);
+  if (decisions.data) sources.decisions = decisions.data;
+  if (proposals.data) sources.proposals = proposals.data;
+  renderDecision(sources.decisions);
+  renderProposals(sources.proposals);
+  renderPilotageView();
+  renderSourceStates();
+}
+
+async function refreshPreprod() {
+  const state = await sourceStore.load(
+    "preprod",
+    () => api.get("/api/preprod-review", {
+      headers: {"X-Pitcrew-Session": sessionToken},
+    }),
+  );
+  if (state.data) {
+    sources.preprod = state.data;
+  } else if (state.error) {
+    sources.preprod = {unavailable: true};
+  }
+  renderPreprodReview(sources.preprod);
+  if (state.stale) {
+    setText(
+      elements.preprodReviewState,
+      `Revue locale · Données anciennes · dernière réussite ${formatDate(state.lastSuccess)}`,
+    );
+  }
+}
+
+async function refreshGitLab({manual = false} = {}) {
+  const now = Date.now();
+  if (!manual && now - lastGitLabRefresh < GITLAB_REFRESH_MS) {
+    return sourceStore.get("gitlab");
+  }
+  const state = await sourceStore.load(
+    "gitlab",
+    () => api.get(manual ? "/api/gitlab?refresh=1" : "/api/gitlab"),
+  );
+  if (state.data) {
+    sources.work = state.data;
+    renderGitLab(state.data);
+  }
+  if (!state.error) lastGitLabRefresh = now;
+  renderPilotageView();
+  renderSourceStates();
+  return state;
+}
+
+function sourceStatus(name, label, retry) {
+  const state = sourceStore.get(name);
+  if (!state.error) return null;
+  const status = document.createElement("div");
+  status.className = state.stale
+    ? "source-state source-state-stale"
+    : "source-state source-state-error";
+  const message = document.createElement("p");
+  message.textContent = state.stale
+    ? `${label} · Données anciennes · dernière réussite ${formatDate(state.lastSuccess)}`
+    : `${label} indisponible`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button button-quiet";
+  button.textContent = "Réessayer";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await retry();
+    } finally {
+      renderSourceStates();
+    }
+  });
+  status.append(message, button);
+  return status;
+}
+
+function renderSourceState(root, states) {
+  root?.replaceChildren(...states.filter(Boolean));
+}
+
+function renderSourceStates() {
+  renderSourceState(elements.pilotageSourceState, [
+    sourceStatus("decisions", "Décisions", refreshHumanActions),
+    sourceStatus("proposals", "Propositions", refreshHumanActions),
+    sourceStatus("gitlab", "GitLab", () => refreshGitLab({manual: true})),
+  ]);
+  renderSourceState(elements.agentsSourceState, [
+    sourceStatus("snapshot", "État local", refreshLocal),
+  ]);
+  renderSourceState(elements.historySourceState, [
+    sourceStatus("history", "Historique", refreshHistory),
+  ]);
 }
 
 async function refresh({ manual = false, skipGitLab = false } = {}) {
@@ -1196,59 +1398,33 @@ async function refresh({ manual = false, skipGitLab = false } = {}) {
     elements.refreshButton.disabled = true;
     setText(elements.refreshState, "Actualisation en cours…");
     try {
-      const [snapshot, history, decisions, proposals, preprod] = await Promise.all([
-        fetchJson("/api/status").then((payload) => {
-          sources.snapshot = payload;
-          syncHistorySkills(elements.historySkill, payload?.agents);
-          return payload;
-        }),
-        loadHistory().then((result) => {
-          if (result.applied && result.error) {
-            throw result.error;
-          }
-          return result;
-        }),
-        fetchJson("/api/decisions").then((payload) => {
-          sources.decisions = payload;
-          return payload;
-        }),
-        fetchJson("/api/proposals").then((payload) => {
-          sources.proposals = payload;
-          return payload;
-        }),
-        fetchJson("/api/preprod-review", {headers: {"X-Pitcrew-Session": sessionToken}}).then((payload) => {
-          sources.preprod = payload;
-          return payload;
-        }).catch(() => {
-          const unavailable = {unavailable: true};
-          sources.preprod = unavailable;
-          return unavailable;
-        }),
+      await Promise.all([
+        refreshLocal(),
+        refreshHumanActions(),
+        refreshPreprod(),
+        skipGitLab ? Promise.resolve() : refreshGitLab({manual}),
       ]);
-      renderOverview(snapshot);
-      renderLiveAgents(snapshot);
-      renderAgents(sources.snapshot);
-      if (history.applied && !history.error) {
-        renderHistory(elements.activityList, history.data, snapshot?.model_catalog);
-      }
-      renderDecision(decisions);
-      renderProposals(proposals);
-      renderPreprodReview(preprod);
-      renderPilotageView();
 
-      const now = Date.now();
-      if (!skipGitLab && (manual || now - lastGitLabRefresh >= GITLAB_REFRESH_MS)) {
-        lastGitLabRefresh = now;
-        try {
-          const gitlabPath = manual ? "/api/gitlab?refresh=1" : "/api/gitlab";
-          renderGitLab(await fetchJson(gitlabPath));
-        } catch {
-          renderGitLab({ degraded: true, groups: {} });
-        }
-      }
+      renderGitLab(sources.work);
       renderPilotageView();
-      setText(elements.refreshState, `Actualisé à ${dateFormatter.format(new Date())}`);
-      setText(elements.operationalStatus, "Tableau de bord actualisé.");
+      renderSourceStates();
+      const hasErrors = [
+        "snapshot",
+        "history",
+        "decisions",
+        "proposals",
+        "preprod",
+        "gitlab",
+      ].some((name) => sourceStore.get(name).error);
+      const refreshedAt = dateFormatter.format(new Date());
+      setText(
+        elements.refreshState,
+        hasErrors ? `Actualisé à ${refreshedAt} · données partielles` : `Actualisé à ${refreshedAt}`,
+      );
+      setText(
+        elements.operationalStatus,
+        hasErrors ? "Tableau de bord actualisé avec des sources indisponibles." : "Tableau de bord actualisé.",
+      );
     } catch {
       elements.globalBanner.className = "banner banner-error";
       setText(elements.globalBanner, "Le service local ne répond pas. Nouvelle tentative automatique.");
@@ -1278,5 +1454,5 @@ elements.historyFilters.addEventListener("submit", (event) => {
   void refreshHistory().catch(showHistoryError);
 });
 
-refresh({ manual: true });
+refresh({manual: true});
 window.setInterval(() => refresh(), POLL_INTERVAL_MS);

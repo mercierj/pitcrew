@@ -310,6 +310,13 @@ export function renderItemDetail(entry, handlers = {}) {
       });
       actionRoot.append(button);
     });
+    const actionState = actions.map((action) => action.state).find(Boolean);
+    if (actionState) {
+      const status = document.createElement("p");
+      status.className = `action-state action-state-${actionState.kind}`;
+      status.textContent = actionState.message || actionState.text || "";
+      actionRoot.append(status);
+    }
     body.append(actionRoot);
   }
 

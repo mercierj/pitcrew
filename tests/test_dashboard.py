@@ -2465,10 +2465,10 @@ class DashboardAssetContractTest(unittest.TestCase):
             "syncWorkflowRoles",
             "lastRoleWork",
             "sources.work !== lastRoleWork",
-            'body: JSON.stringify({ action: "answer-decision"',
-            'body: JSON.stringify({ action: "decide-proposal"',
-            'body: JSON.stringify({ action: "merge-merge-request"',
-            'body: JSON.stringify({ action: "launch-ticket-agent"',
+            'action: "answer-decision"',
+            'action: "decide-proposal"',
+            'action: "merge-merge-request"',
+            'action: "launch-ticket-agent"',
         ):
             self.assertIn(token, self.javascript)
 
@@ -2574,7 +2574,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         for identifier in ("global-actions", "global-stop-button", "global-resume-button"):
             self.assertIn(f'id="{identifier}"', self.html)
         self.assertIn("Arrêter tous les agents et bloquer les futures exécutions ?", self.javascript)
-        self.assertIn('body: JSON.stringify({ action })', self.javascript)
+        self.assertIn('api.action({action})', self.javascript)
         self.assertIn("source_branch", self.javascript)
         self.assertIn("target_branch", self.javascript)
         self.assertIn("Fusionner et supprimer la branche", self.javascript)
@@ -2586,22 +2586,18 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("ticket-agent-actions", self.javascript)
         self.assertIn('action: "launch-ticket-agent"', self.javascript)
         self.assertIn("pendingTicketActions", self.javascript)
-        self.assertIn("ticketActionStates", self.javascript)
+        self.assertIn("actionStates", self.javascript)
         self.assertIn("ticket-agent-status", self.javascript)
+        self.assertIn("window.setInterval", self.javascript)
         self.assertIn("Lancement…", self.javascript)
         self.assertIn("Lancement accepté", self.javascript)
-        self.assertIn("actualisation du tableau de bord impossible", self.javascript)
-        self.assertIn("Échec du lancement", self.javascript)
         self.assertIn("Agent indisponible", self.javascript)
         self.assertIn('await refresh({ manual: true });', self.javascript)
         self.assertIn('/api/decisions', self.javascript)
         self.assertIn('answer-decision', self.javascript)
-        self.assertLess(
-            self.javascript.index('fetchJson("/api/decisions")'),
-            self.javascript.index("renderGitLab(await fetchJson(gitlabPath));"),
-        )
+        self.assertIn('manual ? "/api/gitlab?refresh=1"', self.javascript)
+        self.assertIn("if (!state.error) lastGitLabRefresh = now;", self.javascript)
         for function_name in (
-            "fetchJson",
             "renderOverview",
             "renderLiveAgents",
             "renderAgents",
@@ -2645,8 +2641,51 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertNotIn("fetchJson(historyPath(", self.javascript)
         self.assertIn("if (!result.applied)", self.javascript)
         self.assertIn("if (result.error)", self.javascript)
-        self.assertIn("if (history.applied && !history.error)", self.javascript)
+        self.assertIn(
+            "if (history.applied && !history.error && history.data != null)",
+            self.javascript,
+        )
         self.assertIn(".catch(showHistoryError)", self.javascript)
+
+    def test_independent_sources_preserve_stale_data_and_action_feedback(self):
+        api = self.modules["api.mjs"]
+        source_store = self.modules["source-store.mjs"]
+        pilotage = self.modules["pilotage.mjs"]
+
+        self.assertIn("export function createApi", api)
+        self.assertIn("function get(path, options = {})", api)
+        self.assertIn('"X-Pitcrew-Session": sessionToken', api)
+        self.assertIn("export function createSourceStore", source_store)
+        self.assertIn("requestVersions", source_store)
+        self.assertIn("previous?.data ?? null", source_store)
+
+        for identifier in (
+            "pilotage-source-state",
+            "agents-source-state",
+            "history-source-state",
+        ):
+            self.assertRegex(
+                self.html,
+                rf'id="{identifier}"[^>]+aria-live="polite"',
+            )
+
+        for token in (
+            'from "./api.mjs"',
+            'from "./source-store.mjs"',
+            "const api = createApi(sessionToken);",
+            "const sourceStore = createSourceStore();",
+            "async function refreshLocal",
+            "async function refreshHumanActions",
+            "async function refreshGitLab",
+            "function renderSourceStates",
+            'button.textContent = "Réessayer";',
+            "const actionStates = new Map();",
+            "async function runAction",
+        ):
+            self.assertIn(token, self.javascript)
+        self.assertNotIn("fetch(", self.javascript)
+        self.assertIn("action.state", pilotage)
+        self.assertNotIn("innerHTML", pilotage)
 
     def test_javascript_serializes_controls_per_skill(self):
         agents = self.modules["agents.mjs"]
@@ -2670,7 +2709,7 @@ class DashboardAssetContractTest(unittest.TestCase):
         )[1].split("async function globalControl", 1)[0]
         self.assertLess(
             control_source.index("pendingSkills.has(skill)"),
-            control_source.index("fetchJson"),
+            control_source.index("api.action"),
         )
         self.assertRegex(
             control_source,
@@ -2769,7 +2808,10 @@ class DashboardAssetContractTest(unittest.TestCase):
         )
         self.assertIn("passage courant sera interrompu", self.javascript)
         self.assertIn("relancé immédiatement", self.javascript)
-        self.assertIn('JSON.stringify({ action: "change-model", skill, model })', self.javascript)
+        self.assertIn(
+            'api.action({action: "change-model", skill, model})',
+            self.javascript,
+        )
         self.assertIn('querySelectorAll("[data-skill]")', self.javascript)
         self.assertNotIn('"change-model"', self.javascript.split("const ACTIONS", 1)[1].split(";", 1)[0])
         self.assertIn("restoreModelSelect", self.javascript)
@@ -2810,7 +2852,11 @@ class DashboardAssetContractTest(unittest.TestCase):
         self.assertIn("Contrôle manuel", self.html)
         self.assertIn("origin/preprod...origin/develop", self.html)
         self.assertIn("Sol/xhigh", self.html)
-        self.assertIn('fetchJson("/api/preprod-review", {headers: {"X-Pitcrew-Session": sessionToken}})', self.javascript)
+        self.assertRegex(
+            self.javascript,
+            r'api\.get\("/api/preprod-review", \{\s*'
+            r'headers: \{"X-Pitcrew-Session": sessionToken\}',
+        )
         self.assertIn('headers: {"X-Pitcrew-Session": sessionToken}', self.javascript)
         self.assertIn("sources.preprod", self.javascript)
         self.assertIn('runPreprodReviewAction("trigger-preprod-review")', self.javascript)

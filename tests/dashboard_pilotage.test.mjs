@@ -195,16 +195,17 @@ test("detail transitions preserve the explicit external focus target", () => {
   delete globalThis.document;
 });
 
-test("refresh loads decisions and the authenticated local preprod review before GitLab", async () => {
+test("refresh keeps human actions, authenticated preprod, and GitLab independent", async () => {
   const appSource = await readFile(new URL("../dashboard/app.js", import.meta.url), "utf8");
   const refreshSource = appSource.split("async function refresh({")[1].split("elements.refreshButton.addEventListener")[0];
-  const initialLoad = refreshSource.split("const now = Date.now();")[0];
+  const humanActions = appSource.split("async function refreshHumanActions()")[1].split("async function refreshPreprod()")[0];
+  const preprod = appSource.split("async function refreshPreprod()")[1].split("async function refreshGitLab(")[0];
+  const gitlab = appSource.split("async function refreshGitLab(")[1].split("function sourceStatus(")[0];
 
-  assert.match(initialLoad, /const \[snapshot, history, decisions, proposals, preprod\] = await Promise\.all\(/);
-  assert.match(initialLoad, /fetchJson\("\/api\/decisions"\)\.then\(\(payload\) => \{\s*sources\.decisions = payload;/);
-  assert.match(initialLoad, /fetchJson\("\/api\/preprod-review", \{headers: \{"X-Pitcrew-Session": sessionToken\}\}\)\.then\(\(payload\) => \{\s*sources\.preprod = payload;/);
-  assert.match(initialLoad, /\.catch\(\(\) => \{\s*const unavailable = \{unavailable: true\};\s*sources\.preprod = unavailable;/);
-  assert.ok(initialLoad.indexOf("renderPreprodReview(preprod);") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
-  assert.ok(initialLoad.indexOf("renderDecision(decisions);") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
-  assert.ok(initialLoad.indexOf("renderPilotageView();") < refreshSource.indexOf("renderGitLab(await fetchJson(gitlabPath));"));
+  assert.match(refreshSource, /await Promise\.all\(\[\s*refreshLocal\(\),\s*refreshHumanActions\(\),\s*refreshPreprod\(\),\s*skipGitLab \? Promise\.resolve\(\) : refreshGitLab\(\{manual\}\),/);
+  assert.match(humanActions, /sourceStore\.load\("decisions", \(\) => api\.get\("\/api\/decisions"\)\)/);
+  assert.match(humanActions, /sourceStore\.load\("proposals", \(\) => api\.get\("\/api\/proposals"\)\)/);
+  assert.match(preprod, /api\.get\("\/api\/preprod-review", \{\s*headers: \{"X-Pitcrew-Session": sessionToken\}/);
+  assert.match(gitlab, /now - lastGitLabRefresh < GITLAB_REFRESH_MS/);
+  assert.match(gitlab, /sourceStore\.load\(\s*"gitlab"/);
 });
