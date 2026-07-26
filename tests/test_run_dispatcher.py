@@ -84,6 +84,194 @@ class RunDispatcherTest(unittest.TestCase):
                           "stderr": __import__("subprocess").DEVNULL, "start_new_session": True}, self.calls[0][1])
         self.assertEqual(321, self.store.get(run["run_id"])["pid"])
 
+    def test_admit_successor_maps_authoritative_structured_transitions_and_drains(self):
+        source = self.store.enqueue(
+            project="demo", skill="reviewer-run", source="scheduled", target="T-chain",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+
+        admitted = self.dispatcher.admit_successor(
+            source,
+            {"outcome": "reviewer_signed_off"},
+            {
+                "authoritative": True,
+                "target": "T-chain",
+                "reviewed_sha": "abc123",
+                "current_sha": "abc123",
+            },
+            {"validator-run": 1},
+        )
+
+        self.assertIsNotNone(admitted)
+        self.assertEqual("validator-run", admitted["successor"]["skill"])
+        self.assertEqual("chain", admitted["successor"]["source"])
+        self.assertEqual([admitted["successor"]["run_id"]], [row["run_id"] for row in admitted["drain"]["spawned"]])
+
+    def test_chain_successor_uses_authoritative_target_binding_without_generic_validation(self):
+        source = self.store.enqueue(
+            project="demo", skill="qa-run", source="scheduled", target="finding:42",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        calls = []
+        dispatcher = RunDispatcher(
+            self.store,
+            "/runner",
+            process_factory=lambda *args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+            target_validator=lambda _row: self.fail("chain target must not use generic validation"),
+        )
+
+        admitted = dispatcher.admit_successor(
+            source,
+            {"outcome": "proposal_approved"},
+            {"authoritative": True, "target": "finding:42"},
+            {"manager-run": 1},
+        )
+
+        self.assertEqual("eligibility", admitted["successor"]["target_source"])
+        self.assertEqual("running", self.store.get(admitted["successor"]["run_id"])["state"])
+        self.assertEqual(1, len(calls))
+
+    def test_admit_successor_is_idempotent_and_fails_closed_without_authoritative_evidence(self):
+        source = self.store.enqueue(
+            project="demo", skill="implementer-run", source="scheduled", target="T-chain",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        result = {"outcome": "open_change"}
+        evidence = {"authoritative": True, "target": "T-chain"}
+
+        first = self.dispatcher.admit_successor(source, result, evidence, {"reviewer-run": 1})
+        second = self.dispatcher.admit_successor(source, result, evidence, {"reviewer-run": 1})
+        rejected = self.dispatcher.admit_successor(
+            source, result, {"authoritative": False, "target": "T-chain"}, {"reviewer-run": 1},
+        )
+
+        self.assertEqual(first["successor"]["run_id"], second["successor"]["run_id"])
+        self.assertIsNone(rejected)
+        self.assertEqual(1, len([row for row in self.store.list_runs("demo") if row["source"] == "chain"]))
+
+    def test_admit_successor_maps_only_the_explicit_delivery_transitions(self):
+        cases = {
+            "proposal_approved": "manager-run",
+            "todo_or_recoverable_processing": "implementer-run",
+            "open_change": "reviewer-run",
+            "review_finding": "implementer-run",
+            "validation_failed": "implementer-run",
+            "human_decision_answered": "unblock",
+            "marked_investigate": "investigate-run",
+        }
+        for number, (outcome, expected_skill) in enumerate(cases.items(), start=1):
+            with self.subTest(outcome=outcome):
+                target = f"T-transition-{number}"
+                source = self.store.enqueue(
+                    project="demo", skill="qa-run", source="scheduled", target=target,
+                )
+                self.store.finish(source["run_id"], state="succeeded")
+                admitted = self.dispatcher.admit_successor(
+                    source,
+                    {"outcome": outcome},
+                    {"authoritative": True, "target": target},
+                    {expected_skill: 1},
+                )
+                self.assertEqual(expected_skill, admitted["successor"]["skill"])
+
+    def test_admit_successor_is_a_noop_for_unknown_outcomes_and_global_stop(self):
+        source = self.store.enqueue(
+            project="demo", skill="qa-run", source="scheduled", target="T-stop",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        evidence = {"authoritative": True, "target": "T-stop"}
+
+        self.assertIsNone(self.dispatcher.admit_successor(
+            source, {"outcome": "normal_noop"}, evidence, {"manager-run": 1},
+        ))
+        self.store.set_project_state("demo", "stopped")
+        self.assertIsNone(self.dispatcher.admit_successor(
+            source, {"outcome": "proposal_approved"}, evidence, {"manager-run": 1},
+        ))
+        self.assertEqual([], [row for row in self.store.list_runs("demo") if row["source"] == "chain"])
+
+    def test_complete_accepts_only_a_terminal_strict_result_and_explicit_evidence(self):
+        source = self.store.enqueue(
+            project="demo", skill="implementer-run", source="scheduled", target="T-complete",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        result_file = Path(self.temp.name) / "result.json"
+        evidence_file = Path(self.temp.name) / "evidence.json"
+        result_file.write_text(json.dumps({
+            "status": "success", "reason": "change opened", "project": "demo",
+            "skill": "implementer-run", "target_id": "T-complete", "did_work": True,
+            "work_kind": "implementation", "quality_outcome": "open_change",
+            "next_action": "review the change",
+        }), encoding="utf-8")
+        evidence_file.write_text(json.dumps({"authoritative": True, "target": "T-complete"}), encoding="utf-8")
+
+        output = StringIO()
+        with mock.patch("sys.stdout", output):
+            exit_code = dispatcher_module.main(
+                ["complete", "--project", "demo", "--run-id", source["run_id"],
+                 "--result-file", str(result_file), "--evidence-file", str(evidence_file)],
+                lambda _project, _skill=None: (self.store, {"reviewer-run": 1}),
+                lambda store, runner: self.dispatcher,
+            )
+
+        self.assertEqual(0, exit_code)
+        completed = json.loads(output.getvalue())
+        self.assertEqual("reviewer-run", completed["successor"]["skill"])
+        self.assertEqual("running", self.store.get(completed["successor"]["run_id"])["state"])
+
+    def test_complete_does_not_chain_a_normal_noop(self):
+        source = self.store.enqueue(
+            project="demo", skill="implementer-run", source="scheduled", target="T-reject",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        result_file = Path(self.temp.name) / "result.json"
+        evidence_file = Path(self.temp.name) / "evidence.json"
+        result_file.write_text(json.dumps({
+            "status": "noop", "reason": "nothing eligible", "project": "demo",
+            "skill": "implementer-run", "target_id": "T-reject", "did_work": False,
+            "work_kind": "none", "quality_outcome": "open_change", "next_action": "wait",
+        }), encoding="utf-8")
+        evidence_file.write_text(json.dumps({"authoritative": True, "target": "T-reject"}), encoding="utf-8")
+
+        output = StringIO()
+        with mock.patch("sys.stdout", output):
+            exit_code = dispatcher_module.main(
+                ["complete", "--project", "demo", "--run-id", source["run_id"],
+                 "--result-file", str(result_file), "--evidence-file", str(evidence_file)],
+                lambda _project, _skill=None: (self.store, {"reviewer-run": 1}),
+                lambda store, runner: self.dispatcher,
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual({"admitted": False}, json.loads(output.getvalue()))
+        self.assertEqual([], [row for row in self.store.list_runs("demo") if row["source"] == "chain"])
+
+    def test_complete_rejects_malformed_evidence_without_chaining(self):
+        source = self.store.enqueue(
+            project="demo", skill="implementer-run", source="scheduled", target="T-malformed",
+        )
+        self.store.finish(source["run_id"], state="succeeded")
+        result_file = Path(self.temp.name) / "result.json"
+        evidence_file = Path(self.temp.name) / "evidence.json"
+        result_file.write_text(json.dumps({
+            "status": "success", "reason": "change opened", "project": "demo",
+            "skill": "implementer-run", "target_id": "T-malformed", "did_work": True,
+            "work_kind": "implementation", "quality_outcome": "open_change",
+            "next_action": "review",
+        }), encoding="utf-8")
+        evidence_file.write_text(json.dumps({"authoritative": True, "target": "T-malformed", "extra": True}), encoding="utf-8")
+
+        with mock.patch("sys.stderr", StringIO()):
+            exit_code = dispatcher_module.main(
+                ["complete", "--project", "demo", "--run-id", source["run_id"],
+                 "--result-file", str(result_file), "--evidence-file", str(evidence_file)],
+                lambda _project, _skill=None: (self.store, {"reviewer-run": 1}),
+                lambda store, runner: self.dispatcher,
+            )
+
+        self.assertEqual(2, exit_code)
+        self.assertEqual([], [row for row in self.store.list_runs("demo") if row["source"] == "chain"])
+
     def test_eligibility_metadata_survives_enqueue_and_worker_spawn(self):
         run = self.store.enqueue(
             project="demo",

@@ -14,13 +14,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.pitcrew_config import EVENT_DRIVEN_ROLES
+except ImportError:
+    from pitcrew_config import EVENT_DRIVEN_ROLES
+
 ACTIVE_STATES = ("queued", "running")
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 ALL_STATES = ACTIVE_STATES + TERMINAL_STATES
 RETENTION = timedelta(days=7)
 STALE_HEARTBEAT = timedelta(seconds=30)
-SCHEMA_VERSION = 1
-_SOURCES = {"dashboard", "scheduled", "reconcile"}
+SCHEMA_VERSION = 2
+_SOURCES = {"dashboard", "scheduled", "reconcile", "chain"}
 _TARGET_SOURCES = {"directed", "eligibility"}
 _GATE_DECISIONS = {"directed", "eligible", "unavailable"}
 
@@ -340,12 +345,27 @@ class RunStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
+            if version not in (0, 1, SCHEMA_VERSION):
                 raise RunStoreError(f"unsupported schema version {version}")
+            if version == 1:
+                legacy_columns = tuple(
+                    row["name"] for row in connection.execute("PRAGMA table_info(runs)")
+                )
+                required_legacy_columns = (
+                    "run_id", "project", "skill", "source", "target", "dedupe_key",
+                    "state", "queue_sequence", "pid", "created_at", "started_at",
+                    "heartbeat_at", "finished_at", "phase", "cancel_requested",
+                    "error_code", "error_message", "predecessor_run_id",
+                )
+                required_current_columns = required_legacy_columns + (
+                    "target_source", "gate_decision", "gate_reason", "gate_fingerprint",
+                )
+                if legacy_columns not in {required_legacy_columns, required_current_columns}:
+                    raise RunStoreError("database schema mismatch for runs")
             for statement in (
                 """CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY, project TEXT NOT NULL, skill TEXT NOT NULL,
-                    source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile')),
+                    source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile','chain')),
                     target TEXT, dedupe_key TEXT NOT NULL,
                     state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
                     queue_sequence INTEGER NOT NULL, pid INTEGER,
@@ -385,6 +405,8 @@ class RunStore:
                     connection.execute(
                         f"ALTER TABLE runs ADD COLUMN {column} {definition}"
                     )
+            if version == 1:
+                self._migrate_version_one_runs(connection)
             self._validate_schema(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
@@ -400,6 +422,44 @@ class RunStore:
             raise RunStoreError("database initialization failed") from error
         finally:
             connection.close()
+
+    @staticmethod
+    def _migrate_version_one_runs(connection: sqlite3.Connection) -> None:
+        """Rebuild the runs table to extend its immutable source CHECK."""
+        connection.execute("ALTER TABLE runs RENAME TO runs_v1")
+        connection.execute("DROP INDEX active_run_dedupe")
+        connection.execute("DROP INDEX queue_by_project_skill")
+        connection.execute(
+            """CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY, project TEXT NOT NULL, skill TEXT NOT NULL,
+                source TEXT NOT NULL CHECK(source IN ('dashboard','scheduled','reconcile','chain')),
+                target TEXT, dedupe_key TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('queued','running','succeeded','failed','cancelled')),
+                queue_sequence INTEGER NOT NULL, pid INTEGER,
+                created_at TEXT NOT NULL, started_at TEXT, heartbeat_at TEXT, finished_at TEXT,
+                phase TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT, error_message TEXT, predecessor_run_id TEXT,
+                target_source TEXT CHECK(target_source IN ('directed','eligibility')),
+                gate_decision TEXT CHECK(gate_decision IN ('directed','eligible','unavailable')),
+                gate_reason TEXT, gate_fingerprint TEXT
+            )"""
+        )
+        columns = (
+            "run_id,project,skill,source,target,dedupe_key,state,queue_sequence,"
+            "pid,created_at,started_at,heartbeat_at,finished_at,phase,"
+            "cancel_requested,error_code,error_message,predecessor_run_id,"
+            "target_source,gate_decision,gate_reason,gate_fingerprint"
+        )
+        connection.execute(f"INSERT INTO runs({columns}) SELECT {columns} FROM runs_v1")
+        connection.execute("DROP TABLE runs_v1")
+        connection.execute(
+            "CREATE UNIQUE INDEX active_run_dedupe ON runs(project, dedupe_key) "
+            "WHERE state IN ('queued','running')"
+        )
+        connection.execute(
+            "CREATE INDEX queue_by_project_skill "
+            "ON runs(project, skill, state, queue_sequence)"
+        )
     @staticmethod
     def _validate_schema(connection: sqlite3.Connection) -> None:
         expected_tables = {
@@ -448,7 +508,7 @@ class RunStore:
                 raise RunStoreError(f"database schema mismatch for {table}")
 
         expected_checks = {
-            ("runs", "source"): ("dashboard", "scheduled", "reconcile"),
+            ("runs", "source"): ("dashboard", "scheduled", "reconcile", "chain"),
             ("runs", "target_source"): ("directed", "eligibility"),
             (
                 "runs",
@@ -614,6 +674,85 @@ class RunStore:
             gate_fingerprint,
             0,
         )
+
+    def admit_successor(
+        self,
+        *,
+        project: str,
+        source_run_id: str,
+        skill: str,
+        target: str,
+    ) -> dict[str, Any]:
+        """Durably admit one target-bound successor of a terminal run.
+
+        The source run and target form the stable idempotency key.  This is
+        intentionally separate from generic enqueue: callers cannot forge a
+        chain source or select an unrelated target.
+        """
+        project = self._public(project, "project")
+        source_run_id = self._public(source_run_id, "source_run_id", 64)
+        skill = self._public(skill, "skill")
+        target = self._public(target, "target", 1000)
+        if skill not in EVENT_DRIVEN_ROLES:
+            raise RunStoreError("chain successor skill is invalid")
+        key = f"chain:{source_run_id}:{target}"
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            control = self._control(connection, project)
+            if control is not None and control["state"] == "stopped":
+                raise RunPaused(f"project {project} is stopped")
+            source = connection.execute(
+                "SELECT * FROM runs WHERE run_id=?", (source_run_id,)
+            ).fetchone()
+            if source is None or source["project"] != project:
+                raise RunStateError("source run does not belong to project")
+            if source["state"] not in TERMINAL_STATES:
+                raise RunStateError("source run is not terminal")
+            if source["target"] != target:
+                raise RunStateError("successor target does not match source run")
+            existing_successor = connection.execute(
+                "SELECT * FROM runs WHERE project=? AND source='chain' "
+                "AND predecessor_run_id=?",
+                (project, source_run_id),
+            ).fetchone()
+            if existing_successor is not None:
+                connection.commit()
+                return self._row(existing_successor, False)  # type: ignore[return-value]
+            existing = connection.execute(
+                "SELECT * FROM runs WHERE project=? AND dedupe_key=? "
+                "AND state IN ('queued','running')",
+                (project, key),
+            ).fetchone()
+            if existing is not None:
+                raise RunConflict("active run already owns successor target")
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(queue_sequence), 0) + 1 FROM runs WHERE project=?",
+                (project,),
+            ).fetchone()[0]
+            run_id, timestamp = str(uuid.uuid4()), self._timestamp()
+            connection.execute(
+                "INSERT INTO runs("
+                "run_id,project,skill,source,target,target_source,gate_decision,"
+                "gate_reason,dedupe_key,state,queue_sequence,created_at,phase,"
+                "predecessor_run_id"
+                ") VALUES(?,?,?,?,?,?,?,?,?, 'queued',?,?, 'En attente',?)",
+                (run_id, project, skill, "chain", target, "eligibility",
+                 "eligible", "authoritative chain transition", key, sequence,
+                 timestamp, source_run_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row(row, True)  # type: ignore[return-value]
+        except (sqlite3.Error, RunStateError, RunPaused) as error:
+            connection.rollback()
+            if isinstance(error, (RunStateError, RunPaused)):
+                raise
+            raise RunStoreError("database operation failed") from error
+        finally:
+            connection.close()
 
     def _enqueue(
         self,

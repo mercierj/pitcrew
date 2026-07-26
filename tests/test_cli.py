@@ -1140,6 +1140,50 @@ class CliTest(unittest.TestCase):
                 args_path.read_text(encoding="utf-8").splitlines().count("--output-schema"),
             )
 
+    def test_coordinated_worker_hands_strict_result_and_evidence_to_successor_chain(self):
+        from scripts.pitcrew_run_store import RunStore
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            env = {**os.environ, "HOME": str(root), "CODEX_HOME": str(root / ".codex")}
+            configured = self.run_cli("bin/configure.sh", "getbill", "--profile", "getbill", env=env)
+            self.assertEqual(0, configured.returncode, configured.stderr)
+            target = "https://gitlab.com/getbill1/getbill/-/issues/42"
+            fake_codex = root / "fake-codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "previous=''\n"
+                "for argument in \"$@\"; do\n"
+                "  if [ \"$previous\" = '--output-last-message' ]; then\n"
+                "    printf '%s\\n' '{\"status\":\"success\",\"reason\":\"change opened\",\"project\":\"getbill\",\"skill\":\"implementer-run\",\"target_id\":\"https://gitlab.com/getbill1/getbill/-/issues/42\",\"did_work\":true,\"work_kind\":\"implementation\",\"quality_outcome\":\"open_change\",\"next_action\":\"review\"}' > \"$argument\"\n"
+                "    printf '%s\\n' '{\"authoritative\":true,\"target\":\"https://gitlab.com/getbill1/getbill/-/issues/42\"}' > \"$argument.evidence.json\"\n"
+                "  fi\n"
+                "  previous=\"$argument\"\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env["CODEX_BIN"] = str(fake_codex)
+            runtime = root / ".codex/pitcrew/getbill"
+            runtime.chmod(0o700)
+            store = RunStore(runtime / "runs.sqlite3")
+            source = store.enqueue(
+                project="getbill", skill="implementer-run", source="scheduled", target=target,
+            )
+            store.claim_ready(project="getbill", capacities={"implementer-run": 1})
+            coordinated = subprocess.Popen(
+                [str(ROOT / "bin/pitcrew-codex.sh"), "implementer-run", "getbill", "--target", target,
+                 "--scheduled", "--coordinated-run", source["run_id"]],
+                cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            store.mark_pid(source["run_id"], coordinated.pid)
+            _, stderr = coordinated.communicate(timeout=5)
+            self.assertEqual(0, coordinated.returncode, stderr)
+            successors = [row for row in store.list_runs("getbill") if row["source"] == "chain"]
+            self.assertEqual(1, len(successors))
+            self.assertEqual(("reviewer-run", source["run_id"]), (successors[0]["skill"], successors[0]["predecessor_run_id"]))
+
     def test_model_command_prints_default_and_runtime_override(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
