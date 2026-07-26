@@ -21,6 +21,8 @@ from pitcrew_run_store import RunStateError, RunStore, RunStoreError
 
 MAX_SUMMARY_BYTES = 64 * 1024
 MAX_EVENT_BYTES = 1024 * 1024
+LAUNCHER_PID_WAIT_SECONDS = 1.0
+LAUNCHER_PID_POLL_SECONDS = 0.01
 NO_SUMMARY = "No bounded final summary was produced."
 STRUCTURED_STATUSES = {"success", "noop", "blocked", "failed"}
 STRUCTURED_FIELDS = {
@@ -48,6 +50,16 @@ WORK_KINDS = {
     "release",
     "cleanup",
 }
+
+
+def positive_pid(value: str) -> int:
+    try:
+        pid = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if pid <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return pid
 
 
 def parser() -> argparse.ArgumentParser:
@@ -78,6 +90,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--live-file", type=Path)
     result.add_argument("--run-db", type=Path)
     result.add_argument("--run-id")
+    result.add_argument("--launcher-pid", type=positive_pid)
     result.add_argument("--heartbeat-seconds", type=float, default=2)
     result.add_argument("command", nargs=argparse.REMAINDER)
     return result
@@ -182,15 +195,6 @@ def coordinated_run_is_launchable(
     args: argparse.Namespace,
     row: dict | None,
 ) -> bool:
-    row_pid = row.get("pid") if row is not None else None
-    pid_is_owned = (
-        row_pid is None
-        or row_pid == os.getpid()
-        or (
-            row_pid == os.getppid()
-            and os.getpgrp() == row_pid
-        )
-    )
     return bool(
         row is not None
         and row.get("project") == args.project
@@ -200,10 +204,39 @@ def coordinated_run_is_launchable(
         and row.get("gate_decision") == args.gate_decision
         and row.get("gate_reason") == args.gate_reason
         and row.get("gate_fingerprint") == args.fingerprint
-        # The dispatcher records the parent shell only when it is the exact
-        # leader of this coordinated process group.
-        and pid_is_owned
+        and row.get("pid") == args.launcher_pid
+        and args.launcher_pid == os.getppid()
+        and args.launcher_pid == os.getpgrp()
     )
+
+
+def wait_for_coordinated_run(
+    args: argparse.Namespace,
+    store: RunStore,
+    timeout_seconds: float = LAUNCHER_PID_WAIT_SECONDS,
+) -> dict | None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        row = store.get(args.run_id)
+        if coordinated_run_is_launchable(args, row):
+            return row
+        # Only the dispatcher's mark_pid write may legitimately lag behind
+        # process creation. Every other mismatch is terminal for this helper.
+        if (
+            row is None
+            or row.get("pid") is not None
+            or row.get("project") != args.project
+            or row.get("skill") != args.skill
+            or row.get("state") != "running"
+            or (row.get("target") or None) != (args.target_id or None)
+            or row.get("gate_decision") != args.gate_decision
+            or row.get("gate_reason") != args.gate_reason
+            or row.get("gate_fingerprint") != args.fingerprint
+        ):
+            return None
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(LAUNCHER_PID_POLL_SECONDS)
 
 
 def write_fallback_summary(path: Path, exit_code: int | None) -> None:
@@ -354,8 +387,15 @@ def drain_child_output(child: subprocess.Popen[str], tick=None, heartbeat_second
 def main() -> int:
     argument_parser = parser()
     args = argument_parser.parse_args()
-    if bool(args.run_db) != bool(args.run_id):
-        argument_parser.error("--run-db and --run-id must be used together")
+    coordinated_flags = (
+        args.run_db is not None,
+        args.run_id is not None,
+        args.launcher_pid is not None,
+    )
+    if any(coordinated_flags) and not all(coordinated_flags):
+        argument_parser.error(
+            "--run-db, --run-id and --launcher-pid must be used together"
+        )
     if args.heartbeat_seconds <= 0:
         argument_parser.error("--heartbeat-seconds must be positive")
     command = args.command
@@ -418,15 +458,13 @@ def main() -> int:
 
         if coordinated_store is not None:
             try:
-                coordinated_run = coordinated_store.get(args.run_id)
-                if not coordinated_run_is_launchable(args, coordinated_run):
+                coordinated_run = wait_for_coordinated_run(args, coordinated_store)
+                if coordinated_run is None:
                     print(
                         "pitcrew lock: coordinated run is unavailable",
                         file=sys.stderr,
                     )
                     return 2
-                if coordinated_run["pid"] is None:
-                    coordinated_store.mark_pid(args.run_id, os.getpid())
             except RunStateError:
                 print(
                     "pitcrew lock: coordinated run is unavailable",

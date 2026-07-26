@@ -475,7 +475,11 @@ if "$LOCKED_RUN"; then
     --history-file "$HISTORY_FILE"
   )
   if [[ -n "$COORDINATED_RUN" ]]; then
-    LOCKED_ARGS+=(--run-db "$RUN_DB" --run-id "$COORDINATED_RUN")
+    LOCKED_ARGS+=(
+      --run-db "$RUN_DB"
+      --run-id "$COORDINATED_RUN"
+      --launcher-pid "$$"
+    )
   fi
   if [[ -n "$TARGET" ]]; then
     LOCKED_ARGS+=(--target-id "$TARGET")

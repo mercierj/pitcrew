@@ -21,6 +21,35 @@ LOCKED_METADATA_ARGS = [
 
 
 class CoordinatedLockedExecTest(unittest.TestCase):
+    def test_launcher_pid_parser_requires_positive_integer(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            base = [
+                "--lock-file", "/tmp/lock",
+                "--project", "demo",
+                "--skill", "qa-run",
+                "--model", "test",
+                *LOCKED_METADATA_ARGS,
+                "--summary-file", "/tmp/summary",
+                "--history-file", "/tmp/history",
+                "--run-db", "/tmp/runs.sqlite",
+                "--run-id", "run-1",
+            ]
+            parsed = helper.parser().parse_args(
+                [*base, "--launcher-pid", "4242", "--", "true"]
+            )
+            self.assertEqual(4242, parsed.launcher_pid)
+            for invalid in ("0", "-1", "nope"):
+                with self.subTest(invalid=invalid), self.assertRaises(SystemExit):
+                    helper.parser().parse_args(
+                        [*base, "--launcher-pid", invalid, "--", "true"]
+                    )
+        finally:
+            sys.path.remove(scripts_path)
+
     def test_child_session_and_forwarding_match_coordinated_mode(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)
@@ -35,7 +64,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         "project": "demo",
                         "skill": "qa-run",
                         "state": "running",
-                        "pid": os.getpid(),
+                        "pid": 4242,
                     }
                 def mark_pid(self, *_args):
                     raise AssertionError("wrapper pid is already recorded")
@@ -87,6 +116,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         args.extend([
                             "--run-db", str(root / "runs.sqlite"),
                             "--run-id", "run-1",
+                            "--launcher-pid", "4242",
                         ])
                     args.extend(["--", "true"])
                     with (
@@ -96,6 +126,8 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         mock.patch.object(helper.subprocess, "Popen", popen),
                         mock.patch.object(helper, "drain_child_output", side_effect=drain),
                         mock.patch.object(helper.os, "killpg", killpg),
+                        mock.patch.object(helper.os, "getppid", return_value=4242),
+                        mock.patch.object(helper.os, "getpgrp", return_value=4242),
                         mock.patch.object(helper.signal, "signal", side_effect=install),
                     ):
                         self.assertEqual(0, helper.main())
@@ -178,6 +210,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                     "--live-file", str(live),
                     "--run-db", str(root / "runs.sqlite"),
                     "--run-id", "run-1",
+                    "--launcher-pid", "4242",
                     "--", "true",
                 ]
                 stderr = __import__("io").StringIO()
@@ -186,6 +219,8 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                     mock.patch.object(helper, "RunStore", Store),
                     mock.patch.object(helper.fcntl, "flock", side_effect=acquire),
                     mock.patch.object(helper.subprocess, "Popen", popen),
+                    mock.patch.object(helper.os, "getppid", return_value=4242),
+                    mock.patch.object(helper.os, "getpgrp", return_value=4242),
                     mock.patch("sys.stderr", stderr),
                 ):
                     self.assertEqual(2, helper.main())
@@ -212,7 +247,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                 "gate_decision": "directed",
                 "gate_reason": "selected",
                 "gate_fingerprint": "sha256:test",
-                "pid": os.getpid(),
+                "pid": 4242,
             }
             mismatches = {
                 "project": "other",
@@ -221,7 +256,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                 "gate_decision": "eligible",
                 "gate_reason": "other",
                 "gate_fingerprint": "sha256:other",
-                "pid": 4242,
+                "pid": 4343,
             }
             for field, value in mismatches.items():
                 with self.subTest(field=field), tempfile.TemporaryDirectory() as temp:
@@ -264,6 +299,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         "--history-file", str(root / "history"),
                         "--run-db", str(root / "runs.sqlite"),
                         "--run-id", "run-1",
+                        "--launcher-pid", "4242",
                         "--", "true",
                     ]
                     with (
@@ -271,14 +307,14 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                         mock.patch.object(helper, "RunStore", Store),
                         mock.patch.object(helper.subprocess, "Popen", popen),
                         mock.patch.object(helper.os, "getppid", return_value=4242),
-                        mock.patch.object(helper.os, "getpgrp", return_value=4343),
+                        mock.patch.object(helper.os, "getpgrp", return_value=4242),
                     ):
                         self.assertEqual(2, helper.main())
                     popen.assert_not_called()
         finally:
             sys.path.remove(scripts_path)
 
-    def test_coordinated_accepts_parent_process_group_owner(self):
+    def test_coordinated_accepts_authenticated_launcher(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)
         try:
@@ -328,6 +364,7 @@ class CoordinatedLockedExecTest(unittest.TestCase):
                     "--history-file", str(root / "history"),
                     "--run-db", str(root / "runs.sqlite"),
                     "--run-id", "run-1",
+                    "--launcher-pid", "4242",
                     "--", "true",
                 ]
                 with (
@@ -342,6 +379,142 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         finally:
             sys.path.remove(scripts_path)
 
+    def test_coordinated_waits_for_dispatcher_launcher_pid(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            reads = 0
+
+            class Store:
+                def __init__(self, _path):
+                    pass
+
+                def get(self, run_id):
+                    nonlocal reads
+                    reads += 1
+                    return {
+                        "run_id": run_id,
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "target": None,
+                        "gate_decision": None,
+                        "gate_reason": None,
+                        "gate_fingerprint": None,
+                        "pid": 4242 if reads >= 3 else None,
+                    }
+
+                def finish(self, *_args, **_kwargs):
+                    pass
+
+            class Child:
+                pid = 123
+                stdout = None
+
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                popen = mock.Mock(return_value=Child())
+                args = [
+                    "locked",
+                    "--lock-file", str(root / "lock"),
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--model", "test",
+                    *LOCKED_METADATA_ARGS,
+                    "--summary-file", str(root / "summary"),
+                    "--history-file", str(root / "history"),
+                    "--run-db", str(root / "runs.sqlite"),
+                    "--run-id", "run-1",
+                    "--launcher-pid", "4242",
+                    "--", "true",
+                ]
+                with (
+                    mock.patch.object(sys, "argv", args),
+                    mock.patch.object(helper, "RunStore", Store),
+                    mock.patch.object(helper.subprocess, "Popen", popen),
+                    mock.patch.object(helper.os, "getppid", return_value=4242),
+                    mock.patch.object(helper.os, "getpgrp", return_value=4242),
+                    mock.patch.object(helper.time, "sleep"),
+                ):
+                    self.assertEqual(0, helper.main())
+                self.assertGreaterEqual(reads, 3)
+                popen.assert_called_once()
+        finally:
+            sys.path.remove(scripts_path)
+
+    def test_coordinated_launcher_pid_timeout_rejects_without_effects(self):
+        scripts_path = str(ROOT / "scripts")
+        sys.path.insert(0, scripts_path)
+        try:
+            import pitcrew_locked_exec as helper
+
+            class Store:
+                def __init__(self, _path):
+                    pass
+
+                def get(self, run_id):
+                    return {
+                        "run_id": run_id,
+                        "project": "demo",
+                        "skill": "qa-run",
+                        "state": "running",
+                        "target": None,
+                        "gate_decision": None,
+                        "gate_reason": None,
+                        "gate_fingerprint": None,
+                        "pid": None,
+                    }
+
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                summary = root / "summary"
+                summary.write_text("preserve", encoding="utf-8")
+                live = root / "live"
+                popen = mock.Mock()
+                args = [
+                    "locked",
+                    "--lock-file", str(root / "lock"),
+                    "--project", "demo",
+                    "--skill", "qa-run",
+                    "--model", "test",
+                    *LOCKED_METADATA_ARGS,
+                    "--summary-file", str(summary),
+                    "--history-file", str(root / "history"),
+                    "--live-file", str(live),
+                    "--run-db", str(root / "runs.sqlite"),
+                    "--run-id", "run-1",
+                    "--launcher-pid", "4242",
+                    "--", "true",
+                ]
+                clock = iter((0.0, 0.0, 2.0))
+                with (
+                    mock.patch.object(sys, "argv", args),
+                    mock.patch.object(helper, "RunStore", Store),
+                    mock.patch.object(helper.subprocess, "Popen", popen),
+                    mock.patch.object(helper.os, "getppid", return_value=4242),
+                    mock.patch.object(helper.os, "getpgrp", return_value=4242),
+                    mock.patch.object(
+                        helper.time,
+                        "monotonic",
+                        side_effect=lambda: next(clock, 2.0),
+                    ),
+                    mock.patch.object(helper.time, "sleep"),
+                ):
+                    self.assertEqual(2, helper.main())
+                popen.assert_not_called()
+                self.assertEqual("preserve", summary.read_text(encoding="utf-8"))
+                self.assertFalse(live.exists())
+        finally:
+            sys.path.remove(scripts_path)
+
     def test_coordinated_spawn_failure_with_store_failure_is_safe(self):
         scripts_path = str(ROOT / "scripts")
         sys.path.insert(0, scripts_path)
@@ -349,15 +522,14 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             import pitcrew_locked_exec as helper
             class Store:
                 def __init__(self, path): pass
-                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": None}
-                def mark_pid(self, *args): return {}
+                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": 4242}
                 def finish(self, *args, **kwargs): raise helper.RunStoreError("down")
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 history = mock.Mock()
-                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", "missing"]
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--launcher-pid", "4242", "--", "missing"]
                 stderr = __import__("io").StringIO()
-                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch.object(helper.subprocess, "Popen", side_effect=OSError()), mock.patch("sys.stderr", stderr):
+                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch.object(helper.subprocess, "Popen", side_effect=OSError()), mock.patch.object(helper.os, "getppid", return_value=4242), mock.patch.object(helper.os, "getpgrp", return_value=4242), mock.patch("sys.stderr", stderr):
                     self.assertEqual(2, helper.main())
                 self.assertIn("run store is unavailable", stderr.getvalue()); history.append.assert_called()
         finally:
@@ -370,19 +542,27 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             import pitcrew_locked_exec as helper
             class Store:
                 def __init__(self, path): pass
-                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": None}
-                def mark_pid(self, *args): return {}
+                def get(self, run_id): return {"project": "demo", "skill": "qa-run", "state": "running", "pid": 4242}
                 def finish(self, *args, **kwargs): raise helper.RunStoreError("down")
             with tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 history = mock.Mock(); stderr = __import__("io").StringIO()
-                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--", sys.executable, "-c", "pass"]
-                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch("sys.stderr", stderr):
+                args = ["locked", "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(root / "live"), "--run-db", str(root / "runs.sqlite"), "--run-id", "id", "--launcher-pid", "4242", "--", sys.executable, "-c", "pass"]
+                with mock.patch.object(sys, "argv", args), mock.patch.object(helper, "RunStore", Store), mock.patch.object(helper, "HistoryStore", return_value=history), mock.patch.object(helper.os, "getppid", return_value=4242), mock.patch.object(helper.os, "getpgrp", return_value=4242), mock.patch("sys.stderr", stderr):
                     self.assertEqual(2, helper.main())
                 self.assertIn("run store is unavailable", stderr.getvalue()); history.append.assert_called()
         finally:
             sys.path.remove(scripts_path)
-    def helper(self, root, run, command, *extra):
+    def launcher_command(
+        self,
+        root,
+        run,
+        command,
+        *extra,
+        lock_file=None,
+        summary_file=None,
+        history_file=None,
+    ):
         metadata = []
         for option, field in (
             ("--target-id", "target"),
@@ -392,11 +572,61 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         ):
             if run.get(field) is not None:
                 metadata.extend((option, run[field]))
-        return subprocess.run([
-            sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "run.lock"),
-            "--project", "demo", "--skill", "qa-run", "--model", "test", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"),
-            "--history-file", str(root / "history"), "--run-db", str(root / "private" / "runs.sqlite"),
-            "--run-id", run["run_id"], *metadata, *extra, "--", *command], cwd=ROOT, text=True, capture_output=True, check=False)
+        launcher = root / "test-launcher.sh"
+        launcher.write_text(
+            """#!/usr/bin/env bash
+set -e
+python_bin=$1
+helper=$2
+run_db=$3
+run_id=$4
+shift 4
+"$python_bin" -c 'import sys
+from pathlib import Path
+from scripts.pitcrew_run_store import RunStore
+store = RunStore(Path(sys.argv[1]))
+row = store.get(sys.argv[2])
+if row is not None and row["state"] == "running" and row["pid"] is None:
+    store.mark_pid(sys.argv[2], int(sys.argv[3]))
+' "$run_db" "$run_id" "$$"
+set +e
+"$python_bin" "$helper" --launcher-pid "$$" "$@"
+status=$?
+exit "$status"
+""",
+            encoding="utf-8",
+        )
+        launcher.chmod(0o700)
+        return [
+            str(launcher),
+            sys.executable,
+            str(ROOT / "scripts/pitcrew_locked_exec.py"),
+            str(root / "private" / "runs.sqlite"),
+            run["run_id"],
+            "--lock-file", str(lock_file or root / "run.lock"),
+            "--project", "demo",
+            "--skill", "qa-run",
+            "--model", "test",
+            *LOCKED_METADATA_ARGS,
+            "--summary-file", str(summary_file or root / "summary"),
+            "--history-file", str(history_file or root / "history"),
+            "--run-db", str(root / "private" / "runs.sqlite"),
+            "--run-id", run["run_id"],
+            *metadata,
+            *extra,
+            "--",
+            *command,
+        ]
+
+    def helper(self, root, run, command, *extra):
+        return subprocess.run(
+            self.launcher_command(root, run, command, *extra),
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            start_new_session=True,
+        )
 
     def test_coordinated_success_finishes_run_and_clears_live(self):
         from scripts.pitcrew_run_store import RunStore
@@ -439,6 +669,8 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         base = [sys.executable, str(helper), "--lock-file", "/tmp/x", "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", "/tmp/a", "--history-file", "/tmp/b"]
         self.assertEqual(2, subprocess.run([*base, "--run-id", "x", "--", "true"], cwd=ROOT, capture_output=True).returncode)
         self.assertEqual(2, subprocess.run([*base, "--run-db", "/tmp/runs.sqlite", "--", "true"], cwd=ROOT, capture_output=True).returncode)
+        self.assertEqual(2, subprocess.run([*base, "--launcher-pid", "42", "--", "true"], cwd=ROOT, capture_output=True).returncode)
+        self.assertEqual(2, subprocess.run([*base, "--run-db", "/tmp/runs.sqlite", "--run-id", "x", "--", "true"], cwd=ROOT, capture_output=True).returncode)
         self.assertEqual(2, subprocess.run([*base, "--heartbeat-seconds", "0", "--", "true"], cwd=ROOT, capture_output=True).returncode)
 
     def test_coordinated_silent_child_heartbeats_and_signal_is_interrupted(self):
@@ -446,8 +678,16 @@ class CoordinatedLockedExecTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             run = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            live = root / "live"; command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", run["run_id"], "--target-id", "one", "--heartbeat-seconds", ".05", "--", sys.executable, "-c", "import time; time.sleep(.25)"]
-            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            live = root / "live"
+            command = self.launcher_command(
+                root,
+                run,
+                [sys.executable, "-c", "import time; time.sleep(.25)"],
+                "--live-file", str(live),
+                "--heartbeat-seconds", ".05",
+                lock_file=root / "lock",
+            )
+            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             deadline = time.monotonic() + 2
             while not live.exists() and time.monotonic() < deadline: time.sleep(.01)
             self.assertEqual(run["run_id"], json.loads(live.read_text())["run_id"])
@@ -463,7 +703,18 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             self.assertNotEqual(0, self.helper(root, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"]).returncode)
             self.assertEqual("command_failed", store.get(run["run_id"])["error_code"])
             race = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two"); store.claim_ready(project="demo", capacities={"qa-run": 1})
-            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "race"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s2"), "--history-file", str(root / "h2"), "--run-db", str(root / "private" / "runs.sqlite"), "--run-id", race["run_id"], "--target-id", "two", "--", sys.executable, "-c", "import time; time.sleep(.2)"], cwd=ROOT)
+            process = subprocess.Popen(
+                self.launcher_command(
+                    root,
+                    race,
+                    [sys.executable, "-c", "import time; time.sleep(.2)"],
+                    lock_file=root / "race",
+                    summary_file=root / "s2",
+                    history_file=root / "h2",
+                ),
+                cwd=ROOT,
+                start_new_session=True,
+            )
             time.sleep(.05); store.finish(race["run_id"], state="cancelled"); process.communicate(timeout=2)
             self.assertEqual("cancelled", store.get(race["run_id"])["state"])
 
@@ -502,13 +753,36 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             root = Path(temp).resolve(); store = RunStore(root / "private" / "runs.sqlite")
             one = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="one"); two = store.enqueue(project="demo", skill="qa-run", source="scheduled", target="two")
             store.claim_ready(project="demo", capacities={"qa-run": 2})
-            common = ["--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "s"), "--history-file", str(root / "h"), "--run-db", str(root / "private" / "runs.sqlite")]
-            command = [sys.executable, "-c", "import time; time.sleep(.25)"]
-            first = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--target-id", "one", "--", *command], cwd=ROOT, stdout=subprocess.PIPE, text=True)
-            time.sleep(.05)
-            duplicate = subprocess.run([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "one.lock"), *common, "--run-id", one["run_id"], "--target-id", "one", "--", *command], cwd=ROOT, text=True, capture_output=True)
+            command = [sys.executable, "-c", "import time; time.sleep(.75)"]
+            first_command = self.launcher_command(
+                root,
+                one,
+                command,
+                lock_file=root / "one.lock",
+                summary_file=root / "s",
+                history_file=root / "h",
+            )
+            first = subprocess.Popen(first_command, cwd=ROOT, stdout=subprocess.PIPE, text=True, start_new_session=True)
+            deadline = time.monotonic() + 2
+            while not (root / "one.lock").exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue((root / "one.lock").exists())
+            time.sleep(.02)
+            duplicate = subprocess.run(first_command, cwd=ROOT, text=True, capture_output=True, start_new_session=True)
+            self.assertEqual(0, duplicate.returncode, duplicate.stderr)
             self.assertEqual("noop", json.loads(duplicate.stdout)["status"]); self.assertEqual("running", store.get(one["run_id"])["state"])
-            second = subprocess.Popen([sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "two.lock"), *common, "--run-id", two["run_id"], "--target-id", "two", "--", *command], cwd=ROOT)
+            second = subprocess.Popen(
+                self.launcher_command(
+                    root,
+                    two,
+                    command,
+                    lock_file=root / "two.lock",
+                    summary_file=root / "s",
+                    history_file=root / "h",
+                ),
+                cwd=ROOT,
+                start_new_session=True,
+            )
             first.communicate(timeout=2); second.communicate(timeout=2)
             self.assertEqual(0, first.returncode); self.assertEqual(0, second.returncode)
 
@@ -521,8 +795,15 @@ class CoordinatedLockedExecTest(unittest.TestCase):
             store.claim_ready(project="demo", capacities={"qa-run": 1})
             live, pidfile, backup = root / "live", root / "child.pid", db.with_name("runs.backup.sqlite")
             child = f"from pathlib import Path; import os,time; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(10)"
-            command = [sys.executable, str(ROOT / "scripts/pitcrew_locked_exec.py"), "--lock-file", str(root / "lock"), "--project", "demo", "--skill", "qa-run", "--model", "x", *LOCKED_METADATA_ARGS, "--summary-file", str(root / "summary"), "--history-file", str(root / "history"), "--live-file", str(live), "--run-db", str(db), "--run-id", run["run_id"], "--target-id", "one", "--heartbeat-seconds", ".05", "--", sys.executable, "-c", child]
-            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            command = self.launcher_command(
+                root,
+                run,
+                [sys.executable, "-c", child],
+                "--live-file", str(live),
+                "--heartbeat-seconds", ".05",
+                lock_file=root / "lock",
+            )
+            process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
             try:
                 deadline = time.monotonic() + 2
                 while (not pidfile.exists() or not live.exists()) and time.monotonic() < deadline: time.sleep(.01)
