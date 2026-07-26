@@ -206,6 +206,29 @@ class GitLabForgeWorkTest(unittest.TestCase):
 
         self.assertEqual([], work["groups"]["blocked"][0]["related_change_urls"])
 
+    def test_closed_ticket_keeps_its_closure_timestamp_for_the_done_section(self):
+        import json
+        import subprocess
+
+        issue = {
+            "iid": 20,
+            "title": "Completed today",
+            "description": "",
+            "labels": ["pitcrew-agent", "pitcrew-state::done"],
+            "state": "closed",
+            "closed_at": "2026-07-26T23:34:51Z",
+            "updated_at": "2026-07-26T23:34:51Z",
+            "web_url": "https://gitlab.com/acme/payments/-/issues/20",
+        }
+
+        def runner(args, **kwargs):
+            payload = [] if "merge_requests" in args[-1] else [issue]
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+
+        ticket = GitLabForgeWork(gitlab_config(), runner).collect()["groups"]["done"][0]
+
+        self.assertEqual("2026-07-26T23:34:51Z", ticket["closed_at"])
+
 
 class GitHubRunner:
     def __init__(self, malformed=False):

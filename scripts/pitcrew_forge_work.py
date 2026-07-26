@@ -167,6 +167,8 @@ class GitLabForgeWork:
                     source=_label_value(labels, "pitcrew-source::"),
                     related_change_urls=self._related_urls(raw, changes),
                     bugfix=None,
+                    closed_at=raw.get("closed_at") if isinstance(raw.get("closed_at"), str) else None,
+                    updated_at=raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None,
                 )
                 groups[lifecycle].append(issue)
             for change in changes:
@@ -330,6 +332,8 @@ class GitHubForgeWork:
                     source=_label_value(labels, "pitcrew-source::"),
                     related_change_urls=self._related_urls(raw, changes),
                     bugfix=None,
+                    closed_at=raw.get("closed_at") if isinstance(raw.get("closed_at"), str) else None,
+                    updated_at=raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None,
                 ))
             return {"provider": "github", "degraded": False, "error": None, "groups": groups, "changes": changes}
         except ForgeWorkError as error:
@@ -469,6 +473,8 @@ def normalize_issue(
     source: str | None,
     related_change_urls: Sequence[str],
     bugfix: Mapping[str, object] | None,
+    closed_at: str | None = None,
+    updated_at: str | None = None,
 ) -> dict:
     if provider not in PROVIDERS:
         raise ForgeWorkError("provider is unsupported")
@@ -478,7 +484,7 @@ def normalize_issue(
     if state not in {"open", "closed"}:
         raise ForgeWorkError("issue state is unsupported")
     evidence = dict(bugfix or {})
-    return {
+    normalized = {
         "provider": provider,
         "resource_type": "issue",
         "number": number,
@@ -502,6 +508,11 @@ def normalize_issue(
         },
         "agent_action": None,
     }
+    if isinstance(closed_at, str):
+        normalized["closed_at"] = closed_at
+    if isinstance(updated_at, str):
+        normalized["updated_at"] = updated_at
+    return normalized
 
 
 def normalize_change(
