@@ -1219,12 +1219,15 @@ class DashboardService:
                     source="dashboard",
                     target=canonical,
                 )
-                if run["created"]:
+                current = self.run_store.get(run["run_id"])
+                if current is None:
+                    raise DashboardError("ticket run is unavailable")
+                if run["created"] or current["state"] == "queued":
                     self.run_dispatcher.reconcile_and_drain(
                         project=self.project,
                         capacities=self._claim_capacity_map(),
                     )
-                current = self.run_store.get(run["run_id"])
+                    current = self.run_store.get(run["run_id"])
             except RunStoreError as error:
                 raise DashboardError("ticket run is unavailable") from error
             if current is None:

@@ -285,7 +285,7 @@ class DashboardServiceTest(unittest.TestCase):
             run_dispatcher=run_dispatcher,
         )
 
-    def coordinator(self):
+    def coordinator(self, first_drain_failure=None):
         class FakeDispatcher:
             def __init__(self, store):
                 self.store = store
@@ -294,8 +294,18 @@ class DashboardServiceTest(unittest.TestCase):
 
             def reconcile_and_drain(self, *, project, capacities):
                 self.drain_calls.append((project, dict(capacities)))
+                if (
+                    len(self.drain_calls) == 1
+                    and first_drain_failure == "before_claim"
+                ):
+                    raise RunStoreError("drain failed before claim")
                 claimed = self.store.claim_ready(project=project, capacities=capacities)
                 self.spawned_run_ids.extend(run["run_id"] for run in claimed)
+                if (
+                    len(self.drain_calls) == 1
+                    and first_drain_failure == "after_claim"
+                ):
+                    raise RunStoreError("drain failed after claim")
                 return {"spawned": claimed}
 
         store = RunStore(self.runtime / "runs.sqlite3", now=lambda: FIXED_NOW)
@@ -904,6 +914,56 @@ class DashboardServiceTest(unittest.TestCase):
         active = store.list_runs("getbill", active_only=True)
         self.assertEqual(set(targets), {run["target"] for run in active})
         self.assertEqual(2, len(dispatcher.spawned_run_ids))
+
+    def test_ticket_launch_retries_drain_when_existing_run_is_queued(self):
+        store, dispatcher = self.coordinator(
+            first_drain_failure="before_claim",
+        )
+        service = self.service(
+            FakeRunner(),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        issue = dict(gitlab_issues()[0])
+
+        with mock.patch.object(service, "_gitlab_document", return_value=issue):
+            with self.assertRaisesRegex(DashboardError, "ticket run is unavailable"):
+                service.launch_ticket_agent("implementer-run", target)
+            queued = store.list_runs("getbill", active_only=True)[0]
+            retried = service.launch_ticket_agent("implementer-run", target)
+
+        self.assertEqual("queued", queued["state"])
+        self.assertEqual(queued["run_id"], retried["run_id"])
+        self.assertFalse(retried["created"])
+        self.assertEqual("running", retried["state"])
+        self.assertEqual(2, len(dispatcher.drain_calls))
+        self.assertEqual([queued["run_id"]], dispatcher.spawned_run_ids)
+
+    def test_ticket_launch_does_not_redrain_existing_running_run(self):
+        store, dispatcher = self.coordinator(
+            first_drain_failure="after_claim",
+        )
+        service = self.service(
+            FakeRunner(),
+            run_store=store,
+            run_dispatcher=dispatcher,
+        )
+        target = "https://gitlab.com/getbill1/getbill/-/issues/1"
+        issue = dict(gitlab_issues()[0])
+
+        with mock.patch.object(service, "_gitlab_document", return_value=issue):
+            with self.assertRaisesRegex(DashboardError, "ticket run is unavailable"):
+                service.launch_ticket_agent("implementer-run", target)
+            running = store.list_runs("getbill", active_only=True)[0]
+            retried = service.launch_ticket_agent("implementer-run", target)
+
+        self.assertEqual("running", running["state"])
+        self.assertEqual(running["run_id"], retried["run_id"])
+        self.assertFalse(retried["created"])
+        self.assertEqual("running", retried["state"])
+        self.assertEqual(1, len(dispatcher.drain_calls))
+        self.assertEqual([running["run_id"]], dispatcher.spawned_run_ids)
 
     def test_ticket_launch_revalidates_lifecycle(self):
         store, dispatcher = self.coordinator()
